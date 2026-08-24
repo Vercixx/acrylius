@@ -1,0 +1,61 @@
+# The fast loop. Runs on every push, costs nothing, and covers most of the
+# project — including the Swift that talks to the core, which compiles and runs
+# on Linux. Only SwiftUI and Network.framework need macOS.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Tests
+        run: cargo test --workspace
+
+      # The format crate claims no_std. Build it that way or the claim rots.
+      - name: acrylius-proto builds no_std
+        run: cargo build -p acrylius-proto --no-default-features
+
+  swift:
+    runs-on: ubuntu-latest
+    container: swift:6.1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # Two CoreRuntimes pair, connect and ping over an in-memory transport —
+      # the same code the iOS app runs, verified without a Mac.
+      - name: Swift host runtime tests
+        run: ./scripts/swift-test.sh
+
+  daemon:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # Two daemons pair over real TCP, open a session, ping, and survive a
+      # restart.
+      - name: M0 acceptance
+        run: |
+          cargo build --workspace
+          ./scripts/m0-acceptance.sh

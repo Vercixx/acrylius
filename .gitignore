@@ -11,3 +11,6 @@
 
 # Machine-specific: local SOCKS proxy for cargo. Not portable.
 /.cargo/config.toml
+
+# UniFFI output, produced by the build.
+/ios/Generated

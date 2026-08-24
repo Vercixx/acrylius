@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleDisplayName</key>
+    <string>Acrylius</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>UILaunchScreen</key>
+    <dict/>
+
+    <!-- Browsing for _acrylius._tcp goes through the system mDNSResponder, so
+         it needs no entitlement — unlike UDP broadcast, which a free developer
+         account cannot have. Both keys are required or the browse silently
+         finds nothing. -->
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>Acrylius finds your PC on this network. It never leaves your network.</string>
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_acrylius._tcp</string>
+    </array>
+
+    <key>NSFaceIDUsageDescription</key>
+    <string>Face ID confirms it is you before unlocking your PC.</string>
+
+    <!-- Raw NWConnection is not subject to App Transport Security, which
+         governs URLSession and CFNetwork; no ATS exception is needed. -->
+    <key>ITSAppUsesNonExemptEncryption</key>
+    <false/>
+</dict>
+</plist>

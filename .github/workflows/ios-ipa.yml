@@ -1,0 +1,102 @@
+# Builds an unsigned IPA for SideStore to sign on-device with a free Apple ID.
+#
+# On demand and on tags only: macOS runners bill at a 10x multiplier on private
+# repositories. The image is pinned rather than `macos-latest`, so an Xcode bump
+# is a deliberate choice and not a surprise failure.
+name: ios-ipa
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  ipa:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode.app
+          xcodebuild -version
+          swift --version
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build the core for arm64 iOS
+        run: cargo build --release -p acrylius-ffi --target aarch64-apple-ios
+
+      - name: Generate Swift bindings
+        run: |
+          mkdir -p ios/Generated
+          cargo run -q -p acrylius-ffi --bin uniffi-bindgen -- generate \
+            --library target/aarch64-apple-ios/release/libacrylius_ffi.a \
+            --language swift --out-dir ios/Generated
+          cp target/aarch64-apple-ios/release/libacrylius_ffi.a ios/Generated/
+          # Xcode finds a modulemap by name; UniFFI emits `<name>FFI.modulemap`.
+          mv ios/Generated/acrylius_ffiFFI.modulemap ios/Generated/module.modulemap
+          ls -la ios/Generated
+
+      - name: Generate the Xcode project
+        run: |
+          brew install xcodegen
+          cd ios && xcodegen generate
+
+      - name: Build
+        run: |
+          set -o pipefail
+          xcodebuild -project ios/Acrylius.xcodeproj -scheme Acrylius \
+            -configuration Release -sdk iphoneos -derivedDataPath build \
+            ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build 2>&1 | tee raw.log | xcbeautify || {
+              echo "--- first errors ---"
+              grep -nE "error:|no such module|cannot find" raw.log | head -40
+              echo "--- tail ---"
+              tail -200 raw.log
+              exit 1
+            }
+
+      - name: Ad-hoc sign
+        run: |
+          app="$(ls -d build/Build/Products/Release-iphoneos/*.app | head -n1)"
+          # Nested code first, then the bundle. Signing the outside first would
+          # be invalidated by everything signed after it.
+          find "$app" -depth \( -name "*.framework" -o -name "*.dylib" \) \
+            -exec codesign --force --sign - {} \;
+          codesign --force --sign - "$app"
+          codesign -d --entitlements :- "$app" || true
+
+      - name: Verify it is a device build
+        run: |
+          app="$(ls -d build/Build/Products/Release-iphoneos/*.app | head -n1)"
+          bin="$app/$(basename "$app" .app)"
+          lipo -info "$bin"
+          # A simulator slice installs on nothing. Fail loudly rather than
+          # shipping an artifact that cannot be sideloaded.
+          if lipo -info "$bin" | grep -q x86_64; then
+            echo "simulator architecture in a device build"; exit 1
+          fi
+
+      # NOTE: M1 declares no entitlements, so there is nothing to verify yet.
+      # When the first one arrives (an App Group for a widget), it MUST be
+      # embedded in each bundle's Mach-O signature and checked here. AltStore
+      # and SideStore read entitlements out of the code signature via ldid,
+      # never from a file beside the IPA — so an entitlement missing there is
+      # one the installer will never request, silently.
+
+      - name: Package
+        run: |
+          app="$(ls -d build/Build/Products/Release-iphoneos/*.app | head -n1)"
+          mkdir -p Payload && cp -R "$app" Payload/
+          zip -qry acrylius-unsigned.ipa Payload
+          ls -la acrylius-unsigned.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: acrylius-unsigned-ipa
+          path: acrylius-unsigned.ipa
