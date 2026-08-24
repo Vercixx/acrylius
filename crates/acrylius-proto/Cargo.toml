@@ -1,0 +1,21 @@
+[package]
+name = "acrylius-proto"
+description = "The acrylius wire format: envelope, identities, handshake payloads, vectors. no_std, no IO, no crypto state."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+minicbor.workspace = true
+sha2.workspace = true
+hkdf.workspace = true
+thiserror.workspace = true
+
+[features]
+default = ["std"]
+std = ["thiserror/std"]
+
+[lints]
+workspace = true

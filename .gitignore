@@ -1,0 +1,12 @@
+/target
+**/*.rs.bk
+
+# iOS: the project is generated from ios/project.yml, never checked in.
+/ios/*.xcodeproj
+/ios/*.xcworkspace
+/ios/Generated
+/ios/build
+*.xcframework
+
+# Machine-specific: local SOCKS proxy for cargo. Not portable.
+/.cargo/config.toml

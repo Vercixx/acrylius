@@ -1,0 +1,20 @@
+[package]
+name = "acrylius-core"
+description = "The acrylius protocol: a sans-IO state machine. No sockets, no clock, no filesystem."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+acrylius-proto.workspace = true
+minicbor.workspace = true
+snow.workspace = true
+sha2.workspace = true
+hkdf.workspace = true
+thiserror = { workspace = true, features = ["std"] }
+tracing.workspace = true
+
+[lints]
+workspace = true
