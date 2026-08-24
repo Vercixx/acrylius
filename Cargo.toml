@@ -17,6 +17,7 @@ minicbor  = { version = "2.3", features = ["alloc", "derive"] }
 sha2      = { version = "0.10", default-features = false }
 hkdf      = { version = "0.12", default-features = false }
 snow      = "0.10"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
 thiserror = { version = "2", default-features = false }
 tracing   = "0.1"
 

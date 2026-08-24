@@ -11,6 +11,7 @@ repository.workspace = true
 acrylius-proto.workspace = true
 minicbor.workspace = true
 snow.workspace = true
+x25519-dalek.workspace = true
 sha2.workspace = true
 hkdf.workspace = true
 thiserror = { workspace = true, features = ["std"] }
