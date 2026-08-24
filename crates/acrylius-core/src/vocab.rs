@@ -95,6 +95,16 @@ pub enum LocalCommand {
         accept: bool,
     },
     ClosePairingWindow,
+    /// Tell the core where a peer can be reached, bypassing discovery.
+    ///
+    /// Discovery is only ever a *hint*, so a hint supplied by a human who knows
+    /// the address is worth exactly as much — and it is what makes the daemon
+    /// usable on a network where mDNS is filtered.
+    SetPeerAddress {
+        peer: DeviceId,
+        transport: TransportId,
+        addr: String,
+    },
     Connect {
         peer: DeviceId,
     },

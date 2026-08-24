@@ -25,6 +25,9 @@ use crate::transport::{Transport, TransportCmd};
 /// socket, a CLI, a test).
 pub type UiSink = mpsc::UnboundedSender<UiEvent>;
 
+/// A read-only look at the core after each step. See [`Runtime::observe`].
+pub type Observer = Box<dyn Fn(&Core) + Send>;
+
 pub struct Runtime {
     core: Core,
     events_tx: mpsc::UnboundedSender<Event>,
@@ -33,6 +36,9 @@ pub struct Runtime {
     effector: Arc<dyn Effector>,
     store: Box<dyn Store>,
     ui: Option<UiSink>,
+    /// Called with the core after every step, so a host can keep a live
+    /// snapshot for its own queries without ever holding the core itself.
+    observer: Option<Observer>,
     /// Monotonic zero. The core is handed milliseconds since this instant, so a
     /// wall-clock change cannot move a deadline — which is what makes the
     /// pairing window's expiry honest.
@@ -50,6 +56,7 @@ impl Runtime {
             effector,
             store,
             ui: None,
+            observer: None,
             started: Instant::now(),
         }
     }
@@ -62,6 +69,12 @@ impl Runtime {
 
     pub fn set_ui(&mut self, ui: UiSink) {
         self.ui = Some(ui);
+    }
+
+    /// Observe the core after each step. The closure gets `&Core` only — there
+    /// is deliberately no way to reach `handle()` from here.
+    pub fn observe(&mut self, f: impl Fn(&Core) + Send + 'static) {
+        self.observer = Some(Box::new(f));
     }
 
     pub fn add_transport(&mut self, t: Arc<dyn Transport>) {
@@ -135,6 +148,9 @@ impl Runtime {
             deadline = out.next_deadline_ms;
             for a in out.actions {
                 self.apply(a).await;
+            }
+            if let Some(f) = &self.observer {
+                f(&self.core);
             }
         }
     }

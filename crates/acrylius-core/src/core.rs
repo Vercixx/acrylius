@@ -936,6 +936,20 @@ impl Core {
                     self.links.remove(&a.link);
                 }
             }
+            LocalCommand::SetPeerAddress {
+                peer,
+                transport,
+                addr,
+            } => {
+                if self.peers.contains_key(&peer) {
+                    self.addrs.insert(peer, (transport, addr));
+                } else {
+                    out.ui(UiEvent::Error {
+                        code: ErrorCode::NotPaired,
+                        detail: format!("{peer} is not a paired device"),
+                    });
+                }
+            }
             LocalCommand::Connect { peer } => {
                 if self.peer_state(&peer) != PeerState::Unreachable {
                     return;
