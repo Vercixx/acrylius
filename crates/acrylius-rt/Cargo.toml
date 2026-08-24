@@ -1,0 +1,22 @@
+[package]
+name = "acrylius-rt"
+description = "Host runtime for Rust hosts: transports, the action pump, discovery. Not used by iOS."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+acrylius-core.workspace = true
+acrylius-proto.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+mdns-sd.workspace = true
+minicbor.workspace = true
+thiserror = { workspace = true, features = ["std"] }
+tokio.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true
