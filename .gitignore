@@ -1,4 +1,5 @@
 /target
+/target/swift
 **/*.rs.bk
 
 # iOS: the project is generated from ios/project.yml, never checked in.

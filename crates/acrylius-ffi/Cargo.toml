@@ -1,0 +1,28 @@
+[package]
+name = "acrylius-ffi"
+description = "The UniFFI facade. Thin: type mapping and nothing else. The only crate iOS sees."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "acrylius_ffi"
+# staticlib is what the iOS app links. cdylib keeps `uniffi-bindgen` and any
+# desktop consumer working. rlib lets the workspace's own tests use it.
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+
+[dependencies]
+acrylius-core.workspace = true
+acrylius-proto.workspace = true
+minicbor.workspace = true
+thiserror = { workspace = true, features = ["std"] }
+uniffi = { workspace = true, features = ["cli"] }
+
+[lints]
+workspace = true
