@@ -103,7 +103,11 @@ mod tests {
             let data: Vec<u8> = (0..len).map(|i| (i * 7 + 13) as u8).collect();
             let enc = encode(&data);
             assert!(!enc.contains('='), "encoder emitted padding at len {len}");
-            assert_eq!(decode(&enc).unwrap(), data, "round trip failed at len {len}");
+            assert_eq!(
+                decode(&enc).unwrap(),
+                data,
+                "round trip failed at len {len}"
+            );
         }
     }
 
@@ -143,7 +147,10 @@ mod tests {
         assert!(decode_exact::<32>(&enc).is_ok());
         assert_eq!(
             decode_exact::<16>(&enc),
-            Err(B64Error::WrongSize { expected: 16, actual: 32 })
+            Err(B64Error::WrongSize {
+                expected: 16,
+                actual: 32
+            })
         );
     }
 

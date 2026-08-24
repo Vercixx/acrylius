@@ -55,7 +55,10 @@ macro_rules! str_id {
             pub fn parse(s: &str) -> Result<Self, b64::B64Error> {
                 let n = b64::decode(s)?.len();
                 if n != Self::BYTES {
-                    return Err(b64::B64Error::WrongSize { expected: Self::BYTES, actual: n });
+                    return Err(b64::B64Error::WrongSize {
+                        expected: Self::BYTES,
+                        actual: n,
+                    });
                 }
                 Ok(Self(alloc::string::ToString::to_string(s)))
             }
@@ -142,7 +145,10 @@ mod tests {
         // A device id is 16 bytes; parsing it as a fingerprint must fail loudly.
         assert!(matches!(
             Fingerprint::parse(did.as_str()),
-            Err(b64::B64Error::WrongSize { expected: 32, actual: 16 })
+            Err(b64::B64Error::WrongSize {
+                expected: 32,
+                actual: 16
+            })
         ));
     }
 

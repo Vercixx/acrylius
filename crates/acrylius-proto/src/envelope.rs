@@ -60,13 +60,25 @@ impl<'a> Envelope<'a> {
     /// A plain message with no reply correlation.
     #[must_use]
     pub fn new(id: u32, cap: &'a str, ty: &'a str, body: &'a [u8]) -> Self {
-        Self { v: crate::WIRE_VERSION, id, re: None, cap, ty, body, flags: 0, bulk: None }
+        Self {
+            v: crate::WIRE_VERSION,
+            id,
+            re: None,
+            cap,
+            ty,
+            body,
+            flags: 0,
+            bulk: None,
+        }
     }
 
     /// A reply to `to`, reusing its capability.
     #[must_use]
     pub fn reply_to(id: u32, to: &Envelope<'a>, ty: &'a str, body: &'a [u8]) -> Self {
-        Self { re: Some(to.id), ..Self::new(id, to.cap, ty, body) }
+        Self {
+            re: Some(to.id),
+            ..Self::new(id, to.cap, ty, body)
+        }
     }
 
     pub fn encode(&self) -> Result<Vec<u8>, minicbor::encode::Error<core::convert::Infallible>> {
@@ -160,19 +172,35 @@ mod tests {
         // this is the whole reason for numeric indices.
         #[derive(minicbor::Encode)]
         struct Future<'a> {
-            #[n(0)] v: u8,
-            #[n(1)] id: u32,
-            #[n(2)] re: Option<u32>,
-            #[b(3)] cap: &'a str,
-            #[b(4)] ty: &'a str,
-            #[cbor(b(5), with = "minicbor::bytes")] body: &'a [u8],
-            #[n(6)] flags: u8,
-            #[n(7)] bulk: Option<u64>,
-            #[n(8)] invented_later: u64,
+            #[n(0)]
+            v: u8,
+            #[n(1)]
+            id: u32,
+            #[n(2)]
+            re: Option<u32>,
+            #[b(3)]
+            cap: &'a str,
+            #[b(4)]
+            ty: &'a str,
+            #[cbor(b(5), with = "minicbor::bytes")]
+            body: &'a [u8],
+            #[n(6)]
+            flags: u8,
+            #[n(7)]
+            bulk: Option<u64>,
+            #[n(8)]
+            invented_later: u64,
         }
         let f = Future {
-            v: 1, id: 5, re: None, cap: "c/1", ty: "t",
-            body: b"b", flags: 0, bulk: None, invented_later: 99,
+            v: 1,
+            id: 5,
+            re: None,
+            cap: "c/1",
+            ty: "t",
+            body: b"b",
+            flags: 0,
+            bulk: None,
+            invented_later: 99,
         };
         let bytes = minicbor::to_vec(&f).unwrap();
         let e = Envelope::decode(&bytes).expect("old reader must skip unknown fields");
@@ -183,8 +211,15 @@ mod tests {
     fn error_codes_are_unique_strings() {
         use super::ErrorCode::*;
         let all = [
-            CapNotNegotiated, UnknownType, BadBody, NotAllowed,
-            EffectFailed, NotPaired, TooLarge, Timeout, Internal,
+            CapNotNegotiated,
+            UnknownType,
+            BadBody,
+            NotAllowed,
+            EffectFailed,
+            NotPaired,
+            TooLarge,
+            Timeout,
+            Internal,
         ];
         for (i, a) in all.iter().enumerate() {
             for b in &all[i + 1..] {

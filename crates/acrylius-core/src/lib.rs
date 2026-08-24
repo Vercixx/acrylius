@@ -13,5 +13,11 @@
 
 pub use acrylius_proto as proto;
 
+pub mod config;
+pub mod core;
 pub mod link;
 pub mod noise;
+pub mod peer;
+pub mod plugin;
+pub mod plugins;
+pub mod vocab;

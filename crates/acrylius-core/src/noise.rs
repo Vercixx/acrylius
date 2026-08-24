@@ -7,13 +7,24 @@
 //!
 //! ## Two patterns, and why each
 //!
-//! **Pairing is `XXpsk3`.** Plain `XX` would authenticate nothing until a human
+//! **Pairing is `XXpsk0`.** Plain `XX` would authenticate nothing until a human
 //! compared a short string carefully, and humans do not. We already have an
 //! out-of-band channel — the code `acryliusctl pair` prints — so the code is
-//! mixed in as a pre-shared key at position 3. A wrong code is not a check that
-//! fails; message 3 simply does not decrypt. `XX` also means neither side needs
-//! to know the other's static key in advance, which is exactly the situation on
-//! first contact.
+//! mixed in as a pre-shared key. `XX` also means neither side needs to know the
+//! other's static key in advance, which is exactly the situation on first
+//! contact.
+//!
+//! The PSK goes at position **0**, not 3, and the difference is not cosmetic.
+//! `psk3` mixes the key into message 3, which the *initiator* writes — so it
+//! proves to the responder that the initiator knew the code, and proves nothing
+//! in the other direction. An initiator talking to the wrong machine would
+//! complete its side, display a short authentication string, and sit waiting for
+//! a human to approve a peer that had never demonstrated knowing anything.
+//! `psk0` mixes the code into the chaining key before the first message, so
+//! every encrypted payload in either direction depends on it: a wrong code means
+//! message 1 does not decrypt, no reply is ever sent, and no code is displayed
+//! anywhere. The loopback suite pins this as
+//! `a_wrong_pairing_code_does_not_pair`.
 //!
 //! **Sessions are `IKpsk2`.** The initiator already knows the responder's static
 //! key from pairing, so the session is up in one round trip — which matters
@@ -36,12 +47,12 @@ use crate::link::LinkAttrs;
 /// Noise's own hard limit on a single message.
 pub const MAX_NOISE_MESSAGE: usize = 65535;
 
-const PAIR_PARAMS: &str = "Noise_XXpsk3_25519_ChaChaPoly_SHA256";
+const PAIR_PARAMS: &str = "Noise_XXpsk0_25519_ChaChaPoly_SHA256";
 const SESSION_PARAMS: &str = "Noise_IKpsk2_25519_ChaChaPoly_SHA256";
 
 /// PSK positions, from the pattern names above. Getting these wrong is a silent
 /// interop failure rather than a compile error, so they are named once here.
-const PAIR_PSK_INDEX: u8 = 3;
+const PAIR_PSK_INDEX: u8 = 0;
 const SESSION_PSK_INDEX: u8 = 2;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -111,10 +122,19 @@ impl Identity {
     /// Generate a fresh identity. Takes the pattern only to reuse `snow`'s
     /// resolver; the key is not pattern-specific.
     pub fn generate() -> Result<Self, NoiseError> {
-        let kp = Builder::new(PAIR_PARAMS.parse().expect("static pattern parses")).generate_keypair()?;
+        let kp =
+            Builder::new(PAIR_PARAMS.parse().expect("static pattern parses")).generate_keypair()?;
         Ok(Self {
-            private: kp.private.as_slice().try_into().expect("x25519 private key is 32 bytes"),
-            public: kp.public.as_slice().try_into().expect("x25519 public key is 32 bytes"),
+            private: kp
+                .private
+                .as_slice()
+                .try_into()
+                .expect("x25519 private key is 32 bytes"),
+            public: kp
+                .public
+                .as_slice()
+                .try_into()
+                .expect("x25519 public key is 32 bytes"),
         })
     }
 
@@ -128,7 +148,10 @@ impl Identity {
     pub fn from_private(private: [u8; 32]) -> Self {
         let secret = x25519_dalek::StaticSecret::from(private);
         let public = x25519_dalek::PublicKey::from(&secret);
-        Self { private, public: public.to_bytes() }
+        Self {
+            private,
+            public: public.to_bytes(),
+        }
     }
 
     #[must_use]
@@ -155,7 +178,9 @@ impl Identity {
 impl core::fmt::Debug for Identity {
     /// Never print the private half, not even in a panic message.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("Identity").field("fingerprint", &self.fingerprint()).finish_non_exhaustive()
+        f.debug_struct("Identity")
+            .field("fingerprint", &self.fingerprint())
+            .finish_non_exhaustive()
     }
 }
 
@@ -166,7 +191,8 @@ pub struct Handshake {
 }
 
 impl Handshake {
-    /// Start a pairing handshake. `psk` comes from the pairing code.
+    /// Start a pairing handshake. `psk` comes from the pairing code, and with
+    /// `psk0` it is required before either side can read anything at all.
     pub fn pair_initiator(id: &Identity, psk: &[u8; 32]) -> Result<Self, NoiseError> {
         Self::build(Mode::Pair, id, psk, None, true)
     }
@@ -188,6 +214,27 @@ impl Handshake {
         Self::build(Mode::Session, id, psk, None, false)
     }
 
+    /// Learn who is calling, before we know which PSK to answer with.
+    ///
+    /// `IKpsk2` puts the responder in an awkward spot: `snow` wants the PSK at
+    /// build time, but the PSK is per-peer and the peer's identity arrives
+    /// *inside* message 1. The way out is that `psk2` is mixed at message **2** —
+    /// message 1's tokens are `e, es, s, ss` and its payload is encrypted under a
+    /// chaining key the PSK has not touched yet. So a throwaway handshake built
+    /// with a zero PSK reads message 1 to exactly the same result as the real one
+    /// would.
+    ///
+    /// The caller uses the returned static key to find the peer, then builds a
+    /// real responder with that peer's PSK and replays the same message 1 into
+    /// it. Nothing is leaked and nothing is trusted: the identity learned here is
+    /// only used to *choose* a PSK, and if the choice is wrong, message 2 fails
+    /// on the initiator exactly as it should.
+    pub fn session_identify(id: &Identity, msg1: &[u8]) -> Result<[u8; 32], NoiseError> {
+        let mut probe = Self::build(Mode::Session, id, &[0u8; 32], None, false)?;
+        probe.read(msg1)?;
+        probe.peer_static().ok_or(NoiseError::NotComplete)
+    }
+
     fn build(
         mode: Mode,
         id: &Identity,
@@ -203,7 +250,11 @@ impl Handshake {
         if let Some(rs) = peer_static {
             b = b.remote_public_key(rs)?;
         }
-        let state = if initiator { b.build_initiator()? } else { b.build_responder()? };
+        let state = if initiator {
+            b.build_initiator()?
+        } else {
+            b.build_responder()?
+        };
         Ok(Self { state, mode })
     }
 
@@ -279,7 +330,10 @@ impl Handshake {
             // path itself lands with the first such transport.
             return Err(NoiseError::UnsupportedLink);
         }
-        Ok(Session { state: self.state.into_transport_mode()?, sent: 0 })
+        Ok(Session {
+            state: self.state.into_transport_mode()?,
+            sent: 0,
+        })
     }
 }
 
@@ -305,7 +359,9 @@ impl Session {
 
     pub fn decrypt(&mut self, ciphertext: &[u8]) -> Result<Vec<u8>, NoiseError> {
         if ciphertext.len() > MAX_NOISE_MESSAGE {
-            return Err(NoiseError::TooLarge { got: ciphertext.len() });
+            return Err(NoiseError::TooLarge {
+                got: ciphertext.len(),
+            });
         }
         let mut buf = vec![0u8; MAX_NOISE_MESSAGE];
         let n = self.state.read_message(ciphertext, &mut buf)?;
@@ -326,7 +382,9 @@ impl Session {
 
 impl core::fmt::Debug for Session {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("Session").field("sent", &self.sent).finish_non_exhaustive()
+        f.debug_struct("Session")
+            .field("sent", &self.sent)
+            .finish_non_exhaustive()
     }
 }
 
@@ -385,7 +443,10 @@ mod tests {
         let id = Identity::generate().unwrap();
         let rendered = format!("{id:?}");
         let secret = crate::proto::b64::encode(id.private());
-        assert!(!rendered.contains(&secret), "Debug must not print the private key");
+        assert!(
+            !rendered.contains(&secret),
+            "Debug must not print the private key"
+        );
     }
 
     #[test]
@@ -414,12 +475,25 @@ mod tests {
     }
 
     #[test]
-    fn a_wrong_pairing_code_fails_to_decrypt() {
+    fn a_wrong_pairing_code_fails_at_the_very_first_message() {
         let (a, b) = (Identity::generate().unwrap(), Identity::generate().unwrap());
         let right = pairing::psk(&pairing::normalize("ABCD1234").unwrap());
         let wrong = pairing::psk(&pairing::normalize("ABCD1235").unwrap());
-        // Not "a check returns false" — the handshake cannot complete at all.
+        // Not "a check returns false" — the handshake cannot start.
         assert!(pair(&a, &b, &right, &wrong).is_err());
+
+        // Specifically: the responder cannot even read message 1, so it never
+        // replies and the initiator never reaches a state where it would show a
+        // code. With psk3 this would have failed three messages later, after the
+        // initiator had already completed and displayed a SAS.
+        let mut i = Handshake::pair_initiator(&a, &right).unwrap();
+        let mut r = Handshake::pair_responder(&b, &wrong).unwrap();
+        let m1 = i.write(b"").unwrap();
+        assert!(
+            r.read(&m1).is_err(),
+            "message 1 must already depend on the code"
+        );
+        assert!(!i.is_complete());
     }
 
     #[test]
@@ -433,8 +507,16 @@ mod tests {
 
         let m1 = i.write(b"").unwrap();
         r.read(&m1).unwrap();
-        assert_eq!(r.peer_static(), None, "responder must not know the initiator yet");
-        assert_eq!(i.peer_static(), None, "initiator must not know the responder yet");
+        assert_eq!(
+            r.peer_static(),
+            None,
+            "responder must not know the initiator yet"
+        );
+        assert_eq!(
+            i.peer_static(),
+            None,
+            "initiator must not know the responder yet"
+        );
 
         let m2 = r.write(b"").unwrap();
         i.read(&m2).unwrap();
@@ -468,13 +550,19 @@ mod tests {
     #[test]
     fn a_session_needs_the_right_peer_static_key() {
         // Dialling the right address but the wrong machine must not connect.
-        let (a, b, impostor) =
-            (Identity::generate().unwrap(), Identity::generate().unwrap(), Identity::generate().unwrap());
+        let (a, b, impostor) = (
+            Identity::generate().unwrap(),
+            Identity::generate().unwrap(),
+            Identity::generate().unwrap(),
+        );
         let psk = [7u8; 32];
         let mut i = Handshake::session_initiator(&a, &psk, impostor.public()).unwrap();
         let mut r = Handshake::session_responder(&b, &psk).unwrap();
         let m1 = i.write(b"hello").unwrap();
-        assert!(r.read(&m1).is_err(), "b must not accept a handshake aimed at another key");
+        assert!(
+            r.read(&m1).is_err(),
+            "b must not accept a handshake aimed at another key"
+        );
     }
 
     #[test]
@@ -487,7 +575,10 @@ mod tests {
         // where an impostor is caught.
         r.read(&m1).unwrap();
         let m2 = r.write(b"hello back").unwrap();
-        assert!(i.read(&m2).is_err(), "a wrong session PSK must not complete");
+        assert!(
+            i.read(&m2).is_err(),
+            "a wrong session PSK must not complete"
+        );
     }
 
     #[test]
@@ -551,7 +642,10 @@ mod tests {
 
         let ct = si.encrypt(b"unlock").unwrap();
         assert_eq!(sr.decrypt(&ct).unwrap(), b"unlock");
-        assert!(sr.decrypt(&ct).is_err(), "the same ciphertext must not decrypt twice");
+        assert!(
+            sr.decrypt(&ct).is_err(),
+            "the same ciphertext must not decrypt twice"
+        );
     }
 
     #[test]
@@ -574,7 +668,10 @@ mod tests {
     fn an_incomplete_handshake_cannot_become_a_session() {
         let a = Identity::generate().unwrap();
         let hs = Handshake::pair_initiator(&a, &[0u8; 32]).unwrap();
-        assert!(matches!(hs.into_session(&loopback()), Err(NoiseError::NotComplete)));
+        assert!(matches!(
+            hs.into_session(&loopback()),
+            Err(NoiseError::NotComplete)
+        ));
     }
 
     #[test]
@@ -583,7 +680,10 @@ mod tests {
         let (i, _r) = session(&a, &b, &[7u8; 32]).unwrap();
         let mut attrs = loopback();
         attrs.ordered = false;
-        assert!(matches!(i.into_session(&attrs), Err(NoiseError::UnsupportedLink)));
+        assert!(matches!(
+            i.into_session(&attrs),
+            Err(NoiseError::UnsupportedLink)
+        ));
     }
 
     #[test]
@@ -593,5 +693,50 @@ mod tests {
         let mut s = i.into_session(&loopback()).unwrap();
         let huge = vec![0u8; MAX_NOISE_MESSAGE + 1];
         assert!(matches!(s.decrypt(&huge), Err(NoiseError::TooLarge { .. })));
+    }
+}
+
+#[cfg(test)]
+mod identify_tests {
+    use super::*;
+
+    #[test]
+    fn identify_learns_the_caller_and_the_real_handshake_still_completes() {
+        let (a, b) = (Identity::generate().unwrap(), Identity::generate().unwrap());
+        let psk = [9u8; 32];
+
+        let mut i = Handshake::session_initiator(&a, &psk, b.public()).unwrap();
+        let m1 = i.write(b"hello").unwrap();
+
+        // The responder has no idea who this is yet.
+        let who = Handshake::session_identify(&b, &m1).unwrap();
+        assert_eq!(who, *a.public());
+
+        // Having chosen a PSK from that, replay the very same message 1.
+        let mut r = Handshake::session_responder(&b, &psk).unwrap();
+        assert_eq!(r.read(&m1).unwrap(), b"hello");
+        let m2 = r.write(b"hi").unwrap();
+        i.read(&m2).unwrap();
+        assert!(i.is_complete() && r.is_complete());
+        assert_eq!(i.handshake_hash().unwrap(), r.handshake_hash().unwrap());
+    }
+
+    #[test]
+    fn identifying_does_not_let_a_wrong_psk_slip_through() {
+        // The identity learned by probing chooses a PSK; it must not also
+        // *authorise* anything. Choosing the wrong one still has to fail.
+        let (a, b) = (Identity::generate().unwrap(), Identity::generate().unwrap());
+        let mut i = Handshake::session_initiator(&a, &[9u8; 32], b.public()).unwrap();
+        let m1 = i.write(b"hello").unwrap();
+
+        assert_eq!(Handshake::session_identify(&b, &m1).unwrap(), *a.public());
+
+        let mut r = Handshake::session_responder(&b, &[8u8; 32]).unwrap();
+        r.read(&m1).unwrap();
+        let m2 = r.write(b"hi").unwrap();
+        assert!(
+            i.read(&m2).is_err(),
+            "a mischosen PSK must still fail at message 2"
+        );
     }
 }

@@ -131,7 +131,11 @@ mod tests {
     #[test]
     fn alphabet_omits_the_confusable_four() {
         for c in *b"ILOU" {
-            assert!(!ALPHABET.contains(&c), "{} must not be in the alphabet", c as char);
+            assert!(
+                !ALPHABET.contains(&c),
+                "{} must not be in the alphabet",
+                c as char
+            );
         }
         assert_eq!(ALPHABET.len(), 32);
     }
@@ -148,7 +152,11 @@ mod tests {
     fn normalize_folds_confusables_onto_one_spelling() {
         let canonical = normalize("1010VVVV").unwrap();
         for spelling in ["IOIOUUUU", "loLoUuUu", "i0-l0 uuuu", "I0I0UUUU"] {
-            assert_eq!(normalize(spelling).unwrap(), canonical, "{spelling} should fold");
+            assert_eq!(
+                normalize(spelling).unwrap(),
+                canonical,
+                "{spelling} should fold"
+            );
         }
     }
 
@@ -170,13 +178,20 @@ mod tests {
 
     #[test]
     fn different_codes_derive_different_keys() {
-        assert_ne!(psk(&normalize("00000000").unwrap()), psk(&normalize("00000001").unwrap()));
+        assert_ne!(
+            psk(&normalize("00000000").unwrap()),
+            psk(&normalize("00000001").unwrap())
+        );
     }
 
     #[test]
     fn sas_is_six_digits_grouped() {
         let s = sas(b"any handshake hash at all");
-        assert_eq!(s.len(), SAS_DIGITS as usize + 1, "six digits plus one space");
+        assert_eq!(
+            s.len(),
+            SAS_DIGITS as usize + 1,
+            "six digits plus one space"
+        );
         assert_eq!(s.chars().nth(3), Some(' '));
         assert!(s.chars().filter(|c| *c != ' ').all(|c| c.is_ascii_digit()));
     }
@@ -203,7 +218,9 @@ mod tests {
         let hh = b"the same handshake hash";
         let sk = session_psk(hh);
         let mut sas_raw = [0u8; 4];
-        Hkdf::<Sha256>::new(None, hh).expand(SAS_INFO, &mut sas_raw).unwrap();
+        Hkdf::<Sha256>::new(None, hh)
+            .expand(SAS_INFO, &mut sas_raw)
+            .unwrap();
         assert_ne!(&sk[..4], &sas_raw[..]);
     }
 }

@@ -85,7 +85,10 @@ impl Hello {
         }
         // Strictly greater: replaying the *same* opener must fail, not tie.
         if self.ts_ms <= seen.0 {
-            return Err(FreshnessError::Replay { got: self.ts_ms, seen: seen.0 });
+            return Err(FreshnessError::Replay {
+                got: self.ts_ms,
+                seen: seen.0,
+            });
         }
         Ok(GreatestSeen(self.ts_ms))
     }
@@ -154,7 +157,10 @@ mod tests {
         // The exact bytes an observer recorded, sent again a moment later.
         assert_eq!(
             h.check_freshness(now + 500, seen),
-            Err(FreshnessError::Replay { got: now, seen: now })
+            Err(FreshnessError::Replay {
+                got: now,
+                seen: now
+            })
         );
     }
 
