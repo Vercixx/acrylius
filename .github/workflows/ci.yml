@@ -37,15 +37,16 @@ jobs:
     runs-on: ubuntu-latest
     container: swift:6.1
     steps:
-      # The Swift image is a lean Ubuntu that ships no curl, and
-      # dtolnay/rust-toolchain fetches rustup with curl. Install it before
-      # anything reaches for it. git and ca-certificates are here for the same
-      # reason — the image cannot be assumed to carry a full build environment
-      # just because it carries a compiler.
+      # The Swift image carries a Swift toolchain and very little else. curl,
+      # because dtolnay/rust-toolchain fetches rustup with it. build-essential,
+      # because rustc drives linking through `cc`, and clang being present is
+      # not the same as `cc` existing — without it every build script fails
+      # with "linker `cc` not found".
       - name: Prerequisites the Swift image does not ship
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends curl ca-certificates git
+          apt-get install -y --no-install-recommends \
+            curl ca-certificates git build-essential
 
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

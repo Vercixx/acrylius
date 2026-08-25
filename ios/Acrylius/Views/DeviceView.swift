@@ -40,7 +40,7 @@ struct DeviceView: View {
             }
 
             if features.canWake, !peer.reachable {
-                Section("Power") {
+                Section {
                     Button("Wake up") {
                         Task {
                             busy = true
@@ -50,6 +50,8 @@ struct DeviceView: View {
                         }
                     }
                     .disabled(busy)
+                } header: {
+                    Text("Power")
                 } footer: {
                     Text("Aims at the last known address first. Your router needs a "
                          + "reservation and a static ARP entry for a sleeping machine.")
