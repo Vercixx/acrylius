@@ -21,7 +21,8 @@ final class Loopback: Transport, @unchecked Sendable {
     private var links: [UInt64: UInt64] = [:]
 
     private static let counter = NSLock()
-    private static var next: UInt64 = 0
+    // Guarded by `counter` on every access, which the compiler cannot see.
+    nonisolated(unsafe) private static var next: UInt64 = 0
     nonisolated static func freshPair() -> (UInt64, UInt64) {
         counter.lock(); defer { counter.unlock() }
         next += 2
@@ -107,6 +108,10 @@ final class Recorder: UiSink, @unchecked Sendable {
 // MARK: - harness
 
 var failures = 0
+
+// Top-level code is main-actor isolated, so the helpers that touch `failures`
+// must be too — a global function would be nonisolated and could not.
+@MainActor
 func check(_ ok: Bool, _ what: String) {
     if ok { print("  ok   \(what)") } else { print("  FAIL \(what)"); failures += 1 }
 }

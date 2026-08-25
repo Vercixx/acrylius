@@ -28,7 +28,28 @@ mkdir -p ios/Generated && touch ios/Generated/acrylius_ffi.swift
 "$PWD/$BIN" generate --spec ios/project.yml --project ios
 echo
 echo "sources picked up:"
-grep -oE '[A-Za-z_]+\.swift' ios/Acrylius.xcodeproj/project.pbxproj | sort -u | sed 's/^/  /'
+# `sourcecode.swift` is a lastKnownFileType attribute, not a file.
+grep -oE '[A-Za-z_]+\.swift' ios/Acrylius.xcodeproj/project.pbxproj \
+    | grep -v '^sourcecode\.swift$' | sort -u | sed 's/^/  /'
+
+# CI builds with `xcodebuild -scheme Acrylius`, and XcodeGen emits no scheme
+# unless the manifest asks for one. Without this check that is a macOS-only
+# failure reading "does not contain a scheme named Acrylius", which sounds like
+# a broken project rather than a missing declaration.
+echo
+echo "shared schemes:"
+schemes=$(find ios/Acrylius.xcodeproj -name '*.xcscheme' -exec basename {} .xcscheme \; | sort)
+if [ -z "$schemes" ]; then
+    echo "  none — xcodebuild -scheme will fail"
+    rm -rf ios/Acrylius.xcodeproj
+    exit 1
+fi
+echo "$schemes" | sed 's/^/  /'
+echo "$schemes" | grep -qx Acrylius || {
+    echo "  no scheme named Acrylius, which is what CI builds"
+    rm -rf ios/Acrylius.xcodeproj
+    exit 1
+}
 
 rm -rf ios/Acrylius.xcodeproj
 echo

@@ -57,3 +57,18 @@ targets:
           - $(inherited)
           - -lacrylius_ffi
         TARGETED_DEVICE_FAMILY: "1,2"
+
+# XcodeGen emits no scheme unless asked, and `xcodebuild -scheme` then fails
+# with "does not contain a scheme named …" — which reads like a project
+# problem rather than a missing declaration. Declaring it here also means the
+# scheme is *shared*, so CI sees it; an Xcode-created one lives in xcuserdata
+# and would not be checked in.
+schemes:
+  Acrylius:
+    build:
+      targets:
+        Acrylius: all
+    run:
+      config: Debug
+    archive:
+      config: Release

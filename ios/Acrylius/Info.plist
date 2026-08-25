@@ -2,6 +2,20 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+    <!-- Supplying INFOPLIST_FILE means Xcode generates nothing, so every key a
+         bundle needs has to be here. Omitting CFBundleIdentifier in particular
+         produces a bundle that fails to build or refuses to install, with a
+         message that does not obviously point back at this file. -->
+    <key>CFBundleIdentifier</key>
+    <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+    <key>CFBundleExecutable</key>
+    <string>$(EXECUTABLE_NAME)</string>
+    <key>CFBundleName</key>
+    <string>$(PRODUCT_NAME)</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
     <key>CFBundleDisplayName</key>
@@ -10,8 +24,23 @@
     <string>0.1.0</string>
     <key>CFBundleVersion</key>
     <string>1</string>
+
+    <key>LSRequiresIPhoneOS</key>
+    <true/>
     <key>UILaunchScreen</key>
     <dict/>
+    <key>UIApplicationSupportsIndirectInputEvents</key>
+    <true/>
+    <key>UISupportedInterfaceOrientations</key>
+    <array>
+        <string>UIInterfaceOrientationPortrait</string>
+        <string>UIInterfaceOrientationLandscapeLeft</string>
+        <string>UIInterfaceOrientationLandscapeRight</string>
+    </array>
+    <key>UIRequiredDeviceCapabilities</key>
+    <array>
+        <string>arm64</string>
+    </array>
 
     <!-- Browsing for _acrylius._tcp goes through the system mDNSResponder, so
          it needs no entitlement — unlike UDP broadcast, which a free developer

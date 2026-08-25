@@ -46,16 +46,27 @@ jobs:
           brew install xcodegen
           cd ios && xcodegen generate
 
+      - name: Show what the project offers
+        run: xcodebuild -project ios/Acrylius.xcodeproj -list
+
       - name: Build
         run: |
           set -o pipefail
+          # xcbeautify only prettifies. Piping through it unconditionally means
+          # that if it is ever missing from the image, `command not found`
+          # becomes the failure and the real compiler output is never shown.
+          if command -v xcbeautify >/dev/null; then
+            pretty=(xcbeautify)
+          else
+            pretty=(cat)
+          fi
           xcodebuild -project ios/Acrylius.xcodeproj -scheme Acrylius \
             -configuration Release -sdk iphoneos -derivedDataPath build \
             ONLY_ACTIVE_ARCH=NO \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
-            build 2>&1 | tee raw.log | xcbeautify || {
-              echo "--- first errors ---"
-              grep -nE "error:|no such module|cannot find" raw.log | head -40
+            build 2>&1 | tee raw.log | "${pretty[@]}" || {
+              echo "--- errors ---"
+              grep -nE "error:|no such module|cannot find|does not contain a scheme" raw.log | head -40
               echo "--- tail ---"
               tail -200 raw.log
               exit 1
