@@ -19,3 +19,6 @@ std = ["thiserror/std"]
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+minicbor.workspace = true
