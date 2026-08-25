@@ -31,9 +31,27 @@
     <dict/>
     <key>UIApplicationSupportsIndirectInputEvents</key>
     <true/>
+    <!-- Orientation is set per device family, using the ~ipad suffix iOS
+         resolves at launch.
+
+         The phone is portrait only. It is a companion you pick up to lock a
+         machine or send a clipboard, and there is nothing here that reads
+         better wide.
+
+         The iPad has to offer all four. An iPad app that does not opt out of
+         multitasking must support every orientation, because it can be resized
+         into a slide-over or split view at any moment; declaring fewer is what
+         produced the "All interface orientations must be supported unless the
+         app requires full screen" warning. The alternative would be
+         UIRequiresFullScreen, which buys nothing and costs multitasking. -->
     <key>UISupportedInterfaceOrientations</key>
     <array>
         <string>UIInterfaceOrientationPortrait</string>
+    </array>
+    <key>UISupportedInterfaceOrientations~ipad</key>
+    <array>
+        <string>UIInterfaceOrientationPortrait</string>
+        <string>UIInterfaceOrientationPortraitUpsideDown</string>
         <string>UIInterfaceOrientationLandscapeLeft</string>
         <string>UIInterfaceOrientationLandscapeRight</string>
     </array>
