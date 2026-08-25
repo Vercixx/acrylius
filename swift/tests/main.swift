@@ -203,6 +203,34 @@ check(!mRec.has { if case .peerReachable = $0 { return true }; return false },
 let bPeersAfter = await bravo.peers()
 check(!bPeersAfter.contains { $0.deviceId == mId }, "bravo did not learn the stranger")
 
+// --- the peer catalogue ------------------------------------------------
+// What a screen shows is driven by what a peer announced, not by the
+// handshake. A capability that may be exchanged is not the same as a
+// feature the peer actually has.
+var catalog = PeerCatalog()
+check(!catalog["someone"].canLock, "an unknown peer offers nothing")
+check(!catalog["someone"].canRunCommands, "and no commands")
+
+let state = FfiSessionState(locked: true, sessionId: "2", kind: "wayland", active: true)
+// Bodies are built through the FFI. Swift does not know the wire format and
+// must not learn it.
+_ = catalog.ingest(.plugin(peer: "p", cap: capSession(), ty: "state",
+                           body: encodeSessionState(state: state)))
+check(catalog["p"].canLock, "a peer that described a session can be locked")
+check(catalog["p"].session?.locked == true, "and it is reported as locked")
+
+let commands = [FfiCommand(id: "screenshot", name: "Screenshot", needsConfirm: false)]
+_ = catalog.ingest(.plugin(peer: "p", cap: capCommand(), ty: "list",
+                           body: encodeCommandList(commands: commands)))
+check(catalog["p"].canRunCommands, "a peer that published a catalogue can run things")
+check(catalog["p"].commands.first?.id == "screenshot", "and the ids come through")
+
+_ = catalog.ingest(.plugin(peer: "p", cap: capClipboard(), ty: "set",
+                           body: encodeClipboard(text: "hello from the pc")))
+check(catalog["p"].clipboard == "hello from the pc", "a clipboard value is kept")
+
+check(!catalog["p"].canWake, "a peer that never offered wake targets cannot be woken")
+
 await alpha.stop(); await bravo.stop(); await mallory.stop()
 
 print(failures == 0 ? "\nall passed" : "\n\(failures) FAILED")

@@ -10,7 +10,12 @@
 # directory genuinely cannot host one. Real installs use $XDG_RUNTIME_DIR.
 set -u
 D=/tmp/acr; BIN="$PWD/target/debug"
+# Wait for a previous run's daemons to actually be gone. pkill returns as
+# soon as the signal is sent, and a daemon that still holds the listening
+# port, or the Wayland selection, makes the next run fail in a way that looks
+# like a flake.
 pkill -f 'target/debug/acryliusd' 2>/dev/null
+for i in $(seq 1 50); do pgrep -f 'target/debug/acryliusd' >/dev/null || break; sleep 0.1; done
 rm -rf $D; mkdir -p $D/a $D/b
 export RUST_LOG=acryliusd=info,acrylius_rt=warn
 

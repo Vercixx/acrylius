@@ -18,7 +18,11 @@ struct DeviceListView: View {
                         )
                     } else {
                         ForEach(model.peers, id: \.deviceId) { peer in
-                            PeerRow(peer: peer)
+                            NavigationLink {
+                                DeviceView(peer: peer)
+                            } label: {
+                                PeerRow(peer: peer)
+                            }
                         }
                     }
                 }
@@ -54,23 +58,31 @@ private struct PeerRow: View {
     let peer: FfiPeer
 
     var body: some View {
-        Button {
-            Task { peer.reachable ? await model.ping(peer) : await model.connect(peer) }
-        } label: {
-            HStack {
-                VStack(alignment: .leading) {
-                    Text(peer.name)
-                    Text(peer.platform).font(.caption).foregroundStyle(.secondary)
-                }
-                Spacer()
-                Circle()
-                    .fill(peer.reachable ? .green : .secondary)
-                    .frame(width: 8, height: 8)
+        HStack {
+            VStack(alignment: .leading) {
+                Text(peer.name)
+                Text(summary).font(.caption).foregroundStyle(.secondary)
             }
+            Spacer()
+            Circle()
+                .fill(peer.reachable ? .green : .secondary)
+                .frame(width: 8, height: 8)
         }
         .swipeActions {
             Button("Forget", role: .destructive) { Task { await model.forget(peer) } }
         }
+    }
+
+    /// What this peer can do, from what it announced.
+    private var summary: String {
+        let features = model.catalog[peer.deviceId]
+        if !peer.reachable {
+            return features.canWake ? "Asleep or away, can be woken" : "Not connected"
+        }
+        var parts: [String] = []
+        if let session = features.session { parts.append(session.locked ? "Locked" : "Unlocked") }
+        if features.canRunCommands { parts.append("\(features.commands.count) commands") }
+        return parts.isEmpty ? peer.platform : parts.joined(separator: " · ")
     }
 }
 

@@ -14,6 +14,9 @@ import SwiftUI
 @MainActor
 final class AppModel {
     var peers: [FfiPeer] = []
+    /// What each peer has announced it can do. A screen shows a button only
+    /// when the peer said it has the thing behind it.
+    var catalog = PeerCatalog()
     var deviceId: String = ""
     var fingerprint: String = ""
 
@@ -70,10 +73,88 @@ final class AppModel {
     }
 
     func ping(_ peer: FfiPeer) async {
-        await runtime?.submit(.pluginCommand(
-            peer: peer.deviceId, cap: "org.acrylius.ping/1", ty: "ping",
-            body: Data("hello".utf8)
-        ))
+        await send(peer, cap: capPing(), ty: "ping", body: Data("hello".utf8))
+    }
+
+    func lock(_ peer: FfiPeer) async {
+        await send(peer, cap: capSession(), ty: "lock", body: Data())
+    }
+
+    /// Unlocking hands over a running session, so it asks for Face ID first.
+    ///
+    /// Locking deliberately does not, and that asymmetry is not an oversight:
+    /// locking costs whoever is at the machine a password, while unlocking
+    /// gives a session away. Do not "fix" this by making them consistent.
+    func unlock(_ peer: FfiPeer) async {
+        guard await confirmIdentity(reason: "Unlock \(peer.name)") else { return }
+        await send(peer, cap: capSession(), ty: "unlock", body: Data())
+    }
+
+    func refreshSession(_ peer: FfiPeer) async {
+        await send(peer, cap: capSession(), ty: "query", body: Data())
+    }
+
+    func run(_ command: FfiCommand, on peer: FfiPeer) async {
+        await send(peer, cap: capCommand(), ty: "run",
+                   body: encodeRunRequest(id: command.id))
+    }
+
+    /// Fetch the peer's clipboard so it can be shown.
+    ///
+    /// The answer is displayed, not written to this device's pasteboard. Taking
+    /// a value the user only asked to look at would be surprising, and it is
+    /// what makes two devices fight over a selection.
+    func fetchClipboard(_ peer: FfiPeer) async {
+        await send(peer, cap: capClipboard(), ty: "get", body: Data())
+    }
+
+    /// Push text to the peer.
+    ///
+    /// The text has to come from a `PasteButton` or a text field, never from
+    /// reading `UIPasteboard` ourselves: since iOS 16 a programmatic read of
+    /// content that came from another app raises a system prompt. `changeCount`
+    /// can be polled without one, so the app can notice a change and offer a
+    /// button, but it cannot sync silently.
+    func pushClipboard(_ text: String, to peer: FfiPeer) async {
+        await send(peer, cap: capClipboard(), ty: "changed", body: Data(text.utf8))
+    }
+
+    /// Wake a sleeping machine.
+    ///
+    /// The phone sends the packet, because a sleeping machine is running
+    /// nothing that could receive a request to wake. Unicast to the last known
+    /// address first: a network interface matches the packet's payload and
+    /// ignores its destination, and iOS cannot broadcast without an entitlement
+    /// a free account cannot get.
+    func wake(_ peer: FfiPeer) async -> Bool {
+        guard let config = catalog[peer.deviceId].wake, let mac = config.macs.first
+        else { return false }
+        guard let packet = try? magicPacket(mac: mac) else { return false }
+        var destinations: [String] = []
+        if !config.lastIpv4.isEmpty { destinations.append(config.lastIpv4) }
+        if !config.broadcast.isEmpty { destinations.append(config.broadcast) }
+        return await MagicPacketSender.send(packet, to: destinations, port: config.port)
+    }
+
+    private func send(_ peer: FfiPeer, cap: String, ty: String, body: Data) async {
+        await runtime?.submit(.pluginCommand(peer: peer.deviceId, cap: cap, ty: ty, body: body))
+    }
+
+    private func confirmIdentity(reason: String) async -> Bool {
+        #if canImport(LocalAuthentication)
+        let context = LAContext()
+        var error: NSError?
+        guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &error) else {
+            // No passcode set. Refusing outright would make the app unusable on
+            // a device its owner chose not to lock, so this proceeds and says so.
+            lastError = "This device has no passcode; unlocking was not confirmed."
+            return true
+        }
+        return (try? await context.evaluatePolicy(.deviceOwnerAuthentication,
+                                                  localizedReason: reason)) ?? false
+        #else
+        return true
+        #endif
     }
 
     func forget(_ peer: FfiPeer) async {
@@ -87,6 +168,7 @@ final class AppModel {
     }
 
     private func on(_ event: FfiUiEvent) {
+        catalog.ingest(event)
         switch event {
         case let .pairingWindowOpen(code, _):
             pairingCode = code
@@ -138,6 +220,9 @@ private final class Sink: UiSink, @unchecked Sendable {
 
 #if canImport(UIKit)
 import UIKit
+#endif
+#if canImport(LocalAuthentication)
+import LocalAuthentication
 #endif
 
 #endif

@@ -19,6 +19,7 @@
 //! breaking the rule safe rather than corrupting, but a host that breaks it will
 //! still deadlock itself, so do not.
 
+pub mod bodies;
 pub mod types;
 
 use std::sync::Mutex;
@@ -29,6 +30,7 @@ use acrylius_core::noise::Identity;
 use acrylius_core::peer::{PeerRecord, PeerState};
 use acrylius_core::plugins::ping;
 
+pub use bodies::*;
 pub use types::*;
 
 uniffi::setup_scaffolding!();
