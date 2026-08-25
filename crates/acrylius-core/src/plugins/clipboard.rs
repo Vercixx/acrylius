@@ -23,7 +23,7 @@ use sha2::{Digest, Sha256};
 use crate::plugin::{Cx, Plugin, PluginError, PluginManifest};
 use crate::proto::envelope::Envelope;
 use crate::proto::ids::DeviceId;
-use crate::vocab::{Effect, EffectKind, EffectResult, EffectToken};
+use crate::vocab::{Effect, EffectKind, EffectResult, EffectToken, UiEvent};
 
 pub const CAP: &str = "org.acrylius.clipboard/1";
 
@@ -143,6 +143,15 @@ impl Plugin for ClipboardPlugin {
                 // Remember before applying. The host will observe this value on
                 // its own clipboard a moment later, and must not send it back.
                 self.last_remote = Some(h);
+                // Surface it as well as applying it. A caller that asked for
+                // the peer's clipboard needs to see what came back, and a user
+                // interface wants to show it.
+                cx.ui(UiEvent::Plugin {
+                    peer: peer.clone(),
+                    cap: CAP.to_string(),
+                    ty: "set".to_string(),
+                    body: env.body.to_vec(),
+                });
                 cx.effect(Effect::ClipboardWrite {
                     mime: msg.mime,
                     data: msg.data,

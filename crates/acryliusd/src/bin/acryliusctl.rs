@@ -56,6 +56,26 @@ enum Cmd {
     },
     /// Round-trip a ping.
     Ping { device: String },
+    /// Ask a paired computer about its desktop session.
+    Session {
+        device: String,
+        /// query, lock, or unlock.
+        #[arg(default_value = "query")]
+        action: String,
+    },
+    /// Read a peer's clipboard, or send it text.
+    Clipboard {
+        device: String,
+        /// Text to push. Omit to read instead.
+        #[arg(long)]
+        push: Option<String>,
+    },
+    /// List what a peer is willing to run.
+    Commands { device: String },
+    /// Run one of a peer's configured commands.
+    Run { device: String, id: String },
+    /// Ask a peer to wake a third machine by MAC.
+    Wake { device: String, mac: String },
 }
 
 #[derive(Serialize)]
@@ -81,6 +101,25 @@ enum Request {
     PairWith {
         addr: String,
         code: String,
+    },
+    Session {
+        device: String,
+        action: String,
+    },
+    Clipboard {
+        device: String,
+        push: Option<String>,
+    },
+    Commands {
+        device: String,
+    },
+    Run {
+        device: String,
+        id: String,
+    },
+    Wake {
+        device: String,
+        mac: String,
     },
 }
 
@@ -148,6 +187,11 @@ async fn main() -> anyhow::Result<()> {
         Cmd::PairWith { addr, code } => (Request::PairWith { addr, code }, true),
         Cmd::Connect { device, addr } => (Request::Connect { device, addr }, false),
         Cmd::Ping { device } => (Request::Ping { device }, false),
+        Cmd::Session { device, action } => (Request::Session { device, action }, false),
+        Cmd::Clipboard { device, push } => (Request::Clipboard { device, push }, false),
+        Cmd::Commands { device } => (Request::Commands { device }, false),
+        Cmd::Run { device, id } => (Request::Run { device, id }, false),
+        Cmd::Wake { device, mac } => (Request::Wake { device, mac }, false),
     };
 
     let mut line = serde_json::to_string(&req)?;

@@ -104,6 +104,15 @@ impl Plugin for WolPlugin {
         env: &Envelope<'_>,
     ) -> Result<(), PluginError> {
         match env.ty {
+            "ok" | "err" => {
+                cx.ui(UiEvent::Plugin {
+                    peer: peer.clone(),
+                    cap: CAP.to_string(),
+                    ty: env.ty.to_string(),
+                    body: env.body.to_vec(),
+                });
+                Ok(())
+            }
             "config" => {
                 cx.ui(UiEvent::Plugin {
                     peer: peer.clone(),
@@ -131,6 +140,23 @@ impl Plugin for WolPlugin {
                     port: self.config.port,
                 });
                 self.pending.insert(token, (peer.clone(), env.id));
+                Ok(())
+            }
+            other => Err(PluginError::UnknownType(other.to_string())),
+        }
+    }
+
+    fn on_local(
+        &mut self,
+        cx: &mut Cx,
+        peer: &DeviceId,
+        ty: &str,
+        body: &[u8],
+    ) -> Result<(), PluginError> {
+        match ty {
+            // Ask a peer that is awake to wake a third machine.
+            "relay" => {
+                cx.send(peer, CAP, "relay", body.to_vec());
                 Ok(())
             }
             other => Err(PluginError::UnknownType(other.to_string())),

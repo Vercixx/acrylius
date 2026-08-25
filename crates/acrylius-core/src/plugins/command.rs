@@ -66,6 +66,13 @@ static MANIFEST: PluginManifest = PluginManifest {
 pub struct CommandPlugin {
     /// What this machine is willing to run. Empty means nothing.
     catalog: Vec<CommandEntry>,
+    /// What each peer told us it is willing to run.
+    ///
+    /// A catalogue arrives unprompted when a peer connects, which is the right
+    /// time to send it and the wrong time for anyone to be listening. Keeping
+    /// it means a user interface that opens later can still show the list
+    /// without a round trip.
+    remote: BTreeMap<DeviceId, Vec<CommandEntry>>,
     pending: BTreeMap<EffectToken, (DeviceId, u32)>,
 }
 
@@ -74,6 +81,7 @@ impl CommandPlugin {
     pub fn new(catalog: Vec<CommandEntry>) -> Self {
         Self {
             catalog,
+            remote: BTreeMap::new(),
             pending: BTreeMap::new(),
         }
     }
@@ -114,7 +122,19 @@ impl Plugin for CommandPlugin {
                 self.pending.insert(token, (peer.clone(), env.id));
                 Ok(())
             }
-            "list" | "started" | "output" | "exited" | "ok" => {
+            "list" => {
+                if let Ok(list) = minicbor::decode::<CommandList>(env.body) {
+                    self.remote.insert(peer.clone(), list.commands);
+                }
+                cx.ui(UiEvent::Plugin {
+                    peer: peer.clone(),
+                    cap: CAP.to_string(),
+                    ty: "list".to_string(),
+                    body: env.body.to_vec(),
+                });
+                Ok(())
+            }
+            "started" | "output" | "exited" | "ok" => {
                 cx.ui(UiEvent::Plugin {
                     peer: peer.clone(),
                     cap: CAP.to_string(),
@@ -137,6 +157,21 @@ impl Plugin for CommandPlugin {
         match ty {
             "run" => {
                 cx.send(peer, CAP, "run", body.to_vec());
+                Ok(())
+            }
+            // Answer from what the peer already told us, rather than asking
+            // again for something that does not change.
+            "list" => {
+                let commands = self.remote.get(peer).cloned().unwrap_or_default();
+                let Ok(encoded) = minicbor::to_vec(CommandList { commands }) else {
+                    return Err(PluginError::Internal("encode failed".to_string()));
+                };
+                cx.ui(UiEvent::Plugin {
+                    peer: peer.clone(),
+                    cap: CAP.to_string(),
+                    ty: "list".to_string(),
+                    body: encoded,
+                });
                 Ok(())
             }
             other => Err(PluginError::UnknownType(other.to_string())),

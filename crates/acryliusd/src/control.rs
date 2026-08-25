@@ -45,6 +45,30 @@ pub enum Request {
         addr: String,
         code: String,
     },
+    /// Ask a peer to lock, unlock, or describe its session.
+    Session {
+        device: String,
+        action: String,
+    },
+    /// Read a peer's clipboard, or push ours to it.
+    Clipboard {
+        device: String,
+        push: Option<String>,
+    },
+    /// What a peer is willing to run.
+    Commands {
+        device: String,
+    },
+    /// Run one of them.
+    Run {
+        device: String,
+        id: String,
+    },
+    /// Ask a peer to wake a third machine.
+    Wake {
+        device: String,
+        mac: String,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -366,6 +390,87 @@ async fn handle_conn(stream: UnixStream, h: Handles) -> anyhow::Result<()> {
                     .await?
                 }
             },
+            Request::Session { device, action } => {
+                if !matches!(action.as_str(), "query" | "lock" | "unlock") {
+                    write(
+                        &mut wr,
+                        &Response::Error {
+                            message: format!("{action:?} is not query, lock or unlock"),
+                        },
+                    )
+                    .await?;
+                    continue;
+                }
+                plugin_request(
+                    &mut wr,
+                    &h,
+                    &device,
+                    acrylius_core::plugins::session::CAP,
+                    &action,
+                    Vec::new(),
+                    &["state", "result", "err"],
+                )
+                .await?;
+            }
+            Request::Clipboard { device, push } => {
+                let (ty, body) = match &push {
+                    Some(text) => ("changed", text.as_bytes().to_vec()),
+                    None => ("get", Vec::new()),
+                };
+                let expect: &[&str] = if push.is_some() { &[] } else { &["set", "err"] };
+                plugin_request(
+                    &mut wr,
+                    &h,
+                    &device,
+                    acrylius_core::plugins::clipboard::CAP,
+                    ty,
+                    body,
+                    expect,
+                )
+                .await?;
+            }
+            Request::Commands { device } => {
+                // The catalog arrives unprompted when a peer connects, so this
+                // reads what was already cached rather than asking again.
+                plugin_request(
+                    &mut wr,
+                    &h,
+                    &device,
+                    acrylius_core::plugins::command::CAP,
+                    "list",
+                    Vec::new(),
+                    &["list"],
+                )
+                .await?;
+            }
+            Request::Run { device, id } => {
+                let body = minicbor::to_vec(acrylius_core::plugins::command::RunRequest { id })
+                    .unwrap_or_default();
+                plugin_request(
+                    &mut wr,
+                    &h,
+                    &device,
+                    acrylius_core::plugins::command::CAP,
+                    "run",
+                    body,
+                    &["exited", "err"],
+                )
+                .await?;
+            }
+            Request::Wake { device, mac } => {
+                let body = minicbor::to_vec(acrylius_core::plugins::wol::RelayRequest { mac })
+                    .unwrap_or_default();
+                plugin_request(
+                    &mut wr,
+                    &h,
+                    &device,
+                    acrylius_core::plugins::wol::CAP,
+                    "relay",
+                    body,
+                    &["ok", "err"],
+                )
+                .await?;
+            }
             Request::Ping { device } => match DeviceId::parse(&device) {
                 Ok(id) => {
                     let mut rx = h.ui.subscribe();
@@ -420,6 +525,157 @@ async fn handle_conn(stream: UnixStream, h: Handles) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Send a plugin verb to a peer and report what comes back.
+///
+/// `expect` names the reply verbs worth waiting for. An empty list means the
+/// verb is fire-and-forget, which is the case for pushing a clipboard value: it
+/// is a broadcast to every peer, and there is nothing to answer it.
+async fn plugin_request(
+    wr: &mut tokio::net::unix::OwnedWriteHalf,
+    h: &Handles,
+    device: &str,
+    cap: &str,
+    ty: &str,
+    body: Vec<u8>,
+    expect: &[&str],
+) -> anyhow::Result<()> {
+    let id = match DeviceId::parse(device) {
+        Ok(id) => id,
+        Err(e) => {
+            return write(
+                wr,
+                &Response::Error {
+                    message: e.to_string(),
+                },
+            )
+            .await;
+        }
+    };
+    let mut rx = h.ui.subscribe();
+    h.events.send(Event::Local(LocalCommand::Plugin {
+        peer: id,
+        cap: cap.to_string(),
+        ty: ty.to_string(),
+        body,
+    }))?;
+    if expect.is_empty() {
+        return write(wr, &Response::Ok).await;
+    }
+
+    let deadline = std::time::Duration::from_secs(15);
+    let waited = tokio::time::timeout(deadline, async {
+        loop {
+            match rx.recv().await {
+                Ok(UiEvent::Plugin {
+                    cap: c,
+                    ty: t,
+                    body,
+                    ..
+                }) if c == cap && expect.contains(&t.as_str()) => {
+                    return Some((t, body));
+                }
+                Ok(UiEvent::PeerUnreachable { .. }) | Err(_) => return None,
+                Ok(_) => {}
+            }
+        }
+    })
+    .await;
+
+    match waited {
+        Ok(Some((ty, body))) => {
+            write(
+                wr,
+                &Response::Event {
+                    text: describe(cap, &ty, &body),
+                },
+            )
+            .await
+        }
+        Ok(None) => {
+            write(
+                wr,
+                &Response::Error {
+                    message: "peer unreachable".into(),
+                },
+            )
+            .await
+        }
+        Err(_) => {
+            write(
+                wr,
+                &Response::Error {
+                    message: "timed out".into(),
+                },
+            )
+            .await
+        }
+    }
+}
+
+/// Render a reply body for a human.
+///
+/// The core keeps bodies opaque, which is the right call for routing and the
+/// wrong one for a terminal, so decoding happens here at the edge.
+fn describe(cap: &str, ty: &str, body: &[u8]) -> String {
+    use acrylius_core::plugins::{clipboard, command, session};
+    use acrylius_core::proto::envelope::ErrorBody;
+
+    if ty == "err" {
+        return match minicbor::decode::<ErrorBody>(body) {
+            Ok(e) => format!("refused: {} ({})", e.message, e.code),
+            Err(_) => "refused".to_string(),
+        };
+    }
+    if cap == session::CAP {
+        if let Ok(s) = minicbor::decode::<session::SessionState>(body) {
+            return format!(
+                "session {} ({}) is {}",
+                s.session_id,
+                s.kind,
+                if s.locked { "locked" } else { "unlocked" }
+            );
+        }
+        if let Ok(o) = minicbor::decode::<session::SessionOutcome>(body) {
+            return format!(
+                "session {} was {} and is now {}",
+                o.session_id,
+                if o.was_locked { "locked" } else { "unlocked" },
+                if o.locked { "locked" } else { "unlocked" }
+            );
+        }
+    }
+    if cap == clipboard::CAP
+        && let Ok(c) = minicbor::decode::<clipboard::ClipboardSet>(body)
+    {
+        return String::from_utf8_lossy(&c.data).into_owned();
+    }
+    if cap == command::CAP {
+        if let Ok(l) = minicbor::decode::<command::CommandList>(body) {
+            if l.commands.is_empty() {
+                return "no commands offered".to_string();
+            }
+            return l
+                .commands
+                .iter()
+                .map(|c| format!("{}  {}", c.id, c.name))
+                .collect::<Vec<_>>()
+                .join("\n");
+        }
+        if let Ok(e) = minicbor::decode::<command::Exited>(body) {
+            return format!(
+                "exit {}{}",
+                e.code,
+                if e.truncated {
+                    " (output truncated)"
+                } else {
+                    ""
+                }
+            );
+        }
+    }
+    format!("{ty} ({} bytes)", body.len())
 }
 
 async fn write(wr: &mut tokio::net::unix::OwnedWriteHalf, r: &Response) -> anyhow::Result<()> {

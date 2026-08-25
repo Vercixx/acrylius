@@ -765,6 +765,20 @@ impl Core {
             return;
         }
 
+        // An error reply is protocol-level, not a plugin's business, so the core
+        // surfaces it and stops. Routing it onward would have a plugin meet an
+        // unknown verb and answer with another `err`, which the peer would
+        // answer in turn.
+        if env.ty == "err" {
+            out.ui(UiEvent::Plugin {
+                peer: peer.clone(),
+                cap: env.cap.to_string(),
+                ty: "err".to_string(),
+                body: env.body.to_vec(),
+            });
+            return;
+        }
+
         let Some(idx) = self
             .plugins
             .iter()
@@ -811,6 +825,7 @@ impl Core {
 
     /// Encrypt and emit one plugin message.
     fn dispatch_send(&mut self, _now_ms: u64, s: PendingSend, out: &mut Outcome) {
+        tracing::debug!(peer = %s.peer, cap = %s.cap, ty = %s.ty, "sending");
         let Some((&link, _)) = self
             .links
             .iter()
@@ -1002,6 +1017,7 @@ impl Core {
                     });
                     return;
                 };
+                tracing::debug!(%peer, %cap, %ty, "local plugin command");
                 let mut cx = Cx::new(now_ms, self.next_token);
                 let r = self.plugins[idx].on_local(&mut cx, &peer, &ty, &body);
                 self.next_token = cx.next_token;
@@ -1195,11 +1211,25 @@ impl CoreBuilder {
         let mut plugins = Vec::new();
         for p in self.plugins {
             let m = p.manifest();
-            // A plugin whose effects this host cannot serve is dropped entirely
-            // and its capabilities never advertised, so iOS and Linux can
-            // register the same set and simply negotiate down.
+            // Every plugin is registered and every capability advertised, in
+            // both directions.
+            //
+            // Gating this on `requires` was wrong, and running it is what
+            // showed why: a phone has no desktop session of its own, so it
+            // would have lost `session/1` entirely and been unable to ask a
+            // computer to lock one. Being unable to *serve* a capability says
+            // nothing about being able to *use* it. It also broke replies,
+            // since an answer arrives under the same capability as the request.
+            //
+            // What a device can actually do is discovered two ways instead:
+            // a plugin announces what it has when a peer connects (a catalogue
+            // of commands, a session state, wake targets), and an attempt the
+            // host cannot serve is answered `not_allowed`.
             if !m.requires.iter().all(|k| self.effects.contains(k)) {
-                continue;
+                tracing::debug!(
+                    plugin = m.id,
+                    "this host cannot serve requests for this capability, only send them"
+                );
             }
             caps_out.extend(m.outgoing.iter().map(|s| (*s).to_string()));
             caps_in.extend(m.incoming.iter().map(|s| (*s).to_string()));

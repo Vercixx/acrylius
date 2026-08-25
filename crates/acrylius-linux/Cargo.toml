@@ -1,0 +1,27 @@
+[package]
+name = "acrylius-linux"
+description = "Effectors for a Linux desktop: logind, Wayland clipboard, command runner, Wake-on-LAN."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+acrylius-core.workspace = true
+acrylius-rt.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+minicbor.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+wl-clipboard-rs.workspace = true
+zbus.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

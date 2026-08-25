@@ -59,3 +59,15 @@ jobs:
         run: |
           cargo build --workspace
           ./scripts/m0-acceptance.sh
+
+      # M1 needs a desktop: a logind session to lock and a compositor to hold a
+      # clipboard. A headless runner has neither, so this is a developer check
+      # rather than a CI one. The plugin and effector unit tests above cover
+      # what can be checked without one.
+      - name: M1 acceptance (skipped without a desktop)
+        run: |
+          if [ -n "${WAYLAND_DISPLAY:-}" ]; then
+            ./scripts/m1-acceptance.sh
+          else
+            echo "no desktop on this runner; run scripts/m1-acceptance.sh locally"
+          fi

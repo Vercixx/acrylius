@@ -24,12 +24,15 @@ pub struct PluginManifest {
     pub outgoing: &'static [&'static str],
     /// Capabilities this side can **handle**. Advertised as `caps_in`.
     pub incoming: &'static [&'static str],
-    /// Effects this plugin cannot work without.
+    /// Effects this plugin needs in order to **serve** requests.
     ///
-    /// A host that provides none of these has the plugin disabled and its
-    /// capabilities left out of the handshake entirely — which is how iOS and
-    /// Linux register the identical plugin set and negotiate down, instead of
-    /// growing two divergent plugin lists.
+    /// It does not gate registration or advertising. A device that cannot lock
+    /// a session can still ask another one to, and must still be able to
+    /// receive the reply, which arrives under the same capability as the
+    /// request. A host that cannot serve a verb answers `not_allowed`.
+    ///
+    /// What a peer can actually do is discovered from what it announces on
+    /// connect, not from what it lists in the handshake.
     pub requires: &'static [EffectKind],
 }
 
