@@ -1,0 +1,329 @@
+//! `org.acrylius.session/1` — lock and unlock a desktop session.
+//!
+//! The protocol half only. Deciding *which* session, and reading back whether
+//! it actually locked, is the host's job (see `acrylius-linux`), because both
+//! answers depend on logind, the compositor, and which screen locker is
+//! running.
+//!
+//! Two invariants live here rather than in the host, because they are protocol
+//! promises and a second host must keep them too:
+//!
+//! * Both verbs are **idempotent**. Locking an already-locked session is a
+//!   success with `was_locked = true`, not an error.
+//! * `locked` in a reply is what the host **read back afterwards**, never an
+//!   inference from an exit status. The lockers that matter act on a signal
+//!   asynchronously, so a zero exit says only that the signal was sent.
+
+use std::collections::BTreeMap;
+
+use crate::plugin::{Cx, Plugin, PluginError, PluginManifest};
+use crate::proto::envelope::Envelope;
+use crate::proto::ids::DeviceId;
+use crate::vocab::{Effect, EffectKind, EffectResult, EffectToken, UiEvent};
+
+pub const CAP: &str = "org.acrylius.session/1";
+
+/// The host's answer to [`Effect::QuerySession`], and the payload of `state`.
+#[derive(Clone, PartialEq, Eq, Debug, Default, minicbor::Encode, minicbor::Decode)]
+pub struct SessionState {
+    #[n(0)]
+    pub locked: bool,
+    #[n(1)]
+    pub session_id: String,
+    /// `wayland` or `x11`.
+    #[n(2)]
+    pub kind: String,
+    #[n(3)]
+    pub active: bool,
+}
+
+/// The host's answer to a lock or unlock, and the payload of `result`.
+#[derive(Clone, PartialEq, Eq, Debug, Default, minicbor::Encode, minicbor::Decode)]
+pub struct SessionOutcome {
+    #[n(0)]
+    pub was_locked: bool,
+    /// Read back after the operation, never inferred.
+    #[n(1)]
+    pub locked: bool,
+    #[n(2)]
+    pub session_id: String,
+}
+
+static MANIFEST: PluginManifest = PluginManifest {
+    id: "org.acrylius.session",
+    // A device that cannot lock a session still wants to hear about one, so it
+    // may send the verbs and receive the notifications.
+    outgoing: &[CAP],
+    incoming: &[CAP],
+    requires: &[EffectKind::Session],
+};
+
+/// What a request was, so its answer can be routed back.
+struct Pending {
+    peer: DeviceId,
+    request: u32,
+    /// `result` for lock and unlock, `state` for a query.
+    reply: &'static str,
+}
+
+#[derive(Default)]
+pub struct SessionPlugin {
+    pending: BTreeMap<EffectToken, Pending>,
+    /// Peers to notify when the state changes. Tracked here because a change
+    /// arrives with no peer attached to it.
+    connected: Vec<DeviceId>,
+    last: Option<SessionState>,
+}
+
+impl SessionPlugin {
+    fn broadcast_state(&mut self, cx: &mut Cx, state: &SessionState) {
+        let Ok(body) = minicbor::to_vec(state) else {
+            return;
+        };
+        for peer in &self.connected {
+            cx.send(peer, CAP, "state", body.clone());
+        }
+    }
+}
+
+impl Plugin for SessionPlugin {
+    fn manifest(&self) -> &'static PluginManifest {
+        &MANIFEST
+    }
+
+    fn on_peer_connected(&mut self, cx: &mut Cx, peer: &DeviceId) {
+        if !self.connected.contains(peer) {
+            self.connected.push(peer.clone());
+        }
+        // Tell a peer where things stand without it having to ask.
+        if let Some(state) = self.last.clone()
+            && let Ok(body) = minicbor::to_vec(&state)
+        {
+            cx.send(peer, CAP, "state", body);
+        }
+    }
+
+    fn on_peer_disconnected(&mut self, _cx: &mut Cx, peer: &DeviceId) {
+        self.connected.retain(|p| p != peer);
+    }
+
+    fn on_message(
+        &mut self,
+        cx: &mut Cx,
+        peer: &DeviceId,
+        env: &Envelope<'_>,
+    ) -> Result<(), PluginError> {
+        let (effect, reply) = match env.ty {
+            "query" => (Effect::QuerySession, "state"),
+            "lock" => (Effect::LockSession, "result"),
+            "unlock" => (Effect::UnlockSession, "result"),
+            // A peer that only sends is allowed to receive these and ignore
+            // them, so they are not an error.
+            "state" | "result" => {
+                cx.ui(UiEvent::Plugin {
+                    peer: peer.clone(),
+                    cap: CAP.to_string(),
+                    ty: env.ty.to_string(),
+                    body: env.body.to_vec(),
+                });
+                return Ok(());
+            }
+            other => return Err(PluginError::UnknownType(other.to_string())),
+        };
+        let token = cx.effect(effect);
+        self.pending.insert(
+            token,
+            Pending {
+                peer: peer.clone(),
+                request: env.id,
+                reply,
+            },
+        );
+        Ok(())
+    }
+
+    fn on_local(
+        &mut self,
+        cx: &mut Cx,
+        peer: &DeviceId,
+        ty: &str,
+        _body: &[u8],
+    ) -> Result<(), PluginError> {
+        match ty {
+            // `notify` is a broadcast: the host noticed the session state
+            // change and the peer argument is ignored.
+            "notify" => {
+                let token = cx.effect(Effect::QuerySession);
+                self.pending.insert(
+                    token,
+                    Pending {
+                        peer: peer.clone(),
+                        request: 0,
+                        reply: "broadcast",
+                    },
+                );
+                Ok(())
+            }
+            "query" | "lock" | "unlock" => {
+                cx.send(peer, CAP, ty, Vec::new());
+                Ok(())
+            }
+            other => Err(PluginError::UnknownType(other.to_string())),
+        }
+    }
+
+    fn on_effect_result(&mut self, cx: &mut Cx, token: EffectToken, result: &EffectResult) {
+        let Some(p) = self.pending.remove(&token) else {
+            return;
+        };
+        match result {
+            EffectResult::Ok(bytes) => {
+                if p.reply == "broadcast" {
+                    if let Ok(state) = minicbor::decode::<SessionState>(bytes) {
+                        // Only say something when something changed. A locker
+                        // that reports every poll would otherwise flood the
+                        // session.
+                        if self.last.as_ref() != Some(&state) {
+                            self.last = Some(state.clone());
+                            self.broadcast_state(cx, &state);
+                        }
+                    }
+                    return;
+                }
+                if p.reply == "state"
+                    && let Ok(state) = minicbor::decode::<SessionState>(bytes)
+                {
+                    self.last = Some(state);
+                }
+                cx.send_reply(&p.peer, CAP, p.reply, bytes.clone(), p.request);
+            }
+            EffectResult::Failed(detail) => {
+                cx.send_error(&p.peer, CAP, p.request, "effect_failed", detail);
+            }
+            EffectResult::Unsupported => {
+                cx.send_error(
+                    &p.peer,
+                    CAP,
+                    p.request,
+                    "not_allowed",
+                    "no session on this device",
+                );
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plugin::harness::{envelope, run};
+
+    fn peer() -> DeviceId {
+        DeviceId::of(&[1u8; 32])
+    }
+
+    #[test]
+    fn lock_asks_the_host_and_answers_the_request() {
+        let mut p = SessionPlugin::default();
+        let body = Vec::new();
+        let env = envelope(42, CAP, "lock", &body);
+        let r = run(0, |cx| p.on_message(cx, &peer(), &env).unwrap());
+        assert_eq!(r.one_effect(), &Effect::LockSession);
+
+        let outcome = SessionOutcome {
+            was_locked: false,
+            locked: true,
+            session_id: "1".to_string(),
+        };
+        let bytes = minicbor::to_vec(&outcome).unwrap();
+        let r2 = run(r.next_token, |cx| {
+            p.on_effect_result(cx, r.token(), &EffectResult::Ok(bytes));
+        });
+        let sent = r2.sent("result").expect("a result should go back");
+        // Correlated to the request, or the caller cannot tell which answer it is.
+        assert_eq!(sent.re, Some(42));
+        assert_eq!(
+            minicbor::decode::<SessionOutcome>(&sent.body).unwrap(),
+            outcome
+        );
+    }
+
+    #[test]
+    fn locking_an_already_locked_session_is_a_success() {
+        // Idempotence is a protocol promise, not host behaviour: the host says
+        // was_locked, and the plugin must pass that back as a result rather
+        // than turning it into an error.
+        let mut p = SessionPlugin::default();
+        let env = envelope(1, CAP, "lock", b"");
+        let r = run(0, |cx| p.on_message(cx, &peer(), &env).unwrap());
+        let outcome = SessionOutcome {
+            was_locked: true,
+            locked: true,
+            session_id: "1".to_string(),
+        };
+        let r2 = run(r.next_token, |cx| {
+            p.on_effect_result(
+                cx,
+                r.token(),
+                &EffectResult::Ok(minicbor::to_vec(&outcome).unwrap()),
+            );
+        });
+        assert!(r2.sent("result").is_some());
+        assert!(r2.sent("err").is_none());
+    }
+
+    #[test]
+    fn a_host_without_a_session_answers_not_allowed() {
+        let mut p = SessionPlugin::default();
+        let env = envelope(9, CAP, "unlock", b"");
+        let r = run(0, |cx| p.on_message(cx, &peer(), &env).unwrap());
+        let r2 = run(r.next_token, |cx| {
+            p.on_effect_result(cx, r.token(), &EffectResult::Unsupported);
+        });
+        let err = r2.sent("err").expect("an error should go back");
+        assert_eq!(err.re, Some(9));
+    }
+
+    #[test]
+    fn an_unknown_verb_is_named_in_the_error() {
+        let mut p = SessionPlugin::default();
+        let env = envelope(1, CAP, "reboot", b"");
+        let r = run(0, |cx| {
+            let e = p.on_message(cx, &peer(), &env).unwrap_err();
+            assert_eq!(e, PluginError::UnknownType("reboot".to_string()));
+        });
+        assert!(
+            r.effects.is_empty(),
+            "an unknown verb must not reach the host"
+        );
+    }
+
+    #[test]
+    fn a_state_change_is_broadcast_only_when_it_changed() {
+        let mut p = SessionPlugin::default();
+        run(0, |cx| p.on_peer_connected(cx, &peer()));
+
+        let state = SessionState {
+            locked: true,
+            session_id: "1".to_string(),
+            kind: "wayland".to_string(),
+            active: true,
+        };
+        let bytes = minicbor::to_vec(&state).unwrap();
+
+        let r = run(0, |cx| p.on_local(cx, &peer(), "notify", b"").unwrap());
+        let r2 = run(r.next_token, |cx| {
+            p.on_effect_result(cx, r.token(), &EffectResult::Ok(bytes.clone()));
+        });
+        assert!(r2.sent("state").is_some(), "the first observation is news");
+
+        let r3 = run(0, |cx| p.on_local(cx, &peer(), "notify", b"").unwrap());
+        let r4 = run(r3.next_token, |cx| {
+            p.on_effect_result(cx, r3.token(), &EffectResult::Ok(bytes));
+        });
+        assert!(
+            r4.sent("state").is_none(),
+            "an unchanged poll must stay quiet"
+        );
+    }
+}

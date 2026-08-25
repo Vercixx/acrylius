@@ -464,9 +464,15 @@ default, with `truncated` set when the cap was reached.
 
 ## 12. Errors
 
-`ty = "err"`, with the code as the body. The vocabulary is closed. Adding a code
-is a deliberate act, because a client can only say something useful about a
-failure it can name.
+`ty = "err"`, with this body:
+
+```
+0  code     text   from the closed vocabulary below
+1  message  text   for a human, carrying no promises
+```
+
+The vocabulary is closed. Adding a code is a deliberate act, because a client
+can only say something useful about a failure it can name.
 
 ```
 cap_not_negotiated   the capability was not in the negotiated set for this direction

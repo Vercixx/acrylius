@@ -5,4 +5,8 @@
 //! live here — a separate crate would buy a dependency cycle and nothing else.
 //! Moving them out later is a `git mv`, not a wire change.
 
+pub mod clipboard;
+pub mod command;
 pub mod ping;
+pub mod session;
+pub mod wol;

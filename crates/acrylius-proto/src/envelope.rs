@@ -90,6 +90,18 @@ impl<'a> Envelope<'a> {
     }
 }
 
+/// The body of an `err` message.
+///
+/// The code is the part a program acts on and comes from the closed vocabulary
+/// below. The message is for a human and carries no promises.
+#[derive(Clone, PartialEq, Eq, Debug, minicbor::Encode, minicbor::Decode)]
+pub struct ErrorBody {
+    #[n(0)]
+    pub code: alloc::string::String,
+    #[n(1)]
+    pub message: alloc::string::String,
+}
+
 /// The fixed error vocabulary.
 ///
 /// Carried over as a *discipline* from the old project, where a closed set of

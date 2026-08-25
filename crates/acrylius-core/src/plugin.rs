@@ -12,7 +12,7 @@
 //! into actions once the plugin returns — so a plugin is as testable as the
 //! core is, and a misbehaving one cannot reach a socket.
 
-use crate::proto::envelope::{Envelope, ErrorCode};
+use crate::proto::envelope::{Envelope, ErrorBody, ErrorCode};
 use crate::proto::ids::DeviceId;
 use crate::vocab::{Effect, EffectKind, EffectResult, EffectToken, UiEvent};
 
@@ -122,6 +122,31 @@ impl Cx {
         });
     }
 
+    /// Reply to a request whose envelope is no longer in hand.
+    ///
+    /// A plugin that asked the host to do something gets the answer back later,
+    /// by which time the request is a stored id rather than a borrowed
+    /// `Envelope`.
+    pub fn send_reply(&mut self, peer: &DeviceId, cap: &str, ty: &str, body: Vec<u8>, re: u32) {
+        self.sends.push(PendingSend {
+            peer: peer.clone(),
+            cap: cap.to_string(),
+            ty: ty.to_string(),
+            body,
+            re: Some(re),
+        });
+    }
+
+    /// Answer a request with a named error from the closed vocabulary.
+    pub fn send_error(&mut self, peer: &DeviceId, cap: &str, re: u32, code: &str, message: &str) {
+        let body = minicbor::to_vec(ErrorBody {
+            code: code.to_string(),
+            message: message.to_string(),
+        })
+        .unwrap_or_default();
+        self.send_reply(peer, cap, "err", body, re);
+    }
+
     pub fn effect(&mut self, e: Effect) -> EffectToken {
         self.next_token += 1;
         let t = EffectToken(self.next_token);
@@ -191,4 +216,59 @@ pub trait Plugin: Send {
 #[must_use]
 pub fn handles(manifest: &PluginManifest, cap: &str) -> bool {
     manifest.incoming.contains(&cap) || manifest.outgoing.contains(&cap)
+}
+
+/// Test scaffolding for plugin authors.
+///
+/// A plugin is a pure function of its inputs, so testing one needs no core, no
+/// sockets and no clock: hand it a `Cx`, call a method, read what it wanted to
+/// happen.
+#[cfg(test)]
+pub(crate) mod harness {
+    use super::{Cx, PendingSend};
+    use crate::proto::envelope::Envelope;
+    use crate::vocab::{Effect, EffectToken, UiEvent};
+
+    pub struct Ran {
+        pub sends: Vec<PendingSend>,
+        pub effects: Vec<(EffectToken, Effect)>,
+        #[allow(
+            dead_code,
+            reason = "read by tests that assert what a plugin surfaced locally"
+        )]
+        pub ui: Vec<UiEvent>,
+        pub next_token: u64,
+    }
+
+    impl Ran {
+        pub fn one_effect(&self) -> &Effect {
+            assert_eq!(self.effects.len(), 1, "expected exactly one effect");
+            &self.effects[0].1
+        }
+
+        pub fn token(&self) -> EffectToken {
+            self.effects.first().expect("expected an effect").0
+        }
+
+        pub fn sent(&self, ty: &str) -> Option<&PendingSend> {
+            self.sends.iter().find(|s| s.ty == ty)
+        }
+    }
+
+    /// Run one plugin interaction and collect everything it asked for.
+    pub fn run(next_token: u64, f: impl FnOnce(&mut Cx)) -> Ran {
+        let mut cx = Cx::new(1_000, next_token);
+        f(&mut cx);
+        Ran {
+            sends: cx.sends,
+            effects: cx.effects,
+            ui: cx.ui,
+            next_token: cx.next_token,
+        }
+    }
+
+    /// A request as it would arrive over a session.
+    pub fn envelope<'a>(id: u32, cap: &'a str, ty: &'a str, body: &'a [u8]) -> Envelope<'a> {
+        Envelope::new(id, cap, ty, body)
+    }
 }
