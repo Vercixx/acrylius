@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+#
+# Reject attribution footers.
+#
+# These say nothing a reader needs and nothing `git log --format` cannot
+# already tell you, and once a few are in the history they are expensive to
+# remove: rewriting them means a force-push, which is disruptive for anyone
+# who has already pulled. Cheaper to refuse them at the door.
+set -euo pipefail
+
+msg_file="$1"
+# Strip comment lines git adds to the template; they are not part of the message.
+body="$(grep -v '^#' "$msg_file" || true)"
+
+banned=(
+    'Co-Authored-By:'
+    'Co-authored-by:'
+    'Generated with'
+    'Made with Claude'
+    '🤖'
+)
+
+found=0
+for pattern in "${banned[@]}"; do
+    if printf '%s' "$body" | grep -qF -- "$pattern"; then
+        echo "commit-msg: refusing a commit message containing '$pattern'" >&2
+        found=1
+    fi
+done
+
+if [ "$found" -ne 0 ]; then
+    cat >&2 <<'EOF'
+
+Attribution footers do not belong in this repository's history.
+Remove the line and commit again.
+EOF
+    exit 1
+fi

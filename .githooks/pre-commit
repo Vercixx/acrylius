@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+#
+# Refuse to commit anything that looks like a credential.
+#
+# Deliberately pattern-based rather than entropy-based. This repository is full
+# of keys, fingerprints and base64 test vectors that any entropy heuristic would
+# flag constantly, and a check people learn to ignore is worse than no check.
+# Every pattern below matches a credential *format*, not merely a random-looking
+# string.
+set -euo pipefail
+
+fail=0
+note() { echo "pre-commit: $*" >&2; fail=1; }
+
+# Files whose name alone says they hold key material.
+while IFS= read -r path; do
+    case "$path" in
+        *.pem|*.p12|*.pfx|*identity.key|*.mobileprovision|.env|*/.env)
+            note "refusing to commit $path — that name is key material"
+            ;;
+    esac
+done < <(git diff --cached --name-only --diff-filter=ACM)
+
+staged="$(git diff --cached --unified=0 --diff-filter=ACM | grep '^+' | grep -v '^+++' || true)"
+[ -z "$staged" ] && exit 0
+
+check() {
+    if printf '%s' "$staged" | grep -qE -- "$1"; then
+        note "a staged line looks like $2"
+    fi
+}
+
+check '-----BEGIN [A-Z ]*PRIVATE KEY-----'        "a private key block"
+check 'AKIA[0-9A-Z]{16}'                          "an AWS access key id"
+check 'gh[pousr]_[A-Za-z0-9]{30,}'                "a GitHub token"
+check 'xox[baprs]-[A-Za-z0-9-]{10,}'              "a Slack token"
+check 'sk-ant-[A-Za-z0-9_-]{20,}'                 "an Anthropic API key"
+check 'AIza[0-9A-Za-z_-]{35}'                     "a Google API key"
+check "(api[_-]?key|secret|password|token)[\"' ]*[:=][\"' ]*[A-Za-z0-9/+_-]{24,}" \
+                                                  "a hard-coded credential"
+
+if [ "$fail" -ne 0 ]; then
+    cat >&2 <<'EOF'
+
+Nothing here should carry a credential. If this is a false positive — a test
+vector, say — commit with --no-verify and say so in the message.
+EOF
+    exit 1
+fi

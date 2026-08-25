@@ -82,3 +82,38 @@ jobs:
           else
             echo "no desktop on this runner; run scripts/m1-acceptance.sh locally"
           fi
+
+  hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # The same rule .githooks/commit-msg enforces locally. It is here as well
+      # because hooks live outside version control: a fresh clone has none until
+      # somebody runs scripts/install-hooks.sh, and a rule that depends on every
+      # contributor remembering is not a rule.
+      #
+      # Scoped to the commits this push actually introduces. Scanning all of
+      # history would mean that one such footer, ever, turns CI red permanently
+      # until somebody rewrites published commits.
+      - name: No attribution footers in the new commits
+        run: |
+          base="${{ github.event.pull_request.base.sha || github.event.before }}"
+          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ] \
+             || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            range="HEAD~1..HEAD"
+          else
+            range="$base..HEAD"
+          fi
+          echo "checking $range"
+          if git log "$range" --format='%H %B' \
+               | grep -nE 'Co-[Aa]uthored-[Bb]y:|Generated with|Made with Claude'; then
+            echo
+            echo "Attribution footers do not belong in this history."
+            echo "Reword the commit and force-push, or run scripts/install-hooks.sh"
+            echo "to be told before it reaches a push next time."
+            exit 1
+          fi
+          echo "clean"
