@@ -35,7 +35,18 @@ name = "Fail on purpose"
 program = "/bin/false"
 CFG
 
-"$BIN/acryliusd" --state $D/a --port 1981 --name alpha > $D/a.log 2>&1 &
+# Alpha stands in for a phone: it reads the peer's clipboard but never pushes
+# or owns one. Without this, two daemons on one desktop fight over selection
+# ownership, which no real deployment does.
+cat > $D/a/config.toml <<'ACFG'
+name = "alpha"
+
+[clipboard]
+send = false
+receive = false
+ACFG
+
+"$BIN/acryliusd" --state $D/a --port 1981 --config $D/a/config.toml > $D/a.log 2>&1 &
 "$BIN/acryliusd" --state $D/b --port 1982 --config $D/b/config.toml > $D/b.log 2>&1 &
 ready() { for i in $(seq 1 100); do "$BIN/acryliusctl" --state "$1" status >/dev/null 2>&1 && return 0; sleep 0.1; done; return 1; }
 ready $D/a || { echo "alpha never came up"; cat $D/a.log; exit 1; }

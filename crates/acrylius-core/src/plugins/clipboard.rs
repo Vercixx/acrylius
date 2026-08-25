@@ -124,6 +124,30 @@ impl Plugin for ClipboardPlugin {
         env: &Envelope<'_>,
     ) -> Result<(), PluginError> {
         match env.ty {
+            // A `set` carrying `re` answers a `get` we sent. That is a different
+            // thing from an unsolicited push, and conflating the two was wrong
+            // in both directions: it let the receive switch suppress an answer
+            // the user had explicitly asked for, and it wrote a value onto the
+            // local clipboard when the caller only wanted to look at it. Taking
+            // ownership of a selection nobody asked us to hold is how two
+            // devices end up fighting over it.
+            "set" if env.re.is_some() => {
+                let msg: ClipboardSet =
+                    minicbor::decode(env.body).map_err(|_| PluginError::BadBody)?;
+                if msg.data.len() > MAX_INLINE {
+                    return Err(PluginError::TooLarge);
+                }
+                if msg.hash != hash(&msg.data) {
+                    return Err(PluginError::BadBody);
+                }
+                cx.ui(UiEvent::Plugin {
+                    peer: peer.clone(),
+                    cap: CAP.to_string(),
+                    ty: "set".to_string(),
+                    body: env.body.to_vec(),
+                });
+                Ok(())
+            }
             "set" => {
                 let msg: ClipboardSet =
                     minicbor::decode(env.body).map_err(|_| PluginError::BadBody)?;
@@ -320,6 +344,57 @@ mod tests {
             messages, 50,
             "expected exactly one message per distinct value"
         );
+    }
+
+    #[test]
+    fn an_answer_to_our_own_get_is_not_an_unsolicited_push() {
+        // Two differences, and both matter. An answer reaches a caller who
+        // asked for it even with receive switched off, and it does NOT touch
+        // the local clipboard: taking ownership of a selection nobody asked us
+        // to hold is how two devices end up fighting over one.
+        let mut p = ClipboardPlugin::new(Directions {
+            send: false,
+            receive: false,
+        });
+        let body = set_message("from the peer");
+        let mut env = envelope(2, CAP, "set", &body);
+        env.re = Some(1);
+
+        let r = run(0, |cx| {
+            p.on_message(cx, &peer(), &env)
+                .expect("an answer is always delivered")
+        });
+        assert!(
+            r.effects.is_empty(),
+            "an answer must not be written to the clipboard"
+        );
+        assert_eq!(r.ui.len(), 1, "but it must be surfaced to whoever asked");
+    }
+
+    #[test]
+    fn an_unsolicited_push_still_obeys_the_receive_switch() {
+        let mut p = ClipboardPlugin::new(Directions {
+            send: true,
+            receive: false,
+        });
+        let body = set_message("uninvited");
+        let env = envelope(3, CAP, "set", &body);
+        run(0, |cx| {
+            assert_eq!(
+                p.on_message(cx, &peer(), &env).unwrap_err(),
+                PluginError::NotAllowed
+            );
+        });
+    }
+
+    #[test]
+    fn a_push_is_applied_and_surfaced() {
+        let mut p = ClipboardPlugin::default();
+        let body = set_message("take this");
+        let env = envelope(4, CAP, "set", &body);
+        let r = run(0, |cx| p.on_message(cx, &peer(), &env).unwrap());
+        assert!(matches!(r.one_effect(), Effect::ClipboardWrite { .. }));
+        assert_eq!(r.ui.len(), 1);
     }
 
     #[test]

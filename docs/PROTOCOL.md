@@ -436,6 +436,12 @@ In version 1 `mime` is `text/plain;charset=utf-8` and `data` is capped at
 128 KiB. A larger or unrecognised value is answered with `too_large` or
 `not_allowed` rather than truncated.
 
+A `set` carrying `re` answers a `get` and is a different thing from an
+unsolicited push. An answer is always delivered to whoever asked, regardless of
+the receive switch, and is **not** written to the local clipboard: the caller
+asked to see the value, not to take it. Taking ownership of a selection nobody
+asked for is how two devices end up fighting over one.
+
 The two directions are separately switchable, and neither is required. This is
 not only a preference: iOS cannot read its own pasteboard silently. Since iOS 16
 a programmatic read of content that came from another app raises a system
