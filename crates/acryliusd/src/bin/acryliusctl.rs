@@ -24,6 +24,11 @@ struct Args {
 
 #[derive(Subcommand, Debug)]
 enum Cmd {
+    // Every `device` positional below carries `allow_hyphen_values`. A device
+    // id is strict base64url, whose alphabet includes '-', so roughly one id in
+    // sixty-four begins with one — and clap would read that as a flag and
+    // refuse the command. It is rare enough to look like a fluke in the field
+    // and is pinned by a test below.
     /// Daemon identity, port and negotiated capabilities.
     Status,
     /// Open a pairing window and wait. Prints a code to read out or scan.
@@ -39,7 +44,10 @@ enum Cmd {
     /// Paired devices.
     Devices,
     /// Forget a device. Its next connection is a stranger's.
-    Revoke { device: String },
+    Revoke {
+        #[arg(allow_hyphen_values = true)]
+        device: String,
+    },
     /// Dial a device that has a pairing window open.
     PairWith {
         /// `host:port`.
@@ -49,15 +57,20 @@ enum Cmd {
     },
     /// Open a session to a paired device.
     Connect {
+        #[arg(allow_hyphen_values = true)]
         device: String,
         /// Skip discovery and dial this `host:port` directly.
         #[arg(long)]
         addr: Option<String>,
     },
     /// Round-trip a ping.
-    Ping { device: String },
+    Ping {
+        #[arg(allow_hyphen_values = true)]
+        device: String,
+    },
     /// Ask a paired computer about its desktop session.
     Session {
+        #[arg(allow_hyphen_values = true)]
         device: String,
         /// query, lock, or unlock.
         #[arg(default_value = "query")]
@@ -65,17 +78,29 @@ enum Cmd {
     },
     /// Read a peer's clipboard, or send it text.
     Clipboard {
+        #[arg(allow_hyphen_values = true)]
         device: String,
         /// Text to push. Omit to read instead.
         #[arg(long)]
         push: Option<String>,
     },
     /// List what a peer is willing to run.
-    Commands { device: String },
+    Commands {
+        #[arg(allow_hyphen_values = true)]
+        device: String,
+    },
     /// Run one of a peer's configured commands.
-    Run { device: String, id: String },
+    Run {
+        #[arg(allow_hyphen_values = true)]
+        device: String,
+        id: String,
+    },
     /// Ask a peer to wake a third machine by MAC.
-    Wake { device: String, mac: String },
+    Wake {
+        #[arg(allow_hyphen_values = true)]
+        device: String,
+        mac: String,
+    },
 }
 
 #[derive(Serialize)]
@@ -250,5 +275,72 @@ fn join(v: &[String]) -> String {
         "(none)".to_string()
     } else {
         v.join(", ")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+
+    /// A device id is strict base64url, and that alphabet contains `-`. Roughly
+    /// one identity in sixty-four therefore produces an id starting with one,
+    /// which clap reads as a flag unless the positional says otherwise.
+    ///
+    /// This was found by an M0 acceptance run that happened to generate
+    /// `-4IEPRyU7ZslU335_83cWw`, and it had passed on every earlier run. Without
+    /// this test it would go back to being a once-in-sixty-four mystery.
+    const HYPHEN_ID: &str = "-4IEPRyU7ZslU335_83cWw";
+
+    fn parse(args: &[&str]) -> Args {
+        let mut argv = vec!["acryliusctl"];
+        argv.extend_from_slice(args);
+        Args::try_parse_from(argv).expect("a device id starting with '-' must parse")
+    }
+
+    #[test]
+    fn every_device_positional_accepts_a_leading_hyphen() {
+        assert!(
+            matches!(parse(&["revoke", HYPHEN_ID]).cmd, Cmd::Revoke { device } if device == HYPHEN_ID)
+        );
+        assert!(
+            matches!(parse(&["ping", HYPHEN_ID]).cmd, Cmd::Ping { device } if device == HYPHEN_ID)
+        );
+        assert!(
+            matches!(parse(&["connect", HYPHEN_ID]).cmd, Cmd::Connect { device, .. } if device == HYPHEN_ID)
+        );
+        assert!(
+            matches!(parse(&["session", HYPHEN_ID]).cmd, Cmd::Session { device, .. } if device == HYPHEN_ID)
+        );
+        assert!(
+            matches!(parse(&["clipboard", HYPHEN_ID]).cmd, Cmd::Clipboard { device, .. } if device == HYPHEN_ID)
+        );
+        assert!(
+            matches!(parse(&["commands", HYPHEN_ID]).cmd, Cmd::Commands { device } if device == HYPHEN_ID)
+        );
+        assert!(
+            matches!(parse(&["run", HYPHEN_ID, "screenshot"]).cmd, Cmd::Run { device, .. } if device == HYPHEN_ID)
+        );
+        assert!(
+            matches!(parse(&["wake", HYPHEN_ID, "00:11:22:33:44:55"]).cmd, Cmd::Wake { device, .. } if device == HYPHEN_ID)
+        );
+    }
+
+    #[test]
+    fn options_still_parse_alongside_such_an_id() {
+        // allow_hyphen_values must not swallow the flags that follow it.
+        let a = parse(&["connect", HYPHEN_ID, "--addr", "127.0.0.1:1971"]);
+        let Cmd::Connect { device, addr } = a.cmd else {
+            panic!("wrong subcommand")
+        };
+        assert_eq!(device, HYPHEN_ID);
+        assert_eq!(addr.as_deref(), Some("127.0.0.1:1971"));
+    }
+
+    #[test]
+    fn a_genuinely_unknown_flag_is_still_refused() {
+        // The relaxation is scoped to the positional; it must not turn the CLI
+        // into one that silently accepts anything.
+        assert!(Args::try_parse_from(["acryliusctl", "ping", HYPHEN_ID, "--nonsense"]).is_err());
     }
 }
