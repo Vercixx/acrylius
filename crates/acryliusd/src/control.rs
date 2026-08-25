@@ -5,7 +5,7 @@
 //! socket is `0600` inside `$XDG_RUNTIME_DIR`, and every connection's peer
 //! credentials are checked against our own uid before a single byte is read.
 //!
-//! `pair` has **no network route at all**. Not a protected one — none. That is
+//! `pair` has no network route at all. Not a protected one: none. That is
 //! the single best structural idea carried over from `pc-helper-ios`: a future
 //! plugin cannot accidentally expose pairing, because there is nothing to
 //! expose it through.
@@ -100,7 +100,7 @@ pub enum Response {
     Status(Status),
     /// A struct variant, not `Devices(Vec<Device>)`. serde's internally-tagged
     /// representation cannot encode a newtype variant wrapping a sequence, and
-    /// it fails at *serialisation* time — so the wrapper form compiled fine and
+    /// it fails at serialisation time, so the wrapper form compiled fine and
     /// silently closed the connection with no reply.
     Devices {
         devices: Vec<Device>,
@@ -134,9 +134,9 @@ impl Drop for ControlSocket {
 
 /// Where the control socket lives.
 ///
-/// When a state directory is named explicitly, the socket goes beside it —
-/// which is what lets two daemons run on one machine without fighting over a
-/// single path in `$XDG_RUNTIME_DIR`. That is not just a test affordance: it is
+/// When a state directory is named explicitly, the socket goes beside it, which
+/// is what lets two daemons run on one machine without fighting over a single
+/// path in `$XDG_RUNTIME_DIR`. That is not just a test affordance: it is
 /// also how you would run a second instance for a second user session.
 #[must_use]
 pub fn socket_path(state: &Path, explicit_state: bool) -> PathBuf {

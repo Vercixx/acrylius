@@ -38,9 +38,9 @@ pub trait Transport: Send + Sync + 'static {
 
     /// Run until cancelled. Consumes commands, produces events.
     ///
-    /// A transport must **never** call into the core. It only sends events,
-    /// which the runtime's single serial loop picks up — that is the rule that
-    /// keeps reentrancy impossible rather than merely unlikely.
+    /// A transport must never call into the core. It only sends events, which
+    /// the runtime's single serial loop picks up. That is the rule that keeps
+    /// reentrancy impossible rather than merely unlikely.
     async fn run(
         self: std::sync::Arc<Self>,
         sink: EventSink,

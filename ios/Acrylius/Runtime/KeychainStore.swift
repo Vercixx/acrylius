@@ -4,10 +4,10 @@
 //  Two rules, both learned the hard way in the previous project:
 //
 //  1. The identity key goes in the Keychain as `WhenUnlockedThisDeviceOnly`,
-//     with **no biometric ACL**. An item behind `.biometryCurrentSet` cannot be
+//     with no biometric ACL. An item behind `.biometryCurrentSet` cannot be
 //     read while the phone is locked, which breaks every short-lived extension
-//     and every background refresh. Biometrics belong on the *action* — an
-//     `LAContext` check before sending an unlock — not on the key.
+//     and every background refresh. Biometrics belong on the action, as an
+//     `LAContext` check before sending an unlock, not on the key.
 //  2. Peer records are ordinary files in the app container, not Keychain items.
 //     They contain a session PSK, so the container is `.completeUntilFirstUserAuthentication`
 //     and the files are excluded from backup; but the Keychain is for the one
@@ -63,7 +63,7 @@ public final class KeychainStore: Store, @unchecked Sendable {
         SecItemDelete(q as CFDictionary)
         var add = q
         add[kSecValueData as String] = key
-        // Not `.biometryCurrentSet` — see the note at the top of this file.
+        // Not `.biometryCurrentSet`; see the note at the top of this file.
         add[kSecAttrAccessible as String] = kSecAttrAccessibleWhenUnlockedThisDeviceOnly
         let status = SecItemAdd(add as CFDictionary, nil)
         guard status == errSecSuccess else {
@@ -74,7 +74,7 @@ public final class KeychainStore: Store, @unchecked Sendable {
     // MARK: - peers
 
     /// Keys are `peer/<device-id>`. A device id is strict base64url, so it holds
-    /// no `/` and no `.` and cannot climb out of the directory — but check
+    /// no `/` and no `.` and cannot climb out of the directory, but check
     /// anyway rather than depend on that.
     private func url(for key: String) throws -> URL {
         let parts = key.split(separator: "/")

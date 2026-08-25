@@ -6,11 +6,11 @@
 //! a screen; `U` is dropped so the alphabet cannot spell an unfortunate word.
 //! Eight characters is 40 bits.
 //!
-//! What is *new* here is what the code is used for. The old project used it as a
+//! What is new here is what the code is used for. The old project used it as a
 //! bearer token: present the right code and the pairing window accepts you. Here
 //! it is mixed into the Noise handshake as a pre-shared key, so a wrong code does
-//! not "fail a check" — message 3 simply does not decrypt. That upgrade is why
-//! the pattern is `XXpsk3` rather than plain `XX`.
+//! not "fail a check". Message 3 simply does not decrypt. That upgrade is why the
+//! pattern is `XXpsk3` rather than plain `XX`.
 
 use alloc::string::String;
 use hkdf::Hkdf;
@@ -37,8 +37,8 @@ pub enum CodeError {
     BadChar(char),
 }
 
-/// Render 40 bits as a pairing code. The host supplies the randomness — this
-/// crate has no RNG, by design.
+/// Render 40 bits as a pairing code. The host supplies the randomness, because
+/// this crate has no RNG, by design.
 #[must_use]
 pub fn encode(bits: u64) -> String {
     (0..CODE_LEN)
@@ -52,7 +52,7 @@ pub fn encode(bits: u64) -> String {
 /// Normalize what a human typed: upper-case, strip spaces and dashes, and fold
 /// the four confusable characters onto their intended digits.
 ///
-/// Folding happens *before* any comparison or key derivation, so `l` and `1`
+/// Folding happens before any comparison or key derivation, so `l` and `1`
 /// really are the same code rather than two codes that merely look alike.
 pub fn normalize(input: &str) -> Result<String, CodeError> {
     let mut out = String::with_capacity(CODE_LEN);
@@ -78,7 +78,7 @@ pub fn normalize(input: &str) -> Result<String, CodeError> {
     Ok(out)
 }
 
-/// The Noise pre-shared key for `XXpsk3`, derived from a *normalized* code.
+/// The Noise pre-shared key for `XXpsk3`, derived from a normalized code.
 ///
 /// Taking the normalized form is deliberate: deriving from raw input would make
 /// `abc-defgh` and `ABCDEFGH` different keys, and the fold would silently stop
@@ -94,8 +94,8 @@ pub fn psk(normalized_code: &str) -> [u8; 32] {
 
 /// The short authentication string, from the completed handshake hash.
 ///
-/// This is a **cross-check, not the security mechanism** — `XXpsk3` already
-/// makes a wrong code fail to decrypt. Showing six digits on both screens costs
+/// This is a cross-check, not the security mechanism: `XXpsk3` already makes a
+/// wrong code fail to decrypt. Showing six digits on both screens costs
 /// nothing and catches implementation bugs that a PSK check would mask, which is
 /// exactly the class of bug that is otherwise invisible until it is a CVE.
 #[must_use]

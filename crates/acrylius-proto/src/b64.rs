@@ -2,9 +2,9 @@
 //!
 //! Carried over from `pc-helper-ios` deliberately. A lenient decoder lets the
 //! same key or fingerprint be spelled several ways, which turns an identifier
-//! into a *set* rather than a value — and identifiers get compared, indexed and
-//! used as map keys. So this rejects padding, non-alphabet bytes, impossible
-//! lengths, and non-canonical trailing bits.
+//! into a set rather than a value, and identifiers get compared, indexed and used
+//! as map keys. So this rejects padding, non-alphabet bytes, impossible lengths,
+//! and non-canonical trailing bits.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -83,7 +83,7 @@ pub fn decode(input: &str) -> Result<Vec<u8>, B64Error> {
     Ok(out)
 }
 
-/// Decode and require an exact length — the shape identifiers actually want.
+/// Decode and require an exact length, which is what identifiers actually want.
 pub fn decode_exact<const N: usize>(input: &str) -> Result<[u8; N], B64Error> {
     let v = decode(input)?;
     <[u8; N]>::try_from(v.as_slice()).map_err(|_| B64Error::WrongSize {

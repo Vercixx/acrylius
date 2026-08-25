@@ -305,7 +305,7 @@ fn hostname() -> String {
 }
 
 /// The default listen port, exposed so a daemon can override it for a second
-/// instance on the same machine — which is exactly what the M0 two-daemon test
+/// instance on the same machine, which is exactly what the M0 two-daemon test
 /// needs.
 #[must_use]
 pub fn default_port() -> u16 {

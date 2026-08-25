@@ -1,6 +1,6 @@
-//! `org.acrylius.session/1` — lock and unlock a desktop session.
+//! `org.acrylius.session/1`: lock and unlock a desktop session.
 //!
-//! The protocol half only. Deciding *which* session, and reading back whether
+//! The protocol half only. Deciding which session, and reading back whether
 //! it actually locked, is the host's job (see `acrylius-linux`), because both
 //! answers depend on logind, the compositor, and which screen locker is
 //! running.
@@ -8,9 +8,9 @@
 //! Two invariants live here rather than in the host, because they are protocol
 //! promises and a second host must keep them too:
 //!
-//! * Both verbs are **idempotent**. Locking an already-locked session is a
-//!   success with `was_locked = true`, not an error.
-//! * `locked` in a reply is what the host **read back afterwards**, never an
+//! * Both verbs are idempotent. Locking an already-locked session is a success
+//!   with `was_locked = true`, not an error.
+//! * `locked` in a reply is what the host read back afterwards, never an
 //!   inference from an exit status. The lockers that matter act on a signal
 //!   asynchronously, so a zero exit says only that the signal was sent.
 

@@ -6,7 +6,7 @@ import SwiftUI
 
 /// What the views watch.
 ///
-/// It holds no protocol state of its own — every field here is a projection of
+/// It holds no protocol state of its own. Every field here is a projection of
 /// something the core said. That keeps the "one implementation" property honest
 /// all the way to the screen: the UI cannot disagree with the core, because it
 /// has nothing to disagree with.

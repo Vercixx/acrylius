@@ -2,7 +2,7 @@
 //!
 //! They live inside `acrylius-core` rather than in their own crate because they
 //! need [`Plugin`](crate::plugin::Plugin) and [`Cx`](crate::plugin::Cx), which
-//! live here — a separate crate would buy a dependency cycle and nothing else.
+//! live here. A separate crate would buy a dependency cycle and nothing else.
 //! Moving them out later is a `git mv`, not a wire change.
 
 pub mod clipboard;

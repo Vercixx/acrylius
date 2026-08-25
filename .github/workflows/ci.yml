@@ -1,5 +1,5 @@
 # The fast loop. Runs on every push, costs nothing, and covers most of the
-# project — including the Swift that talks to the core, which compiles and runs
+# project, including the Swift that talks to the core, which compiles and runs
 # on Linux. Only SwiftUI and Network.framework need macOS.
 name: ci
 
@@ -40,7 +40,7 @@ jobs:
       # The Swift image carries a Swift toolchain and very little else. curl,
       # because dtolnay/rust-toolchain fetches rustup with it. build-essential,
       # because rustc drives linking through `cc`, and clang being present is
-      # not the same as `cc` existing — without it every build script fails
+      # not the same as `cc` existing. Without it every build script fails
       # with "linker `cc` not found".
       - name: Prerequisites the Swift image does not ship
         run: |
@@ -52,7 +52,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
-      # Two CoreRuntimes pair, connect and ping over an in-memory transport —
+      # Two CoreRuntimes pair, connect and ping over an in-memory transport:
       # the same code the iOS app runs, verified without a Mac.
       - name: Swift host runtime tests
         run: ./scripts/swift-test.sh

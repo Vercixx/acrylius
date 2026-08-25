@@ -42,9 +42,9 @@ struct HandshakingLink {
 struct UpLink {
     session: Session,
     peer: DeviceId,
-    /// Our `caps_out` ∩ their `caps_in` — what we may send.
+    /// Our `caps_out` ∩ their `caps_in`, which is what we may send.
     can_send: Vec<String>,
-    /// Their `caps_out` ∩ our `caps_in` — what we will accept.
+    /// Their `caps_out` ∩ our `caps_in`, which is what we will accept.
     can_recv: Vec<String>,
 }
 
@@ -74,7 +74,7 @@ pub struct Core {
     peers: BTreeMap<DeviceId, PeerRecord>,
     links: BTreeMap<LinkId, LinkState>,
     /// Last address discovery offered for a peer. Untrusted, and only ever used
-    /// to decide where to dial — never to decide who answered.
+    /// to decide where to dial, never to decide who answered.
     addrs: BTreeMap<DeviceId, (TransportId, String)>,
     pairing: Option<PairingWindow>,
     /// Dials we started for pairing, and the PSK to use when they land.
@@ -295,7 +295,7 @@ impl Core {
         };
         match Handshake::session_initiator(&self.identity, &psk, &pk) {
             Ok(mut hs) => {
-                // Identity and capabilities only — never a command. IK's first
+                // Identity and capabilities only, never a command. IK's first
                 // payload is not forward-secret.
                 let hello = minicbor::to_vec(self.hello(now_ms)).expect("hello encodes");
                 match hs.write(&hello) {
@@ -1162,7 +1162,7 @@ impl Core {
 ///
 /// Deliberately not `inventory`, `ctor` or `linkme`: static linking into an iOS
 /// binary with dead-strip enabled removes constructor-registered symbols, and
-/// the failure mode is an app that silently has *zero* plugins. There is nothing
+/// the failure mode is an app that silently has zero plugins. There is nothing
 /// to gain here from magic.
 pub struct CoreBuilder {
     identity: Identity,

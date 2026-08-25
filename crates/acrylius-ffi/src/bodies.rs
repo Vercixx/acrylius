@@ -121,7 +121,7 @@ pub struct FfiWolConfig {
     pub macs: Vec<String>,
     pub broadcast: String,
     pub port: u16,
-    /// Aim here **first**.
+    /// Aim here first.
     ///
     /// A network interface matches a magic packet by its payload and ignores
     /// the destination address, so unicast wakes a machine just as well as

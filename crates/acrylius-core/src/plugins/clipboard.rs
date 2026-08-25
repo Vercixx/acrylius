@@ -1,4 +1,4 @@
-//! `org.acrylius.clipboard/1` — share the clipboard.
+//! `org.acrylius.clipboard/1`: share the clipboard.
 //!
 //! The whole difficulty is loops. Two peers that forward every change they see
 //! will echo a single paste at each other forever, and the failure is not

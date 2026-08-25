@@ -2,11 +2,11 @@
 //!
 //! Two invariants carried over from `pc-helper-ios`, both earned:
 //!
-//! 1. **Identifiers are derived by the receiver, never self-asserted.** A peer
+//! 1. Identifiers are derived by the receiver, never self-asserted. A peer
 //!    sends its public key; the receiver computes the id. That is why two
 //!    devices cannot collide onto one record by claiming the same name.
-//! 2. **Strict base64url.** See [`crate::b64`] — a lenient decoder would turn an
-//!    identifier into a *set of spellings* rather than a value.
+//! 2. Base64url decoding is strict. See [`crate::b64`]: a lenient decoder would
+//!    turn an identifier into a set of spellings rather than a value.
 //!
 //! Both derivations are domain-tagged. The old project tagged its per-message
 //! canonical strings but not its identifiers; tagging both means a fingerprint
@@ -26,8 +26,8 @@ const DID_TAG: &[u8] = b"acrylius/v1/did";
 /// Full fingerprint: 32 bytes of SHA-256, 43 base64url chars.
 ///
 /// This is what a human compares and what the mDNS TXT record publishes. The
-/// raw public key is deliberately *not* published — see `PROTOCOL.md`; keeping
-/// it secret is what lets the `IKpsk2` first message stay opaque to an observer.
+/// raw public key is deliberately not published (see `PROTOCOL.md`); keeping it
+/// secret is what lets the `IKpsk2` first message stay opaque to an observer.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct Fingerprint(String);
 
@@ -35,7 +35,7 @@ pub struct Fingerprint(String);
 ///
 /// Short enough to sit in a TXT record and a log line. 128 bits of a
 /// second-preimage-resistant hash over a key nobody else holds is ample; this
-/// is an index, and [`Fingerprint`] remains the thing that is *compared*.
+/// is an index, and [`Fingerprint`] remains the thing that is compared.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct DeviceId(String);
 

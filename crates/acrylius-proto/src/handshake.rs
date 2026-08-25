@@ -1,9 +1,9 @@
-//! Handshake payloads — what rides inside the Noise messages.
+//! Handshake payloads: what rides inside the Noise messages.
 //!
 //! ## Why there is no command in here
 //!
 //! `IKpsk2`'s first message is encrypted under `es` + `ss`, which means it is
-//! **not forward-secret**: someone who later compromises the responder's static
+//! not forward-secret: someone who later compromises the responder's static
 //! key can decrypt every message 1 they ever recorded. Capability lists and a
 //! device name are semi-public and survive that fine. An unlock command would
 //! not. So message 1 carries identity and capabilities, and nothing else; the
@@ -12,22 +12,22 @@
 //!
 //! ## Why there is a timestamp
 //!
-//! `IKpsk2` message 1 is **replayable** — an observer can record one and send it
+//! `IKpsk2` message 1 is replayable. An observer can record one and send it
 //! again later. WireGuard solves this with a monotonic timestamp plus a
 //! per-peer greatest-seen check, and so do we ([`Hello::check_freshness`]).
 //!
 //! This is where the old project's entire replay apparatus goes. `pc-helper-ios`
 //! needed a persisted SQLite table of every nonce inside a 30-second window,
 //! swept on a timer, because a signed request carries no session. Here the Noise
-//! session's own cipher counter handles replay *within* a session, and one `u64`
-//! per peer handles replay *of the session opener*. One integer replaces a table.
+//! session's own cipher counter handles replay within a session, and one `u64`
+//! per peer handles replay of the session opener. One integer replaces a table.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
 /// How far a peer's clock may differ from ours before we refuse the handshake.
 ///
-/// Generous, because this is not a freshness guarantee — [`GreatestSeen`] is.
+/// Generous, because this is not a freshness guarantee. [`GreatestSeen`] is.
 /// It only bounds how far into the future a peer can push its own watermark and
 /// lock itself out after a clock correction.
 pub const MAX_SKEW_MS: u64 = 60_000;
@@ -39,9 +39,9 @@ pub struct Hello {
     /// Sender's clock, milliseconds since the Unix epoch.
     #[n(1)]
     pub ts_ms: u64,
-    /// Derived by the *receiver* from the static key Noise just authenticated;
+    /// Derived by the receiver from the static key Noise just authenticated;
     /// carried here only so a log line can name the peer before the lookup.
-    /// Never trusted as an identity — see [`crate::ids`].
+    /// Never trusted as an identity; see [`crate::ids`].
     #[b(2)]
     pub device_id: String,
     #[b(3)]
@@ -60,7 +60,7 @@ pub struct Hello {
 pub enum FreshnessError {
     #[error("handshake timestamp is {0} ms outside the permitted skew")]
     Skew(u64),
-    #[error("handshake timestamp {got} is not newer than the last seen {seen} — replay")]
+    #[error("handshake timestamp {got} is not newer than the last seen {seen}: replay")]
     Replay { got: u64, seen: u64 },
 }
 

@@ -7,8 +7,8 @@
 //!
 //! Two things here look like duplication and are not:
 //!
-//! * [`rank_for_lock`] and [`rank_for_unlock`] are near-identical and **must not
-//!   be merged**. See their documentation.
+//! * [`rank_for_lock`] and [`rank_for_unlock`] are near-identical and must not
+//!   be merged. See their documentation.
 //! * The lock state is resolved twice, once before acting and once after. The
 //!   second read is the result. An exit status is not.
 
@@ -66,7 +66,7 @@ pub struct Candidate {
     pub locked: bool,
 }
 
-/// Which session an **unlock** should target.
+/// Which session an unlock should target.
 ///
 /// Locked sessions first, then active ones, then the lowest id.
 ///
@@ -83,7 +83,7 @@ pub fn rank_for_unlock(candidates: &[Candidate]) -> Option<&Candidate> {
         .min_by_key(|c| (!c.locked, !c.active, c.id.clone()))
 }
 
-/// Which session a **lock** should target. Unlocked sessions first.
+/// Which session a lock should target. Unlocked sessions first.
 ///
 /// The inverse of [`rank_for_unlock`], deliberately.
 #[must_use]

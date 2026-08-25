@@ -8,7 +8,7 @@
 //!
 //! So a hint of `yes` is trusted as-is, and only a `no` on an active Wayland
 //! session is escalated to the compositor. A compositor that cannot answer
-//! returns [`None`], meaning **no opinion**, never "unlocked". That distinction
+//! returns [`None`], meaning no opinion, never "unlocked". That distinction
 //! is the whole point: a failed probe must leave the hint standing rather than
 //! assert the more dangerous of the two answers.
 

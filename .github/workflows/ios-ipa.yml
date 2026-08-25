@@ -97,7 +97,7 @@ jobs:
       # When the first one arrives (an App Group for a widget), it MUST be
       # embedded in each bundle's Mach-O signature and checked here. AltStore
       # and SideStore read entitlements out of the code signature via ldid,
-      # never from a file beside the IPA — so an entitlement missing there is
+      # never from a file beside the IPA, so an entitlement missing there is
       # one the installer will never request, silently.
 
       - name: Package

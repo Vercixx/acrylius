@@ -1,9 +1,7 @@
-//! `org.acrylius.command/1` — run a named command on the computer.
+//! `org.acrylius.command/1`: run a named command on the computer.
 //!
-//! One rule makes this a command runner and not a remote shell:
-//!
-//! > **The wire carries an `id` from the computer's own configuration, never a
-//! > command string.**
+//! One rule makes this a command runner and not a remote shell. The wire carries
+//! an `id` from the computer's own configuration, never a command string.
 //!
 //! An id that is not in the allowlist is refused. Everything about what actually
 //! runs (the absolute path, the argv vector, the timeout, the output cap) lives

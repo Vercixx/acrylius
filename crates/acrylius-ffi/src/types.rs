@@ -1,8 +1,8 @@
 //! The FFI mirror of the core's vocabulary.
 //!
 //! These types exist only to cross the language boundary. They carry no logic,
-//! and every conversion below is a mechanical, exhaustively-matched mapping — so
-//! adding a variant to the core is a *compile error* here rather than a silent
+//! and every conversion below is a mechanical, exhaustively-matched mapping, so
+//! adding a variant to the core is a compile error here rather than a silent
 //! omission. That is what keeps this a translation layer and not a second
 //! implementation of the protocol.
 //!

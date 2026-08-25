@@ -2,7 +2,7 @@
 #
 # Build and run the Swift host runtime's tests **on Linux**.
 #
-# Two CoreRuntimes joined by an in-memory transport pair, connect and ping —
+# Two CoreRuntimes joined by an in-memory transport pair, connect and ping:
 # the exact code the iOS app runs, minus SwiftUI and Network.framework. Files
 # that need Darwin guard themselves with `#if canImport(...)`, so the same
 # sources compile here and in Xcode.
@@ -20,7 +20,7 @@ cargo run -q -p acrylius-ffi --bin uniffi-bindgen -- \
 
 # -swift-version 6 and complete concurrency checking match what the Xcode
 # target uses. The Darwin-only files are excluded by their own #if guards, but
-# CoreRuntime and Ports are the parts where concurrency is actually hard — so
+# CoreRuntime and Ports are the parts where concurrency is actually hard, so
 # catching those errors here beats finding them in a fifteen-minute macOS run.
 swiftc -o "$OUT/runtime-tests" \
     -swift-version 6 \

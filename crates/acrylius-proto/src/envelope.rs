@@ -2,15 +2,15 @@
 //!
 //! Two properties are load-bearing and both were corrections during design review.
 //!
-//! **Explicit numeric field indices.** `minicbor`'s derive keys fields by number,
+//! Field indices are explicit numbers. `minicbor`'s derive keys fields by number,
 //! not by name, so adding a field is "use index 8" and old readers skip it. A
 //! name-keyed encoding gives a much fuzzier evolution story for something that
 //! has to stay compatible across an app the user updates on a 7-day cycle and a
 //! daemon they update whenever.
 //!
-//! **`body` is an opaque byte string.** It is *not* an inline CBOR map. If it
-//! were, the core would have to be able to parse plugin schemas in order to route
-//! a packet — which contradicts the entire plugin design. Opaque bodies mean the
+//! `body` is an opaque byte string, not an inline CBOR map. If it were, the core
+//! would have to be able to parse plugin schemas in order to route a packet,
+//! which contradicts the entire plugin design. Opaque bodies mean the
 //! core routes, queues and forwards without understanding anything, plugins may
 //! use whatever encoding they like, and handing an envelope to an out-of-process
 //! plugin later is a memcpy. This is the same layering COSE uses. It costs a few
@@ -22,8 +22,8 @@ use alloc::vec::Vec;
 /// `org.acrylius.clipboard/1`.
 ///
 /// That makes negotiation a plain string-set intersection with no separate
-/// version field to get wrong, and it makes a breaking change simply *a different
-/// capability* — a peer that speaks both advertises both.
+/// version field to get wrong, and it makes a breaking change simply a different
+/// capability. A peer that speaks both advertises both.
 pub type Cap<'a> = &'a str;
 
 #[derive(Clone, PartialEq, Eq, Debug, minicbor::Encode, minicbor::Decode)]
@@ -51,7 +51,7 @@ pub struct Envelope<'a> {
     #[n(6)]
     pub flags: u8,
     /// Bulk transfer this envelope refers to, if any. Bulk bytes never travel
-    /// through the envelope — see `PROTOCOL.md`.
+    /// through the envelope; see `PROTOCOL.md`.
     #[n(7)]
     pub bulk: Option<u64>,
 }
@@ -104,7 +104,7 @@ pub struct ErrorBody {
 
 /// The fixed error vocabulary.
 ///
-/// Carried over as a *discipline* from the old project, where a closed set of
+/// Carried over as a discipline from the old project, where a closed set of
 /// error codes was what made the client's user-facing copy possible: a client can
 /// only say something useful about a failure it can name. Adding a variant is a
 /// deliberate act, not a new string literal at a call site.

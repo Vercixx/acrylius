@@ -35,7 +35,7 @@ targets:
       # that generates it runs before xcodegen.
       #
       # Only the Swift file is a *source*. The static library is linked via
-      # OTHER_LDFLAGS and the search path below — adding it here too would put
+      # OTHER_LDFLAGS and the search path below. Adding it here too would put
       # it in Link Binary With Libraries as well and link it twice. The header
       # and modulemap are found through SWIFT_INCLUDE_PATHS, not compiled.
       - path: Generated/acrylius_ffi.swift
@@ -59,7 +59,7 @@ targets:
         TARGETED_DEVICE_FAMILY: "1,2"
 
 # XcodeGen emits no scheme unless asked, and `xcodebuild -scheme` then fails
-# with "does not contain a scheme named …" — which reads like a project
+# with "does not contain a scheme named ...", which reads like a project
 # problem rather than a missing declaration. Declaring it here also means the
 # scheme is *shared*, so CI sees it; an Xcode-created one lives in xcuserdata
 # and would not be checked in.

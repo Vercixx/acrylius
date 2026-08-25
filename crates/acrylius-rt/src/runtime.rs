@@ -1,6 +1,6 @@
 //! The action pump.
 //!
-//! **One task owns the core. Nothing else ever touches it.**
+//! One task owns the core. Nothing else ever touches it.
 //!
 //! Transports and effectors run on their own tasks and communicate only by
 //! sending [`Event`]s into a channel this loop drains. Results of actions come
@@ -40,8 +40,8 @@ pub struct Runtime {
     /// snapshot for its own queries without ever holding the core itself.
     observer: Option<Observer>,
     /// Monotonic zero. The core is handed milliseconds since this instant, so a
-    /// wall-clock change cannot move a deadline — which is what makes the
-    /// pairing window's expiry honest.
+    /// wall-clock change cannot move a deadline, which is what makes the pairing
+    /// window's expiry honest.
     started: Instant,
 }
 
@@ -61,7 +61,7 @@ impl Runtime {
         }
     }
 
-    /// A handle for feeding the core from outside — the control socket uses it.
+    /// A handle for feeding the core from outside; the control socket uses it.
     #[must_use]
     pub fn events(&self) -> mpsc::UnboundedSender<Event> {
         self.events_tx.clone()
@@ -71,7 +71,7 @@ impl Runtime {
         self.ui = Some(ui);
     }
 
-    /// Observe the core after each step. The closure gets `&Core` only — there
+    /// Observe the core after each step. The closure gets `&Core` only, so there
     /// is deliberately no way to reach `handle()` from here.
     pub fn observe(&mut self, f: impl Fn(&Core) + Send + 'static) {
         self.observer = Some(Box::new(f));
@@ -168,7 +168,7 @@ impl Runtime {
             }
             Action::LinkSend { link, msg } => {
                 // A link belongs to exactly one transport, but the core does not
-                // track which — send to all and let the one that owns it act.
+                // track which, so send to all and let the one that owns it act.
                 for tx in self.transports.values() {
                     let _ = tx.send(TransportCmd::Send {
                         link,

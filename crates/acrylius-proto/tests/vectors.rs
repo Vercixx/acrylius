@@ -1,7 +1,7 @@
 //! Golden vectors, asserted against `docs/PROTOCOL.md`.
 //!
 //! There is only one implementation of this protocol, so these are not here to
-//! keep two codebases in step. They are here to keep the *document* in step with
+//! keep two codebases in step. They are here to keep the document in step with
 //! the code: a spec nothing checks is a spec that quietly becomes fiction, and
 //! this one has to be good enough for a second implementation to be written from
 //! years later.

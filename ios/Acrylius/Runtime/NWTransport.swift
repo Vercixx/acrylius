@@ -110,8 +110,8 @@ public final class NWTransport: Transport, @unchecked Sendable {
         // phone. That is what lets a session exist at all on a free developer
         // account, where there is no background push and no way to accept an
         // inbound connection while the app is closed. Symmetry lives at the
-        // packet layer — once a session is up either side may send — not at the
-        // connection layer.
+        // packet layer, where once a session is up either side may send, not at
+        // the connection layer.
     }
 
     public func discover(enable: Bool) async {
@@ -127,7 +127,7 @@ public final class NWTransport: Transport, @unchecked Sendable {
 
         b.stateUpdateHandler = { [weak self] state in
             // `.waiting` on a Bonjour browse almost always means Local Network
-            // permission was declined — there is no API to query it, so this is
+            // permission was declined. There is no API to query it, so this is
             // the signal we have. Say so plainly rather than reporting a
             // generic failure the user cannot act on.
             if case let .waiting(error) = state {
@@ -148,8 +148,8 @@ public final class NWTransport: Transport, @unchecked Sendable {
                     peer: FfiDiscoveredPeer(
                         fingerprint: txt?["fp"],
                         name: txt?["n"] ?? name,
-                        // Hand the instance name back, not a resolved address —
-                        // see `dial`.
+                        // Hand the instance name back, not a resolved address.
+                        // See `dial`.
                         addr: "bonjour:\(name)",
                         pairing: txt?["pair"] == "1"
                     )

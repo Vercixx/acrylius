@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # M0 acceptance. Two daemons on one machine pair over real TCP, open a session,
-# ping, and survive a restart — with no Apple hardware and no second device.
+# ping, and survive a restart, with no Apple hardware and no second device.
 #
 # Run it from the repo root after `cargo build`.
 #

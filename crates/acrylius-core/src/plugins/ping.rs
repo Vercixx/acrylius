@@ -1,4 +1,4 @@
-//! `org.acrylius.ping/1` — the smallest possible plugin.
+//! `org.acrylius.ping/1`: the smallest possible plugin.
 //!
 //! It exists to exercise routing in both directions with no effector and no UI,
 //! which makes it the thing that proves the plugin seam works before any feature

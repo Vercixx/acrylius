@@ -43,7 +43,7 @@
     </array>
 
     <!-- Browsing for _acrylius._tcp goes through the system mDNSResponder, so
-         it needs no entitlement — unlike UDP broadcast, which a free developer
+         it needs no entitlement, unlike UDP broadcast, which a free developer
          account cannot have. Both keys are required or the browse silently
          finds nothing. -->
     <key>NSLocalNetworkUsageDescription</key>

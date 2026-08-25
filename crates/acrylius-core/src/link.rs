@@ -1,9 +1,9 @@
 //! Transport vocabulary.
 //!
 //! The core never names a socket, an address family or a port. It knows only
-//! that *links* exist, that they carry whole messages, and what each link can
-//! and cannot do. A transport is whatever produces `LinkUp`/`LinkRecv`/`LinkDown`
-//! and consumes `Dial`/`LinkSend`/`Close` — which is why the iOS transport can be
+//! that links exist, that they carry whole messages, and what each link can and
+//! cannot do. A transport is whatever produces `LinkUp`/`LinkRecv`/`LinkDown` and
+//! consumes `Dial`/`LinkSend`/`Close`, which is why the iOS transport can be
 //! Swift over Network.framework while the Linux one is Rust over tokio, with no
 //! trait crossing the FFI boundary between them.
 
@@ -21,7 +21,7 @@ pub struct TransportId(pub u16);
 pub enum TransportKind {
     /// TCP over a local network. The M1 transport.
     TcpLan,
-    /// A Unix socket on the same machine — used by the loopback tests today, and
+    /// A Unix socket on the same machine, used by the loopback tests today and
     /// by out-of-process plugins later.
     UnixLoopback,
     /// Bluetooth LE, L2CAP connection-oriented channel. Not implemented; the
@@ -32,7 +32,7 @@ pub enum TransportKind {
 }
 
 /// A hint for plugin behaviour, never for correctness. A plugin may use it to
-/// decide how chatty to be; nothing may *depend* on it.
+/// decide how chatty to be; nothing may depend on it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum LatencyClass {
     Loopback,
@@ -54,7 +54,7 @@ pub enum BulkSupport {
 pub struct LinkAttrs {
     pub transport: TransportId,
     pub kind: TransportKind,
-    /// The largest whole message this link accepts, *after* whatever
+    /// The largest whole message this link accepts, after whatever
     /// fragmentation the transport does internally. The core will never hand
     /// down a frame larger than this, and enforces it on plugins so an
     /// oversized body is a `TooLarge` error rather than a mysterious hang.
@@ -92,7 +92,7 @@ impl LinkAttrs {
 
     /// Whether a Noise session on this link may keep its nonce counter
     /// internally. A lossy or unordered link needs caller-supplied nonces and a
-    /// replay window instead — see `noise::Session`.
+    /// replay window instead; see `noise::Session`.
     #[must_use]
     pub fn supports_stateful_cipher(&self) -> bool {
         self.reliable && self.ordered

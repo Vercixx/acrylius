@@ -149,7 +149,7 @@ public actor CoreRuntime {
 
         case let .linkSend(link, msg):
             // A link belongs to one transport, but the core does not track
-            // which — offer it to each and let the owner act.
+            // which, so offer it to each and let the owner act.
             for t in transports.values { await t.send(link: link, msg: msg) }
 
         case let .close(link):

@@ -1,7 +1,7 @@
 //
 //  The Swift host runtime, tested on Linux.
 //
-//  Two CoreRuntimes joined by an in-memory transport pair, connect and ping —
+//  Two CoreRuntimes joined by an in-memory transport pair, connect and ping:
 //  exercising the exact code the iOS app runs, minus SwiftUI and
 //  Network.framework. Without this it would all be unverifiable until an IPA
 //  reached a phone.
@@ -110,7 +110,7 @@ final class Recorder: UiSink, @unchecked Sendable {
 var failures = 0
 
 // Top-level code is main-actor isolated, so the helpers that touch `failures`
-// must be too — a global function would be nonisolated and could not.
+// must be too; a global function would be nonisolated and could not.
 @MainActor
 func check(_ ok: Bool, _ what: String) {
     if ok { print("  ok   \(what)") } else { print("  FAIL \(what)"); failures += 1 }

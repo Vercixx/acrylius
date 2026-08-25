@@ -1,16 +1,16 @@
 //! The plugin seam.
 //!
-//! A plugin here is only the **protocol half** of a feature — the part that is
+//! A plugin here is only the protocol half of a feature, the part that is
 //! identical on every device and therefore belongs in the shared artifact. The
-//! other two thirds live outside: the *effector* half is whatever the host does
-//! for [`Effect`] (zbus on Linux, mostly nothing on iOS), and the *UI* half is
+//! other two thirds live outside: the effector half is whatever the host does
+//! for [`Effect`] (zbus on Linux, mostly nothing on iOS), and the UI half is
 //! SwiftUI or `acryliusctl`. Keeping the protocol half here is the whole reason
 //! there is one implementation rather than five.
 //!
 //! Plugins cannot do IO. They cannot read a clock. Everything they want to
 //! happen goes through [`Cx`], which accumulates intentions that the core turns
-//! into actions once the plugin returns — so a plugin is as testable as the
-//! core is, and a misbehaving one cannot reach a socket.
+//! into actions once the plugin returns. So a plugin is as testable as the core
+//! is, and a misbehaving one cannot reach a socket.
 
 use crate::proto::envelope::{Envelope, ErrorBody, ErrorCode};
 use crate::proto::ids::DeviceId;
@@ -20,11 +20,11 @@ use crate::vocab::{Effect, EffectKind, EffectResult, EffectToken, UiEvent};
 pub struct PluginManifest {
     /// Reverse-DNS, no version: `"org.acrylius.clipboard"`.
     pub id: &'static str,
-    /// Capabilities this side may **send**. Advertised as `caps_out`.
+    /// Capabilities this side may send. Advertised as `caps_out`.
     pub outgoing: &'static [&'static str],
-    /// Capabilities this side can **handle**. Advertised as `caps_in`.
+    /// Capabilities this side can handle. Advertised as `caps_in`.
     pub incoming: &'static [&'static str],
-    /// Effects this plugin needs in order to **serve** requests.
+    /// Effects this plugin needs in order to serve requests.
     ///
     /// It does not gate registration or advertising. A device that cannot lock
     /// a session can still ask another one to, and must still be able to
@@ -64,7 +64,7 @@ impl PluginError {
 }
 
 /// A message a plugin wants sent. The core encrypts and frames it after the
-/// plugin returns — a plugin never holds a session or a link.
+/// plugin returns; a plugin never holds a session or a link.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct PendingSend {
     pub peer: DeviceId,

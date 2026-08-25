@@ -55,9 +55,9 @@ impl PeerRecord {
 
 /// Whether we can currently reach a peer.
 ///
-/// The core models *reachability*, never a role. On iOS a peer is reachable only
+/// The core models reachability, never a role. On iOS a peer is reachable only
 /// while the app is foregrounded, and that is an ordinary state rather than an
-/// error — which is why a plugin sending to an unreachable peer gets a plain
+/// error, which is why a plugin sending to an unreachable peer gets a plain
 /// outcome and not a failure path.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PeerState {

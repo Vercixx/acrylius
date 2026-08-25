@@ -1,19 +1,19 @@
-//! The UniFFI facade — the only crate iOS sees.
+//! The UniFFI facade, the only crate iOS sees.
 //!
 //! It is deliberately thin. Because the core is sans-IO, this boundary is
-//! **synchronous**: Swift calls [`AcryliusCore::handle`] and gets a list of
-//! actions back. There is no async across the FFI and, more importantly, no
-//! Rust→Swift call anywhere — no foreign traits, no callback interfaces. Swift
-//! only ever calls *into* Rust.
+//! synchronous: Swift calls [`AcryliusCore::handle`] and gets a list of actions
+//! back. There is no async across the FFI and, more importantly, no Rust to
+//! Swift call anywhere: no foreign traits, no callback interfaces. Swift only
+//! ever calls into Rust.
 //!
-//! That is not a small detail. Foreign traits would put a Rust→Swift call in the
-//! hot path and reintroduce exactly the reentrancy surface the sans-IO design
+//! That is not a small detail. Foreign traits would put a Rust to Swift call in
+//! the hot path and reintroduce exactly the reentrancy surface the sans-IO design
 //! was chosen to avoid, and it is a surface UniFFI's own documentation declines
 //! to give advice about.
 //!
 //! ## The rule the host must follow
 //!
-//! Actions are executed by a **single serial executor**, results come back as
+//! Actions are executed by a single serial executor, results come back as
 //! events, and `handle()` is never called from inside an action handler. On iOS
 //! that is one `actor` draining an `AsyncStream`. The `Mutex` below makes
 //! breaking the rule safe rather than corrupting, but a host that breaks it will
@@ -71,10 +71,10 @@ pub fn default_config(name: String, platform: String) -> FfiConfig {
 /// A fresh static identity, as raw private key bytes.
 ///
 /// The host stores these in the Keychain with `WhenUnlockedThisDeviceOnly` and
-/// **no biometric ACL**: an item behind `.biometryCurrentSet` cannot be read
-/// while the phone is locked, which would break every short-lived extension.
-/// Biometrics belong on the *action* — a `LAContext` check before sending an
-/// unlock — not on the key. The old project learned that one the hard way.
+/// no biometric ACL: an item behind `.biometryCurrentSet` cannot be read while
+/// the phone is locked, which would break every short-lived extension.
+/// Biometrics belong on the action, as a `LAContext` check before sending an
+/// unlock, not on the key. The old project learned that one the hard way.
 #[uniffi::export]
 #[must_use]
 pub fn generate_identity() -> Vec<u8> {
@@ -118,7 +118,7 @@ impl AcryliusCore {
     ///
     /// `peers` are the raw blobs the host stored from earlier `Persist` actions,
     /// in any order. One that fails to decode is skipped and reported by
-    /// [`Self::restored_peers`] being smaller than what was handed in — the host
+    /// [`Self::restored_peers`] being smaller than what was handed in. The host
     /// should treat that as a corrupted record worth telling someone about,
     /// because "absent" means "this device is a stranger".
     #[uniffi::constructor]
@@ -154,7 +154,7 @@ impl AcryliusCore {
         })
     }
 
-    /// The single entry point. `now_ms` is the host's **monotonic** clock, so
+    /// The single entry point. `now_ms` is the host's monotonic clock, so
     /// that moving the wall clock cannot extend a pairing window.
     pub fn handle(&self, now_ms: u64, event: FfiEvent) -> Result<FfiOutcome, FfiError> {
         let ev = event.try_into()?;

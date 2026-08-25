@@ -2,7 +2,7 @@
 //!
 //! Everything here goes over the `0600` Unix socket with a `SO_PEERCRED` uid
 //! check. There is no network equivalent, and `pair` in particular has no route
-//! from outside this machine — which is how "you must be at the PC" stays true
+//! from outside this machine, which is how "you must be at the PC" stays true
 //! even if a future plugin is careless.
 
 use std::path::PathBuf;
@@ -26,7 +26,7 @@ struct Args {
 enum Cmd {
     // Every `device` positional below carries `allow_hyphen_values`. A device
     // id is strict base64url, whose alphabet includes '-', so roughly one id in
-    // sixty-four begins with one — and clap would read that as a flag and
+    // sixty-four begins with one, and clap would read that as a flag and
     // refuse the command. It is rare enough to look like a fluke in the field
     // and is pinned by a test below.
     /// Daemon identity, port and negotiated capabilities.
@@ -198,7 +198,7 @@ async fn main() -> anyhow::Result<()> {
     let path = socket_path(args.state);
     let stream = UnixStream::connect(&path)
         .await
-        .with_context(|| format!("no daemon at {} — is acryliusd running?", path.display()))?;
+        .with_context(|| format!("no daemon at {}; is acryliusd running?", path.display()))?;
     let (rd, mut wr) = stream.into_split();
     let mut lines = BufReader::new(rd).lines();
 

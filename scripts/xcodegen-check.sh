@@ -3,7 +3,7 @@
 # Validate ios/project.yml **on Linux**, in seconds rather than a CI round trip.
 #
 # XcodeGen is a Swift package with no Darwin-only dependencies, so it builds and
-# runs here. The .xcodeproj it produces is thrown away — this only proves the
+# runs here. The .xcodeproj it produces is thrown away; this only proves the
 # manifest is well-formed and that every source path it names exists. Xcode is
 # still the only thing that can *build* the result.
 #
@@ -40,7 +40,7 @@ echo
 echo "shared schemes:"
 schemes=$(find ios/Acrylius.xcodeproj -name '*.xcscheme' -exec basename {} .xcscheme \; | sort)
 if [ -z "$schemes" ]; then
-    echo "  none — xcodebuild -scheme will fail"
+    echo "  none: xcodebuild -scheme will fail"
     rm -rf ios/Acrylius.xcodeproj
     exit 1
 fi

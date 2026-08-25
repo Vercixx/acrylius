@@ -1,7 +1,7 @@
 //! Two cores, one process, no sockets and no clock.
 //!
 //! This is the project's spine. It drives a complete `XXpsk3` pairing, then an
-//! `IKpsk2` session, then a plugin round trip, entirely in memory — so the whole
+//! `IKpsk2` session, then a plugin round trip, entirely in memory, so the whole
 //! protocol is verifiable on a Linux box with no Apple hardware anywhere near
 //! it. That was the point of making the core sans-IO.
 
@@ -85,7 +85,7 @@ impl Net {
         let mut guard = 0;
         while let Some((side, ev)) = self.queue.pop_front() {
             guard += 1;
-            assert!(guard < 500, "the harness did not settle — a message loop?");
+            assert!(guard < 500, "the harness did not settle: a message loop?");
             let now = self.now;
             let out = self.core(side).handle(now, ev);
             for action in out.actions {
@@ -330,7 +330,7 @@ fn a_wrong_pairing_code_does_not_pair() {
 fn pairing_is_refused_when_no_window_is_open() {
     let (a, b) = (core("phone"), core("pc"));
     let mut net = Net::new(a, b);
-    // B never opened a window. The attempt must not merely fail a check — there
+    // B never opened a window. The attempt must not merely fail a check: there
     // is nothing to talk to.
     net.local(
         Side::A,

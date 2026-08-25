@@ -1,9 +1,9 @@
 //! Effectors for a Linux desktop.
 //!
-//! The core decides *what* should happen. This crate is where it actually
+//! The core decides what should happen. This crate is where it actually
 //! happens, and it is the only part of the project that knows logind exists.
 //!
-//! Everything here runs as **your user**, never root. logind passes a session's
+//! Everything here runs as your user, never root. logind passes a session's
 //! owner uid to polkit as `good_user`, which short-circuits the check when the
 //! caller's uid matches, so locking and unlocking your own session needs no
 //! sudo, no setuid binary and no polkit rule. That is what lets the systemd unit

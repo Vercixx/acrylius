@@ -2,7 +2,7 @@
 //!
 //! Two things about Wayland shape this.
 //!
-//! **Whoever sets a selection must stay alive to serve it.** A clipboard is not
+//! Whoever sets a selection must stay alive to serve it. A clipboard is not
 //! storage; it is a promise to hand over bytes when someone asks. So setting the
 //! clipboard starts a thread that serves it, and that thread lives until another
 //! client takes the selection away, at which point the compositor tells it so and
@@ -10,7 +10,7 @@
 //! does not have to, and forking a multithreaded process to run a Wayland event
 //! loop is worth avoiding, so this uses foreground mode and owns the thread.
 //!
-//! **There is no watch API.** `wl-clipboard-rs` exposes `copy` and `paste` and
+//! There is also no watch API. `wl-clipboard-rs` exposes `copy` and `paste` and
 //! nothing else, so noticing a change means polling and comparing a hash. That
 //! costs a wakeup a second and is the honest option for version 1; binding
 //! `ext-data-control` directly to get a `selection` event is the upgrade, and it

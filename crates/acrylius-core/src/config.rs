@@ -9,8 +9,8 @@ pub struct CoreConfig {
     pub platform: String,
     /// How long a pairing window stays open.
     ///
-    /// Measured by the host on a **monotonic** clock, so that changing the wall
-    /// clock cannot extend it — a lesson carried over from `pc-helper-ios`.
+    /// Measured by the host on a monotonic clock, so that changing the wall
+    /// clock cannot extend it. That lesson is carried over from `pc-helper-ios`.
     pub pairing_window_ms: u64,
     /// How many failed handshakes close the window entirely.
     ///

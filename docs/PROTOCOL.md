@@ -133,7 +133,7 @@ The pre-shared key comes from the pairing code:
 psk = HKDF(salt = "acrylius/pair/v1/psk", ikm = normalized_code, info = "", 32)
 ```
 
-The PSK is at position **0**, not 3, and the difference matters. `psk3` mixes
+The PSK is at position 0, not 3, and the difference matters. `psk3` mixes
 the key into message 3, which the initiator writes. It therefore proves to the
 responder that the initiator knew the code and proves nothing in the other
 direction: an initiator talking to the wrong machine completes its side,
@@ -399,7 +399,7 @@ exactly why it is written down here.
 ```
 
 The interesting half of waking a computer involves no messages at all. A
-sleeping computer is not running the daemon, so the **phone** sends the magic
+sleeping computer is not running the daemon, so the phone sends the magic
 packet. `config` exists to tell the phone what to send and where.
 
 A magic packet is `ff` six times followed by the MAC repeated 16 times, 102
@@ -438,7 +438,7 @@ In version 1 `mime` is `text/plain;charset=utf-8` and `data` is capped at
 
 A `set` carrying `re` answers a `get` and is a different thing from an
 unsolicited push. An answer is always delivered to whoever asked, regardless of
-the receive switch, and is **not** written to the local clipboard: the caller
+the receive switch, and is not written to the local clipboard: the caller
 asked to see the value, not to take it. Taking ownership of a selection nobody
 asked for is how two devices end up fighting over one.
 
@@ -460,8 +460,8 @@ phone to computer silently. Computer to phone is unaffected.
 <-  exited   body: [0 run_id:u32, 1 code:i32, 2 truncated:bool]
 ```
 
-One rule makes this a command runner and not a remote shell: **the wire carries
-an `id` from the computer's own configuration and never a command string.** An
+One rule makes this a command runner and not a remote shell: the wire carries
+an `id` from the computer's own configuration and never a command string. An
 id that is not in the allowlist is answered with `not_allowed`.
 
 A command runs as an argv vector with an absolute path and no shell. It has a

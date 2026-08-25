@@ -52,8 +52,8 @@ public enum MagicPacketSender {
         let connection = NWConnection(host: .init(host), port: p, using: .udp)
         return await withCheckedContinuation { continuation in
             // Not a captured `var`. Two Network.framework callbacks can arrive
-            // concurrently — a send completing while the state handler reports
-            // `.cancelled`, say — and resuming a continuation twice is a crash,
+            // concurrently (a send completing while the state handler reports
+            // `.cancelled`, say), and resuming a continuation twice is a crash,
             // not a warning. `Once` makes the winner unambiguous.
             let once = Once()
             let finish: @Sendable (Bool) -> Void = { ok in

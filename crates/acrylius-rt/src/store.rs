@@ -5,7 +5,7 @@
 //! watermark have made unnecessary.
 //!
 //! Every write is a create-then-rename, so a crash mid-write leaves the previous
-//! record intact rather than a truncated one — a peer record with half a key in
+//! record intact rather than a truncated one. A peer record with half a key in
 //! it would be indistinguishable from a corrupted pairing.
 
 use std::io;
@@ -37,8 +37,8 @@ impl FileStore {
     }
 
     /// Keys are `peer/<device-id>`. A device id is strict base64url, which
-    /// contains no `/` and no `.`, so it cannot climb out of the directory —
-    /// but reject anything unexpected anyway rather than rely on that.
+    /// contains no `/` and no `.`, so it cannot climb out of the directory, but
+    /// reject anything unexpected anyway rather than rely on that.
     fn path_for(&self, key: &str) -> io::Result<PathBuf> {
         if key.contains("..") || key.starts_with('/') || key.matches('/').count() != 1 {
             return Err(io::Error::new(

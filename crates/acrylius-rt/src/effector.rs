@@ -7,8 +7,8 @@ pub trait Effector: Send + Sync + 'static {
     /// Which effect kinds this host can actually carry out.
     ///
     /// The core drops plugins whose requirements are unmet and never advertises
-    /// their capabilities, so this list is what decides the device's feature set
-    /// — not a `#[cfg]` and not a config file.
+    /// their capabilities, so this list is what decides the device's feature
+    /// set. Not a `#[cfg]`, and not a config file.
     fn supported(&self) -> Vec<EffectKind>;
 
     async fn run(&self, effect: Effect) -> EffectResult;

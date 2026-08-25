@@ -1,7 +1,7 @@
 //! The one byte outside the encryption.
 //!
 //! A responder has to know which handshake it is being offered before it can
-//! build the right `HandshakeState` — the pairing and session patterns are
+//! build the right `HandshakeState`: the pairing and session patterns are
 //! different, so it cannot simply try to read the message. One leading tag byte
 //! answers that.
 //!

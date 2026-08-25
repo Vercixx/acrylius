@@ -1,14 +1,14 @@
-//! The Event / Action vocabulary — **the normative host seam.**
+//! The Event / Action vocabulary. This is the normative host seam.
 //!
 //! This is the part other implementations conform to. A host "implements a
 //! transport" by producing [`Event::LinkUp`] / [`Event::LinkRecv`] /
 //! [`Event::LinkDown`] and carrying out [`Action::Dial`] / [`Action::LinkSend`] /
 //! [`Action::Close`]. It "implements an effector" by carrying out
 //! [`Action::Effect`] and reporting [`Event::EffectDone`]. There is no trait to
-//! implement and nothing to link against — which is exactly why the iOS host can
-//! be Swift over Network.framework with no Rust→Swift call anywhere in it.
+//! implement and nothing to link against, which is exactly why the iOS host can
+//! be Swift over Network.framework with no Rust to Swift call anywhere in it.
 //!
-//! **The rule every host must follow:** actions are executed by a single serial
+//! Every host must follow one rule: actions are executed by a single serial
 //! executor, results come back as events, and `handle()` is never called from
 //! inside an action handler. Breaking it produces reentrancy bugs that are very
 //! hard to see and very easy to avoid.
@@ -29,8 +29,8 @@ pub struct DialToken(pub u64);
 /// nothing more. Identity comes from the handshake, never from an advertisement.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct DiscoveredPeer {
-    /// Advertised fingerprint. A *hint* for matching against a known peer — a
-    /// liar can put anything here, and the handshake is what settles it.
+    /// Advertised fingerprint. A hint for matching against a known peer: a liar
+    /// can put anything here, and the handshake is what settles it.
     pub fingerprint: Option<Fingerprint>,
     pub name: String,
     /// Transport-defined and opaque to the core: a `host:port`, a BLE address.
@@ -76,8 +76,8 @@ pub enum Event {
 pub enum LocalCommand {
     /// Open a pairing window and wait for someone to use `code`.
     ///
-    /// On the desktop this is reachable *only* over the `SO_PEERCRED`-guarded
-    /// control socket — there is deliberately no network route to it, so "you
+    /// On the desktop this is reachable only over the `SO_PEERCRED`-guarded
+    /// control socket. There is deliberately no network route to it, so "you
     /// must be at the machine" is a property of the transport rather than a rule
     /// a handler could forget to enforce.
     OpenPairingWindow {
@@ -97,8 +97,8 @@ pub enum LocalCommand {
     ClosePairingWindow,
     /// Tell the core where a peer can be reached, bypassing discovery.
     ///
-    /// Discovery is only ever a *hint*, so a hint supplied by a human who knows
-    /// the address is worth exactly as much — and it is what makes the daemon
+    /// Discovery is only ever a hint, so a hint supplied by a human who knows
+    /// the address is worth exactly as much. It is also what makes the daemon
     /// usable on a network where mDNS is filtered.
     SetPeerAddress {
         peer: DeviceId,
@@ -160,7 +160,7 @@ pub enum Effect {
 ///
 /// A plugin lists what it requires; a host that cannot provide it has that
 /// plugin disabled and its capabilities left out of the handshake. That is how
-/// iOS and Linux register the *identical* plugin set and simply negotiate down,
+/// iOS and Linux register the identical plugin set and simply negotiate down,
 /// rather than growing a `#[cfg]` forest.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum EffectKind {
@@ -237,7 +237,7 @@ pub enum UiEvent {
 }
 
 /// Where a persisted value should live. The core does no IO, so it says what a
-/// value *is* and lets the host decide where that belongs — Keychain on iOS, a
+/// value is and lets the host decide where that belongs: Keychain on iOS, a
 /// `0600` file on Linux.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Sensitivity {

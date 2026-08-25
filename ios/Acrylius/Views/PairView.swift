@@ -47,7 +47,7 @@ struct PairView: View {
 
 /// Both ends show the same six digits. The user compares them.
 ///
-/// The code is a cross-check, not the security mechanism — `XXpsk0` already
+/// The code is a cross-check, not the security mechanism: `XXpsk0` already
 /// makes a wrong pairing code fail to decrypt. Showing it costs nothing and
 /// catches the class of bug a PSK check would mask.
 struct ConfirmPairingView: View {

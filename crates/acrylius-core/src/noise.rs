@@ -1,22 +1,22 @@
 //! The Noise layer: two patterns, one prologue, no IO.
 //!
-//! `snow` is itself sans-IO — `write_message(payload, &mut out)` and
-//! `read_message(msg, &mut out)` are pure buffer transforms — so this module
+//! `snow` is itself sans-IO. `write_message(payload, &mut out)` and
+//! `read_message(msg, &mut out)` are pure buffer transforms, so this module
 //! composes with the core's state machine without a shim, and every test below
 //! runs with no sockets and no clock.
 //!
 //! ## Two patterns, and why each
 //!
-//! **Pairing is `XXpsk0`.** Plain `XX` would authenticate nothing until a human
+//! Pairing is `XXpsk0`. Plain `XX` would authenticate nothing until a human
 //! compared a short string carefully, and humans do not. We already have an
-//! out-of-band channel — the code `acryliusctl pair` prints — so the code is
+//! out-of-band channel, the code `acryliusctl pair` prints, so the code is
 //! mixed in as a pre-shared key. `XX` also means neither side needs to know the
 //! other's static key in advance, which is exactly the situation on first
 //! contact.
 //!
-//! The PSK goes at position **0**, not 3, and the difference is not cosmetic.
-//! `psk3` mixes the key into message 3, which the *initiator* writes — so it
-//! proves to the responder that the initiator knew the code, and proves nothing
+//! The PSK goes at position 0, not 3, and the difference is not cosmetic.
+//! `psk3` mixes the key into message 3, which the initiator writes, so it
+//! proves to the responder that the initiator knew the code and proves nothing
 //! in the other direction. An initiator talking to the wrong machine would
 //! complete its side, display a short authentication string, and sit waiting for
 //! a human to approve a peer that had never demonstrated knowing anything.
@@ -26,8 +26,8 @@
 //! anywhere. The loopback suite pins this as
 //! `a_wrong_pairing_code_does_not_pair`.
 //!
-//! **Sessions are `IKpsk2`.** The initiator already knows the responder's static
-//! key from pairing, so the session is up in one round trip — which matters
+//! Sessions are `IKpsk2`. The initiator already knows the responder's static
+//! key from pairing, so the session is up in one round trip, which matters
 //! because an App Intent gets seconds of process life. The PSK is derived at
 //! pairing time and never transmitted, so a session opener stays opaque even to
 //! someone who has somehow obtained the responder's static key.
@@ -80,8 +80,8 @@ impl Mode {
 
     /// The prologue, mixed into the handshake hash by both sides.
     ///
-    /// Not secret — an observer sees it — but authenticated, so it cannot be
-    /// altered in flight without both sides noticing.
+    /// Not secret, since an observer sees it, but authenticated, so it cannot
+    /// be altered in flight without both sides noticing.
     fn prologue(self) -> Vec<u8> {
         let mut p = Vec::new();
         p.extend_from_slice(b"ACR");
@@ -140,7 +140,7 @@ impl Identity {
 
     /// Load an identity from its stored private half.
     ///
-    /// The public key is *derived*, never stored alongside and trusted: a file
+    /// The public key is derived, never stored alongside and trusted: a file
     /// that had been edited to pair a real private key with someone else's
     /// public key would otherwise produce an identity whose fingerprint lies
     /// about which key it can actually prove possession of.
@@ -218,7 +218,7 @@ impl Handshake {
     ///
     /// `IKpsk2` puts the responder in an awkward spot: `snow` wants the PSK at
     /// build time, but the PSK is per-peer and the peer's identity arrives
-    /// *inside* message 1. The way out is that `psk2` is mixed at message **2** —
+    /// inside message 1. The way out is that `psk2` is mixed at message 2:
     /// message 1's tokens are `e, es, s, ss` and its payload is encrypted under a
     /// chaining key the PSK has not touched yet. So a throwaway handshake built
     /// with a zero PSK reads message 1 to exactly the same result as the real one
@@ -227,7 +227,7 @@ impl Handshake {
     /// The caller uses the returned static key to find the peer, then builds a
     /// real responder with that peer's PSK and replays the same message 1 into
     /// it. Nothing is leaked and nothing is trusted: the identity learned here is
-    /// only used to *choose* a PSK, and if the choice is wrong, message 2 fails
+    /// only used to choose a PSK, and if the choice is wrong, message 2 fails
     /// on the initiator exactly as it should.
     pub fn session_identify(id: &Identity, msg1: &[u8]) -> Result<[u8; 32], NoiseError> {
         let mut probe = Self::build(Mode::Session, id, &[0u8; 32], None, false)?;
@@ -310,7 +310,7 @@ impl Handshake {
 
     /// The handshake hash, for the SAS and for deriving the session PSK.
     ///
-    /// Only meaningful once complete — before that it is a running value and two
+    /// Only meaningful once complete. Before that it is a running value, and two
     /// honest peers would derive different strings from it.
     pub fn handshake_hash(&self) -> Result<Vec<u8>, NoiseError> {
         if !self.is_complete() {
@@ -344,7 +344,7 @@ pub struct Session {
 }
 
 /// Rekey before the cipher's nonce space gets anywhere near exhaustion.
-/// ChaChaPoly's counter is 64-bit, so this is enormously conservative — which is
+/// ChaChaPoly's counter is 64-bit, so this is enormously conservative, which is
 /// the point: it costs nothing and removes a class of bug entirely.
 pub const REKEY_AFTER_MESSAGES: u64 = 1 << 20;
 
@@ -479,7 +479,7 @@ mod tests {
         let (a, b) = (Identity::generate().unwrap(), Identity::generate().unwrap());
         let right = pairing::psk(&pairing::normalize("ABCD1234").unwrap());
         let wrong = pairing::psk(&pairing::normalize("ABCD1235").unwrap());
-        // Not "a check returns false" — the handshake cannot start.
+        // Not "a check returns false": the handshake cannot start.
         assert!(pair(&a, &b, &right, &wrong).is_err());
 
         // Specifically: the responder cannot even read message 1, so it never

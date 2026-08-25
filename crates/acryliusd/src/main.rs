@@ -1,8 +1,8 @@
 //! The acrylius daemon.
 //!
-//! Runs as **your user**, not root. That is not a compromise: logind passes the
+//! Runs as your user, not root. That is not a compromise: logind passes the
 //! session owner's uid to polkit as `good_user`, which short-circuits the check
-//! when the caller's uid matches — so locking and unlocking your own session
+//! when the caller's uid matches, so locking and unlocking your own session
 //! needs no sudo, no setuid binary and no polkit rule. Nothing here requires
 //! privilege, which is what lets the systemd unit be locked down hard.
 
@@ -58,7 +58,7 @@ fn state_dir(arg: Option<PathBuf>) -> PathBuf {
 
 /// Load the static identity, or make one on first run.
 ///
-/// The public half is always *derived* from the private half rather than stored
+/// The public half is always derived from the private half rather than stored
 /// beside it, so a file that had been edited cannot produce an identity whose
 /// fingerprint lies about the key it can prove possession of.
 fn load_identity(state: &std::path::Path) -> anyhow::Result<Identity> {
@@ -195,7 +195,7 @@ async fn main() -> anyhow::Result<()> {
     let mut rt = Runtime::new(core, effector, Box::new(store));
 
     // Keep the control socket's answers live. The closure sees `&Core` and
-    // nothing more — there is deliberately no way to reach `handle()` from
+    // nothing more, so there is deliberately no way to reach `handle()` from
     // here, which is what keeps the single-serial-executor rule intact.
     {
         let devices = devices.clone();
