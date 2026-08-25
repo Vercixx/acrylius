@@ -18,11 +18,13 @@ struct PairView: View {
                         .autocorrectionDisabled()
                         .font(.body.monospaced())
                 }
-                Section("Where") {
+                Section {
                     TextField("192.168.1.10:1971", text: $addr)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .keyboardType(.URL)
+                } header: {
+                    Text("Where")
                 } footer: {
                     Text("Run `acryliusctl pair` on the PC first. It prints both.")
                 }

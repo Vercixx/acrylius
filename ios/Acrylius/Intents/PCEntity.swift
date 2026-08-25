@@ -18,7 +18,7 @@ struct PCEntity: AppEntity {
         DisplayRepresentation(title: "\(name)")
     }
 
-    static var defaultQuery = PCQuery()
+    static var defaultQuery: PCQuery { PCQuery() }
 }
 
 struct PCQuery: EntityQuery {

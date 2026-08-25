@@ -26,12 +26,14 @@ struct DeviceView: View {
             }
 
             if let session = features.session {
-                Section("Session") {
+                Section {
                     LabeledContent("Screen", value: session.locked ? "Locked" : "Unlocked")
                     Button("Lock") { Task { await model.lock(peer) } }
                         .disabled(session.locked)
                     Button("Unlock") { Task { await model.unlock(peer) } }
                         .disabled(!session.locked)
+                } header: {
+                    Text("Session")
                 } footer: {
                     Text("Unlocking asks for Face ID. Locking does not.")
                 }

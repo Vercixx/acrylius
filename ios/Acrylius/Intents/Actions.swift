@@ -47,9 +47,9 @@ enum IntentRunner {
 }
 
 struct LockPCIntent: AppIntent {
-    static var title: LocalizedStringResource = "Lock PC"
-    static var description = IntentDescription("Lock your computer's screen.")
-    static var openAppWhenRun = false
+    static var title: LocalizedStringResource { "Lock PC" }
+    static var description: IntentDescription { IntentDescription("Lock your computer's screen.") }
+    static var openAppWhenRun: Bool { false }
 
     // Deliberately no `authenticationPolicy`.
     //
@@ -68,17 +68,18 @@ struct LockPCIntent: AppIntent {
             try? await Task.sleep(for: .seconds(2))
             return true
         }
-        return .result(dialog: ok == true ? "Locked \(pc.name)." : "Could not reach \(pc.name).")
+        let dialog: IntentDialog = ok == true ? "Locked \(pc.name)." : "Could not reach \(pc.name)."
+        return .result(dialog: dialog)
     }
 }
 
 struct UnlockPCIntent: AppIntent {
-    static var title: LocalizedStringResource = "Unlock PC"
-    static var description = IntentDescription("Unlock your computer's screen.")
-    static var openAppWhenRun = false
+    static var title: LocalizedStringResource { "Unlock PC" }
+    static var description: IntentDescription { IntentDescription("Unlock your computer's screen.") }
+    static var openAppWhenRun: Bool { false }
 
     /// Unlocking hands over a running session, so the phone must be the owner's.
-    static var authenticationPolicy: IntentAuthenticationPolicy = .requiresAuthentication
+    static var authenticationPolicy: IntentAuthenticationPolicy { .requiresAuthentication }
 
     @Parameter(title: "PC") var pc: PCEntity
 
@@ -90,14 +91,15 @@ struct UnlockPCIntent: AppIntent {
             try? await Task.sleep(for: .seconds(2))
             return true
         }
-        return .result(dialog: ok == true ? "Unlocked \(pc.name)." : "Could not reach \(pc.name).")
+        let dialog: IntentDialog = ok == true ? "Unlocked \(pc.name)." : "Could not reach \(pc.name)."
+        return .result(dialog: dialog)
     }
 }
 
 struct WakePCIntent: AppIntent {
-    static var title: LocalizedStringResource = "Wake PC"
-    static var description = IntentDescription("Send a wake-up packet to your computer.")
-    static var openAppWhenRun = false
+    static var title: LocalizedStringResource { "Wake PC" }
+    static var description: IntentDescription { IntentDescription("Send a wake-up packet to your computer.") }
+    static var openAppWhenRun: Bool { false }
 
     @Parameter(title: "PC") var pc: PCEntity
 
@@ -107,7 +109,8 @@ struct WakePCIntent: AppIntent {
         // was awake, which is on disk.
         let store = try KeychainStore()
         guard let key = store.identityKey() else {
-            return .result(dialog: "Acrylius is not set up yet.")
+            let dialog: IntentDialog = "Acrylius is not set up yet."
+            return .result(dialog: dialog)
         }
         let core = try AcryliusCore(
             config: defaultConfig(name: "Acrylius", platform: "ios"),
@@ -115,27 +118,31 @@ struct WakePCIntent: AppIntent {
             peers: store.loadPeers()
         )
         guard core.peers().contains(where: { $0.deviceId == pc.id }) else {
-            return .result(dialog: "\(pc.name) is not paired.")
+            let dialog: IntentDialog = "\(pc.name) is not paired."
+            return .result(dialog: dialog)
         }
         guard let config = WakeTargets.load(for: pc.id),
               let mac = config.macs.first,
               let packet = try? magicPacket(mac: mac)
         else {
-            return .result(dialog: "\(pc.name) has not told this phone how to wake it. "
-                                 + "Open it in the app once while it is awake.")
+            // A concatenation is a String, not a literal, so it needs an
+            // explicit IntentDialog like every other branch here.
+            let dialog: IntentDialog = "\(pc.name) has not told this phone how to wake it. Open it in the app once while it is awake."
+            return .result(dialog: dialog)
         }
         var destinations: [String] = []
         if !config.lastIpv4.isEmpty { destinations.append(config.lastIpv4) }
         if !config.broadcast.isEmpty { destinations.append(config.broadcast) }
         let sent = await MagicPacketSender.send(packet, to: destinations, port: config.port)
-        return .result(dialog: sent ? "Sent a wake-up to \(pc.name)." : "Could not send it.")
+        let dialog: IntentDialog = sent ? "Sent a wake-up to \(pc.name)." : "Could not send it."
+        return .result(dialog: dialog)
     }
 }
 
 struct RunCommandIntent: AppIntent {
-    static var title: LocalizedStringResource = "Run a command"
-    static var description = IntentDescription("Run one of the commands your computer offers.")
-    static var openAppWhenRun = false
+    static var title: LocalizedStringResource { "Run a command" }
+    static var description: IntentDescription { IntentDescription("Run one of the commands your computer offers.") }
+    static var openAppWhenRun: Bool { false }
 
     @Parameter(title: "PC") var pc: PCEntity
     @Parameter(title: "Command") var command: String
@@ -150,7 +157,8 @@ struct RunCommandIntent: AppIntent {
             try? await Task.sleep(for: .seconds(3))
             return true
         }
-        return .result(dialog: ok == true ? "Ran \(command)." : "Could not reach \(pc.name).")
+        let dialog: IntentDialog = ok == true ? "Ran \(command)." : "Could not reach \(pc.name)."
+        return .result(dialog: dialog)
     }
 }
 

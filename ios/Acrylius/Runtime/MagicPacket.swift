@@ -18,6 +18,20 @@
 import Foundation
 import Network
 
+/// Lets exactly one caller through, whichever arrives first.
+private final class Once: @unchecked Sendable {
+    private let lock = NSLock()
+    private var taken = false
+
+    func claim() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        if taken { return false }
+        taken = true
+        return true
+    }
+}
+
 public enum MagicPacketSender {
     /// Send to every destination in order. Returns true if any send succeeded.
     ///
@@ -37,10 +51,13 @@ public enum MagicPacketSender {
         guard let p = NWEndpoint.Port(rawValue: port) else { return false }
         let connection = NWConnection(host: .init(host), port: p, using: .udp)
         return await withCheckedContinuation { continuation in
-            var resumed = false
+            // Not a captured `var`. Two Network.framework callbacks can arrive
+            // concurrently — a send completing while the state handler reports
+            // `.cancelled`, say — and resuming a continuation twice is a crash,
+            // not a warning. `Once` makes the winner unambiguous.
+            let once = Once()
             let finish: @Sendable (Bool) -> Void = { ok in
-                guard !resumed else { return }
-                resumed = true
+                guard once.claim() else { return }
                 connection.cancel()
                 continuation.resume(returning: ok)
             }
