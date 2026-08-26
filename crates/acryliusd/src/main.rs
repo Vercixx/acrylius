@@ -31,6 +31,10 @@ use clap::Parser;
 use tokio::sync::{Mutex, broadcast};
 
 const TCP: TransportId = TransportId(1);
+/// Higher than TCP, and that is load-bearing rather than arbitrary: the core
+/// tries routes in ascending transport order, so Wi-Fi is preferred and BLE is
+/// what a peer falls back to.
+const BLE: TransportId = TransportId(2);
 
 #[derive(Parser, Debug)]
 #[command(name = "acryliusd", version, about = "The acrylius daemon")]
@@ -446,6 +450,17 @@ async fn main() -> anyhow::Result<()> {
     rt.add_transport(
         Arc::new(TcpTransport::new(TCP, port, fingerprint, name.clone())) as Arc<dyn Transport>,
     );
+    // Registered unconditionally. A machine with no adapter, or one whose
+    // controller cannot be a peripheral, answers that in `run` and quietly does
+    // nothing — the same "the machine reports what it has" rule the effectors
+    // follow, rather than a `#[cfg]` or a config flag that lies on the wrong
+    // hardware.
+    if cfg.ble.enabled {
+        rt.add_transport(
+            Arc::new(acrylius_linux::ble::BleTransport::new(BLE, name.clone()))
+                as Arc<dyn Transport>,
+        );
+    }
 
     // The control socket sees UI events over a broadcast, so several `acryliusctl`
     // invocations can watch at once without stealing each other's events.

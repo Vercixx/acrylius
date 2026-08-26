@@ -80,6 +80,11 @@ targets:
           # doing and may not be allowed to compile against. The widget builds
           # no core with effects, so nothing here wants it.
           - "IosEffector.swift"
+          # CoreBluetooth. The widget asks nothing and connects to nothing, and
+          # linking this would give the extension a permission it can never
+          # prompt for — its Info.plist carries no usage description, and an
+          # extension has no way to show one.
+          - "BLETransport.swift"
       - path: Acrylius/Intents
         excludes:
           # An app and its extension may not each declare an

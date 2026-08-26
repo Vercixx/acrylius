@@ -9,6 +9,7 @@
 //! sudo, no setuid binary and no polkit rule. That is what lets the systemd unit
 //! be locked down hard: nothing it does requires privilege.
 
+pub mod ble;
 pub mod clipboard;
 pub mod command;
 pub mod compositor;

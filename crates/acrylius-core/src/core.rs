@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::config::CoreConfig;
-use crate::link::{LinkAttrs, LinkDownReason, LinkId, TransportId};
+use crate::link::{LinkAttrs, LinkDownReason, LinkId, Routes, TransportId};
 use crate::noise::{Handshake, Identity, Session};
 use crate::peer::{PeerRecord, PeerState};
 use crate::plugin::{BulkRequest, Cx, PendingSend, Plugin};
@@ -87,7 +87,7 @@ pub struct Core {
     links: BTreeMap<LinkId, LinkState>,
     /// Last address discovery offered for a peer. Untrusted, and only ever used
     /// to decide where to dial, never to decide who answered.
-    addrs: BTreeMap<DeviceId, (TransportId, String)>,
+    addrs: BTreeMap<DeviceId, Routes>,
     /// Every address discovery has ever shown us, keyed by advertised
     /// fingerprint and kept regardless of whether that device is paired.
     ///
@@ -95,12 +95,14 @@ pub struct Core {
     /// about it changes, so an announcement that arrives before pairing is the
     /// only one there will be. Dropping it because the sender was not yet a
     /// peer meant the address was gone for good.
-    seen: BTreeMap<Fingerprint, (TransportId, String)>,
+    seen: BTreeMap<Fingerprint, Routes>,
     pairing: Option<PairingWindow>,
     /// Dials we started for pairing, and the PSK to use when they land.
     pending_pair_dials: BTreeMap<DialToken, ([u8; 32], (TransportId, String))>,
-    /// Dials we started to reach a known peer.
-    pending_peer_dials: BTreeMap<DialToken, DeviceId>,
+    /// Dials we started to reach a known peer, each with the routes not yet
+    /// tried. A dial that fails falls through to the next rather than reporting
+    /// the peer unreachable while a working route sits untried.
+    pending_peer_dials: BTreeMap<DialToken, (DeviceId, Vec<(TransportId, String)>)>,
     plugins: Vec<Box<dyn Plugin>>,
     /// Which plugin asked for an outstanding effect.
     effect_owner: BTreeMap<EffectToken, usize>,
@@ -205,8 +207,23 @@ impl Core {
             Event::LinkDown { link, .. } => self.on_link_down(now_ms, link, &mut out),
             Event::DialFailed { dial, reason } => {
                 self.pending_pair_dials.remove(&dial);
-                if let Some(p) = self.pending_peer_dials.remove(&dial) {
-                    out.ui(UiEvent::PeerUnreachable { peer: p });
+                if let Some((peer, mut routes)) = self.pending_peer_dials.remove(&dial) {
+                    // A device on Wi-Fi and BLE has two ways in. Reporting it
+                    // unreachable because the first failed would be wrong, and
+                    // wrong in the direction a user cannot diagnose.
+                    if routes.is_empty() {
+                        out.ui(UiEvent::PeerUnreachable { peer });
+                    } else {
+                        let (transport, addr) = routes.remove(0);
+                        self.next_dial += 1;
+                        let next = DialToken(self.next_dial);
+                        self.pending_peer_dials.insert(next, (peer, routes));
+                        out.push(Action::Dial {
+                            transport,
+                            addr,
+                            dial: next,
+                        });
+                    }
                 } else {
                     out.ui(UiEvent::PairingFailed { reason });
                 }
@@ -218,14 +235,19 @@ impl Core {
                     // happens after the single resolution discovery will emit —
                     // so dropping this as "not a peer yet" threw away the only
                     // chance to learn where that device lives.
-                    self.seen.insert(fp.clone(), (transport, peer.addr.clone()));
+                    // Per transport, so a sighting on one never evicts what
+                    // another already knows.
+                    self.seen
+                        .entry(fp.clone())
+                        .or_default()
+                        .set(transport, peer.addr.clone());
                     if let Some(rec) = self
                         .peers
                         .values()
                         .find(|r| r.fingerprint().as_ref() == Some(&fp))
                         && let Some(id) = rec.id()
                     {
-                        self.addrs.insert(id, (transport, peer.addr));
+                        self.addrs.entry(id).or_default().set(transport, peer.addr);
                     }
                 }
             }
@@ -335,8 +357,10 @@ impl Core {
 
         // A link we dialled to reach a known peer: IKpsk2, we speak first.
         if let Some(d) = dial
-            && let Some(peer) = self.pending_peer_dials.remove(&d)
+            && let Some((peer, _untried)) = self.pending_peer_dials.remove(&d)
         {
+            // The routes we did not need are dropped with the token: this dial
+            // landed, so there is nothing left to fall back to.
             self.start_session_initiator(now_ms, link, attrs, peer, deadline, out);
             return;
         }
@@ -759,14 +783,17 @@ impl Core {
         // it: discovery may not speak again for a long time, and until this was
         // recorded a device reported itself unreachable the moment after it
         // finished pairing.
-        if let Some(via) = a.via {
-            self.addrs.insert(id.clone(), via);
+        if let Some((transport, addr)) = a.via {
+            self.addrs
+                .entry(id.clone())
+                .or_default()
+                .set(transport, addr);
         } else if let Some(fp) = a.record.fingerprint()
             && let Some(via) = self.seen.get(&fp).cloned()
         {
             // They dialled us, so we have no address of theirs from the
             // handshake. Discovery may still have shown us one.
-            self.addrs.insert(id.clone(), via);
+            self.addrs.entry(id.clone()).or_default().merge_from(&via);
         }
         let (key, value) = Self::peer_blob(&a.record);
         out.push(Action::Persist {
@@ -1121,7 +1148,7 @@ impl Core {
                 addr,
             } => {
                 if self.peers.contains_key(&peer) {
-                    self.addrs.insert(peer, (transport, addr));
+                    self.addrs.entry(peer).or_default().set(transport, addr);
                 } else {
                     out.ui(UiEvent::Error {
                         code: ErrorCode::NotPaired,
@@ -1140,7 +1167,11 @@ impl Core {
                     let fp = self.peers.get(&peer)?.fingerprint()?;
                     self.seen.get(&fp).cloned()
                 });
-                let Some((transport, addr)) = known else {
+                let mut routes: Vec<(TransportId, String)> =
+                    known.iter().flat_map(Routes::in_preference_order).collect();
+                // Best first; the rest stay behind it for `DialFailed` to walk.
+                let first = (!routes.is_empty()).then(|| routes.remove(0));
+                let Some((transport, addr)) = first else {
                     // "Unreachable" would be true but useless. Not knowing where
                     // a device is differs from failing to reach it, and only one
                     // of those the user can do something about.
@@ -1157,7 +1188,7 @@ impl Core {
                 };
                 self.next_dial += 1;
                 let d = DialToken(self.next_dial);
-                self.pending_peer_dials.insert(d, peer);
+                self.pending_peer_dials.insert(d, (peer, routes));
                 out.push(Action::Dial {
                     transport,
                     addr,

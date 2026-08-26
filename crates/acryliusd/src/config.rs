@@ -21,8 +21,30 @@ pub struct Config {
     pub clipboard: ClipboardConfig,
     pub session: SessionConfig,
     pub share: ShareConfig,
+    pub ble: BleConfig,
     /// Commands a paired device may run, keyed by the id that travels.
     pub commands: BTreeMap<String, CommandSpec>,
+}
+
+/// Bluetooth LE.
+///
+/// Capability is detected, not configured: a machine with no adapter, or one
+/// whose controller cannot act as a peripheral, offers no BLE transport whatever
+/// this says. What this decides is whether a machine that *can* should — because
+/// advertising is a radio broadcasting this machine's presence continuously, and
+/// that is the owner's call to make rather than ours to assume.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BleConfig {
+    pub enabled: bool,
+}
+
+impl Default for BleConfig {
+    fn default() -> Self {
+        // On, because a transport nobody enables is a transport nobody tests,
+        // and the phone reaching the desktop with Wi-Fi off is the point of it.
+        Self { enabled: true }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -206,6 +228,7 @@ impl Default for Config {
             clipboard: ClipboardConfig::default(),
             session: SessionConfig::default(),
             share: ShareConfig::default(),
+            ble: BleConfig::default(),
             commands: BTreeMap::new(),
         }
     }

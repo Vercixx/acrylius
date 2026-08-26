@@ -45,9 +45,12 @@ public final class NWTransport: Transport, @unchecked Sendable {
         lock.lock(); let f = emit; lock.unlock()
         f?(e)
     }
+    /// The counter is ours; the id is not. `linkId` namespaces it by transport,
+    /// because the core keys every link in one table and a second transport
+    /// counting from 1 would otherwise mint ids this one already handed out.
     private func claimLink(_ c: NWConnection) -> UInt64 {
         lock.lock(); defer { lock.unlock() }
-        let id = nextLink
+        let id = linkId(transport: transportId, counter: nextLink)
         nextLink += 1
         connections[id] = c
         return id

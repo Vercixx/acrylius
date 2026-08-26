@@ -66,6 +66,10 @@
          finds nothing. -->
     <key>NSLocalNetworkUsageDescription</key>
     <string>Acrylius finds your PC on this network. It never leaves your network.</string>
+    <!-- Required from iOS 13 for any CoreBluetooth use. Its absence is not a
+         missing prompt: the app is terminated the moment a manager is created. -->
+    <key>NSBluetoothAlwaysUsageDescription</key>
+    <string>Acrylius reaches your computer over Bluetooth when you are not on the same Wi-Fi.</string>
     <key>NSBonjourServices</key>
     <array>
         <string>_acrylius._tcp</string>

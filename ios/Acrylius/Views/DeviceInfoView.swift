@@ -1,6 +1,9 @@
 #if canImport(SwiftUI)
 
 import SwiftUI
+#if canImport(UIKit)
+import UIKit
+#endif
 
 /// What this phone is, and what it can do — the screen equivalent of
 /// `acryliusctl status`.
@@ -27,8 +30,6 @@ struct DeviceInfoView: View {
                     .textSelection(.enabled)
             } header: {
                 Text("Fingerprint")
-            } footer: {
-                Text("A computer shows this while pairing. They should match.")
             }
 
             Section {
@@ -41,9 +42,7 @@ struct DeviceInfoView: View {
                 Text("Capabilities")
             } footer: {
                 Text(
-                    "\"Send and receive\" is one this phone can carry out itself. "
-                        + "\"Send only\" is one it can ask a computer to do but cannot do here — "
-                        + "a phone has no desktop session to lock, and runs nothing on request."
+                    "Names are not accurate."
                 )
             }
             Section {
@@ -67,21 +66,23 @@ struct DeviceInfoView: View {
                             .textSelection(.enabled)
                     }
                 }
+                // Opening this is what raises the Bluetooth permission prompt,
+                // so it is a tap rather than something that happens at launch.
+                NavigationLink("Bluetooth") { BluetoothView() }
             } header: {
-                Text("Widget")
+                Text("Debug")
             } footer: {
                 // Nothing in the app reports this failing, because nothing in
                 // the app fails: it falls back to its own container and works.
                 // Only the widget notices, and a widget cannot tell anyone.
                 Text(
                     SharedContainer.isShared
-                        ? "The widget can see this app's data. A group name you did not "
-                            + "choose is normal: the installer rewrites it to its own team."
-                        : "This build has no App Group, so the widget will stay empty."
+                        ? "The widget can see this app's data."
+                        : "This build has no App Group, widget will not work."
                 )
             }
         }
-        .navigationTitle("This device")
+        .navigationTitle("This \(UIDevice.current.model)")
         .navigationBarTitleDisplayMode(.inline)
     }
 

@@ -19,6 +19,7 @@
 //! breaking the rule safe rather than corrupting, but a host that breaks it will
 //! still deadlock itself, so do not.
 
+pub mod ble;
 pub mod bodies;
 pub mod bulk;
 pub mod types;
@@ -316,6 +317,40 @@ impl AcryliusCore {
 #[must_use]
 pub fn service_type() -> String {
     acrylius_proto::SERVICE_TYPE.to_string()
+}
+
+/// The BLE service the daemon advertises, for `scanForPeripherals(withServices:)`.
+///
+/// Exported for the same reason `service_type()` is: a UUID spelled out twice is
+/// a UUID that can differ by one hex digit, and the failure that produces is a
+/// phone which never finds a desktop with no error anywhere to say why. That is
+/// the exact shape of the bug this project's predecessor died on.
+#[uniffi::export]
+#[must_use]
+pub fn ble_service_uuid() -> String {
+    acrylius_proto::BLE_SERVICE_UUID.to_string()
+}
+
+/// Read after connecting to learn who a peripheral is: the same facts the mDNS
+/// TXT record carries, as `k=v` lines.
+#[uniffi::export]
+#[must_use]
+pub fn ble_identity_uuid() -> String {
+    acrylius_proto::BLE_IDENTITY_UUID.to_string()
+}
+
+/// Written to, one fragment at a time, without response.
+#[uniffi::export]
+#[must_use]
+pub fn ble_rx_uuid() -> String {
+    acrylius_proto::BLE_RX_UUID.to_string()
+}
+
+/// Subscribed to for fragments coming back.
+#[uniffi::export]
+#[must_use]
+pub fn ble_tx_uuid() -> String {
+    acrylius_proto::BLE_TX_UUID.to_string()
 }
 
 #[uniffi::export]

@@ -20,7 +20,7 @@ use acrylius_core::vocab as cv;
 pub enum FfiTransportKind {
     TcpLan,
     UnixLoopback,
-    BleL2cap,
+    BleGatt,
     Custom { name: String },
 }
 
@@ -56,7 +56,7 @@ impl From<FfiLinkAttrs> for cl::LinkAttrs {
             kind: match a.kind {
                 FfiTransportKind::TcpLan => cl::TransportKind::TcpLan,
                 FfiTransportKind::UnixLoopback => cl::TransportKind::UnixLoopback,
-                FfiTransportKind::BleL2cap => cl::TransportKind::BleL2cap,
+                FfiTransportKind::BleGatt => cl::TransportKind::BleGatt,
                 // Leaked deliberately: the core's variant is `&'static str`, and
                 // a host-supplied name cannot be one. Hosts define a bounded set
                 // of transports at startup, so this does not grow without bound.
@@ -79,6 +79,38 @@ impl From<FfiLinkAttrs> for cl::LinkAttrs {
             },
         }
     }
+}
+
+/// The attributes of a Bluetooth LE link, so a Swift transport does not spell
+/// them out and get one wrong — `max_message` and `bulk` especially, since a
+/// BLE link that claimed a side channel would offer file transfers it cannot
+/// carry out.
+#[uniffi::export]
+#[must_use]
+pub fn ble_attrs(transport: u16) -> FfiLinkAttrs {
+    let a = cl::LinkAttrs::ble(cl::TransportId(transport));
+    FfiLinkAttrs {
+        transport,
+        kind: FfiTransportKind::BleGatt,
+        max_message: a.max_message,
+        reliable: a.reliable,
+        ordered: a.ordered,
+        latency: FfiLatency::Ble,
+        bulk: FfiBulk::None,
+    }
+}
+
+/// Mint a link id for a transport's own counter.
+///
+/// Exported rather than reimplemented in Swift for the same reason the bulk
+/// sealing lives in `acrylius-proto`: two hosts each carrying their own idea of
+/// how an id is built is two implementations of a rule the core depends on. A
+/// Swift transport calls this with `1, 2, 3…` and cannot collide with the Rust
+/// one, which is doing exactly the same thing.
+#[uniffi::export]
+#[must_use]
+pub fn link_id(transport: u16, counter: u64) -> u64 {
+    cl::LinkId::new(cl::TransportId(transport), counter).0
 }
 
 /// The attributes of an ordinary LAN TCP link, so a host does not have to spell

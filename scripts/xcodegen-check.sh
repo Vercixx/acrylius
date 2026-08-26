@@ -88,8 +88,13 @@ membership() {
         *) echo "$((count / 2)) targets" ;;
     esac
 }
+# BLEProbe links CoreBluetooth. In the widget it would be a permission the
+# extension can never prompt for — its Info.plist carries no usage description
+# and an extension has no way to show one. BLEDiagnostics holds no CoreBluetooth
+# and is harmless in both, but there is nothing in the widget that reads it.
 for pair in "AcryliusWidget.swift:one target" "Shortcuts.swift:one target" \
-            "IosEffector.swift:one target" "PCEntity.swift:both targets" \
+            "IosEffector.swift:one target" "BLETransport.swift:one target" \
+            "PCEntity.swift:both targets" \
             "SharedContainer.swift:both targets"; do
     file=${pair%%:*}; want=${pair#*:}
     got=$(membership "$file")

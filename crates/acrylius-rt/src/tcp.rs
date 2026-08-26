@@ -45,7 +45,7 @@ impl TcpTransport {
     }
 
     fn next_link(&self) -> LinkId {
-        LinkId(self.next_link.fetch_add(1, Ordering::Relaxed))
+        LinkId::new(self.id, self.next_link.fetch_add(1, Ordering::Relaxed))
     }
 }
 

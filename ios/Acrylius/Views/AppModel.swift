@@ -40,7 +40,29 @@ final class AppModel {
     /// what is in flight rather than going quiet between the tap and the reply.
     var sending: [UInt64: String] = [:]
 
+    /// What Bluetooth is doing. A projection like everything else here, filled
+    /// in by the probe; the model decides nothing about the radio itself.
+    let ble = BLEDiagnostics()
+
     private var runtime: CoreRuntime?
+    #if canImport(CoreBluetooth)
+        private var bluetooth: BLETransport?
+    #endif
+
+    /// Start scanning, raising the permission prompt if it has not been asked.
+    ///
+    /// Called when the Bluetooth screen appears rather than at launch, because
+    /// `CBCentralManager` prompts the moment it is constructed and a prompt with
+    /// nothing on screen to explain it is one people refuse — which only Settings
+    /// undoes. Once allowed, `start()` brings it up on every launch without
+    /// anyone visiting this screen again.
+    func startBluetooth() {
+        #if canImport(CoreBluetooth)
+            bluetooth?.startManager()
+        #else
+            ble.managerState = "no CoreBluetooth in this build"
+        #endif
+    }
 
     func start() async {
         guard runtime == nil else { return }
@@ -61,6 +83,17 @@ final class AppModel {
                 serviceType: serviceType(),
                 port: defaultPort()
             ))
+            #if canImport(CoreBluetooth)
+                // Transport 2, matching the daemon. The core tries routes in
+                // ascending transport order, so Wi-Fi is preferred and this is
+                // the fallback. Added before `start()`, which sends
+                // advertise/discover to whatever transports exist at that moment.
+                let ble = BLETransport(transportId: 2) { [weak self] update in
+                    Task { @MainActor in self?.ble.apply(update) }
+                }
+                bluetooth = ble
+                await rt.add(transport: ble)
+            #endif
             await rt.start()
             runtime = rt
             deviceId = await rt.deviceId()
@@ -116,9 +149,7 @@ final class AppModel {
             // logind only emits a signal; acting on it is the screen locker's
             // choice, and several do not. Saying "unlocked" because the request
             // was delivered would be a lie the user cannot check from here.
-            lastError = "\(peer.name) did not unlock. Its screen locker has to "
-                + "act on logind's unlock signal, and not all of them do — "
-                + "set session.unlock_command on that machine."
+            lastError = "\(peer.name) did not unlock. Possible reason is that the locker does not support unlocking."
         }
         return ok
     }
@@ -260,7 +291,7 @@ final class AppModel {
         guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &error) else {
             // No passcode set. Refusing outright would make the app unusable on
             // a device its owner chose not to lock, so this proceeds and says so.
-            lastError = "This device has no passcode; unlocking was not confirmed."
+            lastError = "You cannot use session controls if your device has no passcode."
             return true
         }
         return (try? await context.evaluatePolicy(.deviceOwnerAuthentication,

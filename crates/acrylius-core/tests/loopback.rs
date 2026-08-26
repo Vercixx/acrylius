@@ -63,6 +63,9 @@ struct Net {
     pub bulk_keys: BTreeMap<(Side, acrylius_core::vocab::TransferId), Vec<u8>>,
     pub ui: Vec<(Side, UiEvent)>,
     pub persisted: Vec<(Side, String, bool)>,
+    /// Every dial the core asked for, in order, so a test can check which route
+    /// was preferred and how far the fallback walked.
+    pub dialed: Vec<(TransportId, String)>,
 }
 
 impl Net {
@@ -79,6 +82,7 @@ impl Net {
             bulk_keys: BTreeMap::new(),
             ui: Vec::new(),
             persisted: Vec::new(),
+            dialed: Vec::new(),
         }
     }
 
@@ -174,15 +178,36 @@ impl Net {
                     "peer records hold key material"
                 );
             }
-            Action::Dial { addr, dial, .. } => {
-                let target = if addr == "A" { Side::A } else { Side::B };
+            Action::Dial {
+                addr,
+                dial,
+                transport,
+            } => {
+                self.dialed.push((transport, addr.clone()));
+                // Only the two cores are wired. Anything else is somewhere that
+                // did not answer — which is the whole point of having more than
+                // one route to try.
+                let Some(target) = (match addr.as_str() {
+                    "A" => Some(Side::A),
+                    "B" => Some(Side::B),
+                    _ => None,
+                }) else {
+                    self.queue.push_back((
+                        side,
+                        Event::DialFailed {
+                            dial,
+                            reason: format!("nothing is listening at {addr}"),
+                        },
+                    ));
+                    return;
+                };
                 assert_eq!(target, side.other(), "the harness only wires the two cores");
                 let mine = self.next_link;
                 let theirs = self.next_link + 1;
                 self.next_link += 2;
                 self.peer_link.insert((side, mine), theirs);
                 self.peer_link.insert((side.other(), theirs), mine);
-                let attrs = LinkAttrs::loopback(TRANSPORT);
+                let attrs = LinkAttrs::loopback(transport);
                 self.queue.push_back((
                     side,
                     Event::LinkUp {
@@ -305,6 +330,12 @@ fn paired() -> (Net, DeviceId, DeviceId) {
 
 /// Tell A where B lives, the way discovery would.
 fn discover(net: &mut Net, side: Side, of: Side) {
+    discover_via(net, side, of, TRANSPORT, of.addr());
+}
+
+/// The same, but naming which transport saw it and where. Two transports see the
+/// same device independently, and that is the case worth being able to write.
+fn discover_via(net: &mut Net, side: Side, of: Side, transport: TransportId, addr: &str) {
     let fp = match of {
         Side::A => net.a.fingerprint(),
         Side::B => net.b.fingerprint(),
@@ -312,16 +343,90 @@ fn discover(net: &mut Net, side: Side, of: Side) {
     net.queue.push_back((
         side,
         Event::Discovered {
-            transport: TRANSPORT,
+            transport,
             peer: DiscoveredPeer {
                 fingerprint: Some(fp),
                 name: "peer".to_string(),
-                addr: of.addr().to_string(),
+                addr: addr.to_string(),
                 pairing: false,
             },
         },
     ));
     net.run();
+}
+
+/// A second transport, worse than `TRANSPORT`. Preference is ascending id, so
+/// this stands in for BLE beside Wi-Fi.
+const SLOWER: TransportId = TransportId(1);
+
+#[test]
+fn a_sighting_on_one_transport_does_not_evict_another() {
+    let (mut net, _a_id, b_id) = paired();
+    discover(&mut net, Side::A, Side::B);
+    // The same device, seen again somewhere slower and, here, useless.
+    discover_via(&mut net, Side::A, Side::B, SLOWER, "not-listening");
+
+    // Pairing dialled too; only what Connect does is under test here.
+    net.dialed.clear();
+    net.local(Side::A, LocalCommand::Connect { peer: b_id.clone() });
+
+    assert_eq!(
+        net.dialed,
+        vec![(TRANSPORT, "B".to_string())],
+        "the better route is dialled, and the later sighting did not replace it"
+    );
+    assert_eq!(net.a.peer_state(&b_id), PeerState::Reachable);
+}
+
+#[test]
+fn a_dial_that_fails_falls_through_to_the_next_route() {
+    let (mut net, _a_id, b_id) = paired();
+    // The preferred route is the broken one, so the fallback has to do work.
+    discover_via(&mut net, Side::A, Side::B, TRANSPORT, "not-listening");
+    discover_via(&mut net, Side::A, Side::B, SLOWER, "B");
+
+    net.dialed.clear();
+    net.local(Side::A, LocalCommand::Connect { peer: b_id.clone() });
+
+    assert_eq!(
+        net.dialed,
+        vec![
+            (TRANSPORT, "not-listening".to_string()),
+            (SLOWER, "B".to_string()),
+        ],
+        "both routes tried, best first"
+    );
+    assert_eq!(net.a.peer_state(&b_id), PeerState::Reachable);
+    assert!(
+        !net.saw(Side::A, |e| matches!(e, UiEvent::PeerUnreachable { .. })),
+        "a peer reached on the second route was never unreachable"
+    );
+}
+
+#[test]
+fn a_peer_is_unreachable_only_once_every_route_has_failed() {
+    let (mut net, _a_id, b_id) = paired();
+    discover_via(&mut net, Side::A, Side::B, TRANSPORT, "not-listening");
+    discover_via(&mut net, Side::A, Side::B, SLOWER, "also-not-listening");
+
+    net.dialed.clear();
+    net.local(Side::A, LocalCommand::Connect { peer: b_id.clone() });
+
+    assert_eq!(
+        net.dialed.len(),
+        2,
+        "every route was tried before giving up"
+    );
+    assert_eq!(net.a.peer_state(&b_id), PeerState::Unreachable);
+    let unreachable = net
+        .ui
+        .iter()
+        .filter(|(s, e)| *s == Side::A && matches!(e, UiEvent::PeerUnreachable { .. }))
+        .count();
+    assert_eq!(
+        unreachable, 1,
+        "said once, at the end, not once per attempt"
+    );
 }
 
 #[test]
