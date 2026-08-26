@@ -370,20 +370,67 @@ const SLOWER: TransportId = TransportId(1);
 #[test]
 fn a_sighting_on_one_transport_does_not_evict_another() {
     let (mut net, _a_id, b_id) = paired();
-    discover(&mut net, Side::A, Side::B);
-    // The same device, seen again somewhere slower and, here, useless.
-    discover_via(&mut net, Side::A, Side::B, SLOWER, "not-listening");
+    // The better transport is overwritten first, because pairing has already
+    // recorded a route that works and any sighting would otherwise just
+    // reconnect on it. With every address bad, nothing connects and what is
+    // left to inspect is the address book itself.
+    discover_via(&mut net, Side::A, Side::B, TRANSPORT, "not-listening");
+    discover_via(&mut net, Side::A, Side::B, SLOWER, "also-not-listening");
 
-    // Pairing dialled too; only what Connect does is under test here.
+    // Pairing dialled too, and so did each sighting; only what Connect does is
+    // under test here.
     net.dialed.clear();
     net.local(Side::A, LocalCommand::Connect { peer: b_id.clone() });
 
     assert_eq!(
         net.dialed,
+        vec![
+            (TRANSPORT, "not-listening".to_string()),
+            (SLOWER, "also-not-listening".to_string()),
+        ],
+        "a sighting on one transport adds to the book rather than replacing \
+         what another put there"
+    );
+    assert_eq!(net.a.peer_state(&b_id), PeerState::Unreachable);
+}
+
+#[test]
+fn seeing_a_paired_device_is_enough_to_reach_it() {
+    // Nobody presses anything. This is what a phone needs: when its Bluetooth
+    // link drops, the radio reconnects and reads identity again, and that
+    // sighting has to be what brings the session back. Waiting for a button is
+    // why it stayed dark until the app was force-quit a second time.
+    let (mut net, _a_id, b_id) = paired();
+    assert_eq!(net.a.peer_state(&b_id), PeerState::Unreachable);
+
+    net.dialed.clear();
+    discover(&mut net, Side::A, Side::B);
+
+    assert_eq!(
+        net.dialed,
         vec![(TRANSPORT, "B".to_string())],
-        "the better route is dialled, and the later sighting did not replace it"
+        "a sighting of a device we have already paired with is dialled on its own"
     );
     assert_eq!(net.a.peer_state(&b_id), PeerState::Reachable);
+}
+
+#[test]
+fn a_device_already_reached_is_not_dialled_again() {
+    // Discovery repeats — a service resolves, a radio re-announces, a scan
+    // starts over. Dialling per sighting would be a storm aimed at a device
+    // whose only offence is being switched on.
+    let (mut net, _a_id, b_id) = paired();
+    discover(&mut net, Side::A, Side::B);
+    assert_eq!(net.a.peer_state(&b_id), PeerState::Reachable);
+
+    net.dialed.clear();
+    discover(&mut net, Side::A, Side::B);
+    discover_via(&mut net, Side::A, Side::B, SLOWER, "B");
+
+    assert!(
+        net.dialed.is_empty(),
+        "a peer already reached is left alone"
+    );
 }
 
 #[test]
@@ -391,10 +438,10 @@ fn a_dial_that_fails_falls_through_to_the_next_route() {
     let (mut net, _a_id, b_id) = paired();
     // The preferred route is the broken one, so the fallback has to do work.
     discover_via(&mut net, Side::A, Side::B, TRANSPORT, "not-listening");
-    discover_via(&mut net, Side::A, Side::B, SLOWER, "B");
-
+    // Everything above is setup: that sighting dialled too, and had only the
+    // broken route to try. The second one is where both are on file.
     net.dialed.clear();
-    net.local(Side::A, LocalCommand::Connect { peer: b_id.clone() });
+    discover_via(&mut net, Side::A, Side::B, SLOWER, "B");
 
     assert_eq!(
         net.dialed,
@@ -972,6 +1019,16 @@ fn a_link_that_cannot_carry_files_refuses_instead_of_listening() {
             UiEvent::Plugin { ty, .. } if ty == "offer"
         )),
         "and an offer that cannot be completed is never made"
+    );
+    // A refusal here sends nothing, so the "reject" a host waits for would
+    // never arrive on its own and the file would sit listed as sending
+    // forever. It is announced locally instead.
+    assert!(
+        net.saw(Side::A, |e| matches!(
+            e,
+            UiEvent::Plugin { ty, .. } if ty == "reject"
+        )),
+        "and the transfer is closed out, not left open"
     );
     assert!(
         net.bulk_keys.is_empty(),

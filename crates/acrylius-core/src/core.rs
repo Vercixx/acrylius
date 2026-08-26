@@ -23,6 +23,10 @@ use crate::vocab::{
     Sensitivity, TransferId, UiEvent,
 };
 
+/// A dial in flight: who we are trying to reach, the routes not yet tried, and
+/// whether a person asked for it.
+type PeerDial = (DeviceId, Vec<(TransportId, String)>, bool);
+
 /// A link that exists but has not said anything yet. We do not know whether it
 /// wants to pair or to resume until its first frame arrives.
 struct PendingLink {
@@ -121,7 +125,9 @@ pub struct Core {
     /// Dials we started to reach a known peer, each with the routes not yet
     /// tried. A dial that fails falls through to the next rather than reporting
     /// the peer unreachable while a working route sits untried.
-    pending_peer_dials: BTreeMap<DialToken, (DeviceId, Vec<(TransportId, String)>)>,
+    /// The flag is whether a person asked, which decides whether failing to
+    /// reach them is worth saying out loud.
+    pending_peer_dials: BTreeMap<DialToken, PeerDial>,
     plugins: Vec<Box<dyn Plugin>>,
     /// Which plugin asked for an outstanding effect.
     effect_owner: BTreeMap<EffectToken, usize>,
@@ -226,17 +232,26 @@ impl Core {
             Event::LinkDown { link, .. } => self.on_link_down(now_ms, link, &mut out),
             Event::DialFailed { dial, reason } => {
                 self.pending_pair_dials.remove(&dial);
-                if let Some((peer, mut routes)) = self.pending_peer_dials.remove(&dial) {
+                if let Some((peer, mut routes, by_hand)) = self.pending_peer_dials.remove(&dial) {
                     // A device on Wi-Fi and BLE has two ways in. Reporting it
                     // unreachable because the first failed would be wrong, and
                     // wrong in the direction a user cannot diagnose.
                     if routes.is_empty() {
-                        out.ui(UiEvent::PeerUnreachable { peer });
+                        // Only when a person asked. An automatic attempt runs
+                        // on every sighting, and one route can easily be seen
+                        // before a working one is — announcing that would make
+                        // a device flicker "unreachable" while it is coming up
+                        // perfectly normally. It stays unreachable either way;
+                        // that is a fact about its state, not news.
+                        if by_hand {
+                            out.ui(UiEvent::PeerUnreachable { peer });
+                        }
                     } else {
                         let (transport, addr) = routes.remove(0);
                         self.next_dial += 1;
                         let next = DialToken(self.next_dial);
-                        self.pending_peer_dials.insert(next, (peer, routes));
+                        self.pending_peer_dials
+                            .insert(next, (peer, routes, by_hand));
                         out.push(Action::Dial {
                             transport,
                             addr,
@@ -266,7 +281,24 @@ impl Core {
                         .find(|r| r.fingerprint().as_ref() == Some(&fp))
                         && let Some(id) = rec.id()
                     {
-                        self.addrs.entry(id).or_default().set(transport, peer.addr);
+                        self.addrs
+                            .entry(id.clone())
+                            .or_default()
+                            .set(transport, peer.addr);
+                        // And reach it. Seeing a device we have already paired
+                        // with, on an address we have just learned, is the whole
+                        // set of conditions for a session — waiting for someone
+                        // to press a button adds nothing, and it is why a phone
+                        // whose Bluetooth link dropped stayed dark until the app
+                        // was force-quit: the radio reconnected and announced
+                        // itself, and nothing acted on it.
+                        //
+                        // It is also what makes a better transport take over. A
+                        // peer already reachable over Bluetooth is skipped here,
+                        // so Wi-Fi coming back does not win until the Bluetooth
+                        // session actually ends — which is the conservative way
+                        // round, and the same order `dispatch_send` prefers.
+                        self.connect_peer(id, &mut out, false);
                     }
                 }
             }
@@ -376,7 +408,7 @@ impl Core {
 
         // A link we dialled to reach a known peer: IKpsk2, we speak first.
         if let Some(d) = dial
-            && let Some((peer, _untried)) = self.pending_peer_dials.remove(&d)
+            && let Some((peer, _untried, _by_hand)) = self.pending_peer_dials.remove(&d)
         {
             // The routes we did not need are dropped with the token: this dial
             // landed, so there is nothing left to fall back to.
@@ -1082,6 +1114,63 @@ impl Core {
     /// given a single-use key scoped to one transfer rather than anything it
     /// could reuse.
     /// What the live link to a peer can carry, if there is one.
+    /// Dial a peer we believe we know how to reach.
+    ///
+    /// `by_hand` separates the two callers, and it governs two things because
+    /// both follow from the same question — did a person ask for this?
+    ///
+    /// A typed `connect` that finds no address deserves to be told so; an
+    /// automatic attempt after a sighting does not, because an error nobody
+    /// caused is only noise. And a typed `connect` must still work while a dial
+    /// is outstanding, since retrying is the one thing a person can do about a
+    /// dial that is going nowhere — but discovery may resolve the same service
+    /// repeatedly, and a dial per sighting would be a storm aimed at a device
+    /// whose only offence is being switched on.
+    fn connect_peer(&mut self, peer: DeviceId, out: &mut Outcome, by_hand: bool) {
+        if self.peer_state(&peer) != PeerState::Unreachable {
+            return;
+        }
+        if !by_hand && self.pending_peer_dials.values().any(|(p, _, _)| p == &peer) {
+            return;
+        }
+        // Three places an address can come from, in order of how much they are
+        // worth: one we recorded when the peer last worked, one discovery has
+        // shown us, or nothing.
+        let known = self.addrs.get(&peer).cloned().or_else(|| {
+            let fp = self.peers.get(&peer)?.fingerprint()?;
+            self.seen.get(&fp).cloned()
+        });
+        let mut routes: Vec<(TransportId, String)> =
+            known.iter().flat_map(Routes::in_preference_order).collect();
+        // Best first; the rest stay behind it for `DialFailed` to walk.
+        let first = (!routes.is_empty()).then(|| routes.remove(0));
+        let Some((transport, addr)) = first else {
+            if by_hand {
+                // "Unreachable" would be true but useless. Not knowing where a
+                // device is differs from failing to reach it, and only one of
+                // those the user can do something about.
+                out.ui(UiEvent::Error {
+                    code: ErrorCode::NotAllowed,
+                    detail: format!(
+                        "no address known for {peer}. It has not been seen on this \
+                         network, and a device that only ever dials out — a phone, \
+                         for instance — never will be. Pass one with --addr."
+                    ),
+                });
+                out.ui(UiEvent::PeerUnreachable { peer });
+            }
+            return;
+        };
+        self.next_dial += 1;
+        let d = DialToken(self.next_dial);
+        self.pending_peer_dials.insert(d, (peer, routes, by_hand));
+        out.push(Action::Dial {
+            transport,
+            addr,
+            dial: d,
+        });
+    }
+
     fn bulk_support_for(&self, peer: &DeviceId) -> Option<BulkSupport> {
         self.links.values().find_map(|st| match st {
             LinkState::Up(u) if &u.peer == peer => Some(u.bulk),
@@ -1247,45 +1336,7 @@ impl Core {
                     });
                 }
             }
-            LocalCommand::Connect { peer } => {
-                if self.peer_state(&peer) != PeerState::Unreachable {
-                    return;
-                }
-                // Three places an address can come from, in order of how much
-                // they are worth: one we recorded when the peer last worked,
-                // one discovery has shown us, or nothing.
-                let known = self.addrs.get(&peer).cloned().or_else(|| {
-                    let fp = self.peers.get(&peer)?.fingerprint()?;
-                    self.seen.get(&fp).cloned()
-                });
-                let mut routes: Vec<(TransportId, String)> =
-                    known.iter().flat_map(Routes::in_preference_order).collect();
-                // Best first; the rest stay behind it for `DialFailed` to walk.
-                let first = (!routes.is_empty()).then(|| routes.remove(0));
-                let Some((transport, addr)) = first else {
-                    // "Unreachable" would be true but useless. Not knowing where
-                    // a device is differs from failing to reach it, and only one
-                    // of those the user can do something about.
-                    out.ui(UiEvent::Error {
-                        code: ErrorCode::NotAllowed,
-                        detail: format!(
-                            "no address known for {peer}. It has not been seen on this \
-                             network, and a device that only ever dials out — a phone, \
-                             for instance — never will be. Pass one with --addr."
-                        ),
-                    });
-                    out.ui(UiEvent::PeerUnreachable { peer });
-                    return;
-                };
-                self.next_dial += 1;
-                let d = DialToken(self.next_dial);
-                self.pending_peer_dials.insert(d, (peer, routes));
-                out.push(Action::Dial {
-                    transport,
-                    addr,
-                    dial: d,
-                });
-            }
+            LocalCommand::Connect { peer } => self.connect_peer(peer, out, true),
             LocalCommand::Disconnect { peer } => {
                 let links: Vec<LinkId> = self
                     .links
