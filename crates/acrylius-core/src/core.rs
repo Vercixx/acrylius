@@ -102,6 +102,10 @@ pub struct Core {
     effect_owner: BTreeMap<EffectToken, usize>,
     caps_out: Vec<String>,
     caps_in: Vec<String>,
+    /// The subset of `caps_in` this host can actually act on, rather than only
+    /// relay to a plugin that will refuse. Every device advertises the full set;
+    /// this is what separates "can do" from "can ask for".
+    caps_served: Vec<String>,
     next_token: u64,
     next_dial: u64,
     next_msg_id: u32,
@@ -141,6 +145,13 @@ impl Core {
     #[must_use]
     pub fn caps_in(&self) -> &[String] {
         &self.caps_in
+    }
+
+    /// What this host can carry out itself. Anything in `caps_in` but not here
+    /// is a capability it can ask a peer for and will refuse if asked.
+    #[must_use]
+    pub fn caps_served(&self) -> &[String] {
+        &self.caps_served
     }
 
     /// The code currently awaiting confirmation, if any.
@@ -1279,6 +1290,7 @@ impl CoreBuilder {
     pub fn build(self) -> Core {
         let mut caps_out = Vec::new();
         let mut caps_in = Vec::new();
+        let mut caps_served = Vec::new();
         let mut plugins = Vec::new();
         for p in self.plugins {
             let m = p.manifest();
@@ -1296,7 +1308,9 @@ impl CoreBuilder {
             // a plugin announces what it has when a peer connects (a catalogue
             // of commands, a session state, wake targets), and an attempt the
             // host cannot serve is answered `not_allowed`.
-            if !m.requires.iter().all(|k| self.effects.contains(k)) {
+            if m.requires.iter().all(|k| self.effects.contains(k)) {
+                caps_served.extend(m.incoming.iter().map(|s| (*s).to_string()));
+            } else {
                 tracing::debug!(
                     plugin = m.id,
                     "this host cannot serve requests for this capability, only send them"
@@ -1310,6 +1324,8 @@ impl CoreBuilder {
         caps_out.dedup();
         caps_in.sort_unstable();
         caps_in.dedup();
+        caps_served.sort_unstable();
+        caps_served.dedup();
 
         let peers = self
             .peers
@@ -1331,6 +1347,7 @@ impl CoreBuilder {
             effect_owner: BTreeMap::new(),
             caps_out,
             caps_in,
+            caps_served,
             next_token: 0,
             next_dial: 0,
             next_msg_id: 0,

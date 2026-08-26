@@ -293,6 +293,29 @@ impl TryFrom<FfiEvent> for cv::Event {
 
 // --------------------------------------------------------------------- actions
 
+/// What a host can carry out. Declared at construction; a plugin whose effects
+/// are missing still loads and can still send, it simply cannot serve.
+#[derive(uniffi::Enum, Clone, Copy, Debug)]
+pub enum FfiEffectKind {
+    Session,
+    Clipboard,
+    Command,
+    Wol,
+    Custom,
+}
+
+impl From<FfiEffectKind> for cv::EffectKind {
+    fn from(k: FfiEffectKind) -> Self {
+        match k {
+            FfiEffectKind::Session => Self::Session,
+            FfiEffectKind::Clipboard => Self::Clipboard,
+            FfiEffectKind::Command => Self::Command,
+            FfiEffectKind::Wol => Self::Wol,
+            FfiEffectKind::Custom => Self::Custom,
+        }
+    }
+}
+
 #[derive(uniffi::Enum, Clone, Debug)]
 pub enum FfiEffect {
     LockSession,

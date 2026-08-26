@@ -6,7 +6,8 @@ print("fingerprint:    \(try! fingerprintOf(identityKey: key))")
 let core = try! AcryliusCore(
     config: defaultConfig(name: "linux-smoke", platform: "linux"),
     identityKey: key,
-    peers: []
+    peers: [],
+    effects: []
 )
 print("device id:      \(core.deviceId())")
 print("service type:   \(serviceType())  port \(defaultPort())")

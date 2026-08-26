@@ -155,6 +155,21 @@ let aId = await alpha.deviceId()
 let bId = await bravo.deviceId()
 check(aId != bId, "two runtimes have distinct identities")
 
+// --- the capabilities a phone offers -------------------------------------
+// The FFI was left registering ping alone from the skeleton, so a phone
+// advertised nothing and a computer would not send it a clipboard. The failure
+// read as a missing clipboard implementation and was a missing registration.
+let offered = Set(await alpha.capsIn())
+for cap in [
+    "org.acrylius.ping/1",
+    "org.acrylius.session/1",
+    "org.acrylius.clipboard/1",
+    "org.acrylius.command/1",
+    "org.acrylius.wol/1",
+] {
+    check(offered.contains(cap), "a phone advertises \(cap)")
+}
+
 // --- pairing -------------------------------------------------------------
 await bravo.submit(.openPairingWindow(code: "ABCD1234"))
 _ = await until("bravo's window") { bRec.has { if case .pairingWindowOpen = $0 { return true }; return false } }

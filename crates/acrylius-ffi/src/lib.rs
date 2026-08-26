@@ -28,7 +28,7 @@ use acrylius_core::config::CoreConfig;
 use acrylius_core::core::{Core, CoreBuilder};
 use acrylius_core::noise::Identity;
 use acrylius_core::peer::{PeerRecord, PeerState};
-use acrylius_core::plugins::ping;
+use acrylius_core::plugins::{clipboard, command, ping, session, wol};
 
 pub use bodies::*;
 pub use types::*;
@@ -116,6 +116,12 @@ pub struct AcryliusCore {
 impl AcryliusCore {
     /// Build a core.
     ///
+    /// `effects` is what this host can actually carry out. A plugin whose
+    /// effects are missing still loads and can still send — being unable to
+    /// serve a capability says nothing about being able to use one — so a
+    /// phone that cannot lock its own screen can still ask a computer to lock
+    /// theirs.
+    ///
     /// `peers` are the raw blobs the host stored from earlier `Persist` actions,
     /// in any order. One that fails to decode is skipped and reported by
     /// [`Self::restored_peers`] being smaller than what was handed in. The host
@@ -126,6 +132,7 @@ impl AcryliusCore {
         config: FfiConfig,
         identity_key: Vec<u8>,
         peers: Vec<Vec<u8>>,
+        effects: Vec<FfiEffectKind>,
     ) -> Result<Self, FfiError> {
         let id = identity(&identity_key)?;
         let records: Vec<PeerRecord> = peers
@@ -142,11 +149,31 @@ impl AcryliusCore {
                 handshake_timeout_ms: config.handshake_timeout_ms,
             },
         )
-        // iOS declares no effects yet, so only effect-free plugins survive
-        // negotiation. Adding a clipboard effector here is what will switch the
-        // clipboard capability on, with no change to the plugin set.
-        .effects([])
+        // The same plugin list every device registers, which is the point of
+        // the plugin set being platform-independent. This was left at ping
+        // alone from the skeleton, so a phone advertised no capabilities and a
+        // computer would not send it a clipboard — the failure looked like a
+        // missing clipboard implementation, and was a missing registration.
+        //
+        // What this device can *serve* is what `effects` names; the rest it can
+        // still ask other devices for.
+        .effects(effects.into_iter().map(Into::into))
         .plugin(ping::PingPlugin::default())
+        .plugin(session::SessionPlugin::default())
+        // A phone relays a wake for nobody: it sends magic packets itself, and
+        // an empty allowlist is what refuses to be used as a relay.
+        .plugin(wol::WolPlugin::new(wol::WolConfig::default(), Vec::new()))
+        .plugin(clipboard::ClipboardPlugin::new(clipboard::Directions {
+            // Never volunteers what is on the pasteboard. Since iOS 16 reading
+            // it raises a system "Allow Paste?" alert for anything another app
+            // put there, so a phone that mirrored every change would prompt
+            // constantly. Sending is a deliberate act; receiving is not.
+            send: false,
+            receive: true,
+        }))
+        // Runs nothing on request. It can still list and run what a computer
+        // offers.
+        .plugin(command::CommandPlugin::new(Vec::new()))
         .restore(records)
         .build();
         Ok(Self {
@@ -250,6 +277,17 @@ impl AcryliusCore {
             .lock()
             .expect("core mutex poisoned")
             .caps_in()
+            .to_vec()
+    }
+
+    /// What this device can carry out itself. Anything in `caps_in` but absent
+    /// here it can ask a peer for and will refuse if asked.
+    #[must_use]
+    pub fn caps_served(&self) -> Vec<String> {
+        self.inner
+            .lock()
+            .expect("core mutex poisoned")
+            .caps_served()
             .to_vec()
     }
 

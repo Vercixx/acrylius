@@ -28,12 +28,10 @@ struct DeviceListView: View {
                 }
 
                 Section("This device") {
-                    LabeledContent("Status", value: model.status)
-                    LabeledContent("Fingerprint") {
-                        Text(model.fingerprint)
-                            .font(.caption.monospaced())
-                            .lineLimit(2)
-                            .truncationMode(.middle)
+                    NavigationLink {
+                        DeviceInfoView()
+                    } label: {
+                        LabeledContent("Status", value: model.status)
                     }
                 }
 
@@ -57,6 +55,8 @@ private struct PeerRow: View {
     @Environment(AppModel.self) private var model
     let peer: FfiPeer
 
+    @State private var confirmingForget = false
+
     var body: some View {
         HStack {
             VStack(alignment: .leading) {
@@ -69,7 +69,17 @@ private struct PeerRow: View {
                 .frame(width: 8, height: 8)
         }
         .swipeActions {
+            Button("Forget", role: .destructive) { confirmingForget = true }
+        }
+        .confirmationDialog(
+            "Forget \(peer.name)?",
+            isPresented: $confirmingForget,
+            titleVisibility: .visible
+        ) {
             Button("Forget", role: .destructive) { Task { await model.forget(peer) } }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Pairing has to be done again from both ends to undo this.")
         }
     }
 

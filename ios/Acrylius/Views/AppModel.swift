@@ -19,6 +19,12 @@ final class AppModel {
     var catalog = PeerCatalog()
     var deviceId: String = ""
     var fingerprint: String = ""
+    /// What this phone will accept, and what it may send. The same list every
+    /// device registers; what differs is which of them it can actually serve.
+    var capsIn: [String] = []
+    var capsOut: [String] = []
+    /// The subset of `capsIn` this phone can act on rather than only ask for.
+    var capsServed: [String] = []
 
     /// The code shown during pairing. Both ends show it; the user compares.
     var pairingSas: String?
@@ -34,7 +40,12 @@ final class AppModel {
         guard runtime == nil else { return }
         do {
             let store = try KeychainStore()
-            let rt = try CoreRuntime.bootstrap(name: deviceName(), store: store)
+            let rt = try CoreRuntime.bootstrap(
+                name: deviceName(),
+                store: store,
+                effector: IosEffector(),
+                effects: IosEffector.kinds
+            )
             let sink = Sink { [weak self] event in
                 Task { @MainActor in self?.on(event) }
             }
@@ -49,6 +60,9 @@ final class AppModel {
             deviceId = await rt.deviceId()
             fingerprint = await rt.fingerprint()
             peers = await rt.peers()
+            capsIn = await rt.capsIn()
+            capsOut = await rt.capsOut()
+            capsServed = await rt.capsServed()
             status = peers.isEmpty ? "not paired" : "ready"
         } catch {
             status = "failed to start"

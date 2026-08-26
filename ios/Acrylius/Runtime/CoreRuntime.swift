@@ -41,7 +41,8 @@ public actor CoreRuntime {
         name: String,
         platform: String = "ios",
         store: Store,
-        effector: Effector = NullEffector()
+        effector: Effector = NullEffector(),
+        effects: [FfiEffectKind] = []
     ) throws -> CoreRuntime {
         let key: Data
         if let existing = store.identityKey() {
@@ -53,7 +54,8 @@ public actor CoreRuntime {
         let core = try AcryliusCore(
             config: defaultConfig(name: name, platform: platform),
             identityKey: key,
-            peers: store.loadPeers()
+            peers: store.loadPeers(),
+            effects: effects
         )
         return CoreRuntime(core: core, store: store, effector: effector)
     }
@@ -107,6 +109,9 @@ public actor CoreRuntime {
     public func deviceId() -> String { core.deviceId() }
     public func fingerprint() -> String { core.fingerprint() }
     public func pendingSas() -> String? { core.pendingSas() }
+    public func capsIn() -> [String] { core.capsIn() }
+    public func capsOut() -> [String] { core.capsOut() }
+    public func capsServed() -> [String] { core.capsServed() }
 
     /// Milliseconds since the Unix epoch.
     ///

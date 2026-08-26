@@ -9,10 +9,11 @@ import SwiftUI
 /// so the screen never offers something that cannot work.
 struct DeviceView: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.dismiss) private var dismiss
     let peer: FfiPeer
 
-    @State private var busy = false
     @State private var pasted = ""
+    @State private var confirmingForget = false
 
     private var features: PeerFeatures { model.catalog[peer.deviceId] }
 
@@ -21,16 +22,16 @@ struct DeviceView: View {
             Section {
                 LabeledContent("Status", value: peer.reachable ? "Connected" : "Not connected")
                 if !peer.reachable {
-                    Button("Connect") { Task { await model.connect(peer) } }
+                    TaskButton("Connect") { await model.connect(peer) }
                 }
             }
 
             if let session = features.session {
                 Section {
                     LabeledContent("Screen", value: session.locked ? "Locked" : "Unlocked")
-                    Button("Lock") { Task { await model.lock(peer) } }
+                    TaskButton("Lock") { await model.lock(peer) }
                         .disabled(session.locked)
-                    Button("Unlock") { Task { await model.unlock(peer) } }
+                    TaskButton("Unlock") { await model.unlock(peer) }
                         .disabled(!session.locked)
                 } header: {
                     Text("Session")
@@ -41,15 +42,12 @@ struct DeviceView: View {
 
             if features.canWake, !peer.reachable {
                 Section {
-                    Button("Wake up") {
-                        Task {
-                            busy = true
-                            let sent = await model.wake(peer)
-                            busy = false
-                            if !sent { model.lastError = "Could not send a wake packet." }
+                    TaskButton("Wake up") {
+                        let sent = await model.wake(peer)
+                        if !sent {
+                            model.lastError = "Could not send a wake packet."
                         }
                     }
-                    .disabled(busy)
                 } header: {
                     Text("Power")
                 } footer: {
@@ -61,13 +59,13 @@ struct DeviceView: View {
             if features.canRunCommands {
                 Section("Commands") {
                     ForEach(features.commands, id: \.id) { command in
-                        Button(command.name) { Task { await model.run(command, on: peer) } }
+                        TaskButton(command.name) { await model.run(command, on: peer) }
                     }
                 }
             }
 
             Section("Clipboard") {
-                Button("Get from \(peer.name)") { Task { await model.fetchClipboard(peer) } }
+                TaskButton("Get from \(peer.name)") { await model.fetchClipboard(peer) }
                 if let value = features.clipboard {
                     Text(value)
                         .font(.callout)
@@ -95,7 +93,7 @@ struct DeviceView: View {
 
             Section {
                 Button("Forget this device", role: .destructive) {
-                    Task { await model.forget(peer) }
+                    confirmingForget = true
                 }
             } footer: {
                 Text(peer.fingerprint).font(.caption2.monospaced())
@@ -103,6 +101,24 @@ struct DeviceView: View {
         }
         .navigationTitle(peer.name)
         .task { if peer.reachable { await model.refreshSession(peer) } }
+        .confirmationDialog(
+            "Forget \(peer.name)?",
+            isPresented: $confirmingForget,
+            titleVisibility: .visible
+        ) {
+            Button("Forget", role: .destructive) {
+                Task {
+                    await model.forget(peer)
+                    // This screen is about a device that no longer exists, so
+                    // going back is part of the action rather than something to
+                    // leave the user to work out.
+                    dismiss()
+                }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Pairing has to be done again from both ends to undo this.")
+        }
     }
 }
 
