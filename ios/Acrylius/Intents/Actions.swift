@@ -115,7 +115,8 @@ struct WakePCIntent: AppIntent {
         let core = try AcryliusCore(
             config: defaultConfig(name: "Acrylius", platform: "ios"),
             identityKey: key,
-            peers: store.loadPeers()
+            peers: store.loadPeers(),
+            effects: []
         )
         guard core.peers().contains(where: { $0.deviceId == pc.id }) else {
             let dialog: IntentDialog = "\(pc.name) is not paired."

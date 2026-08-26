@@ -36,7 +36,8 @@ struct PCQuery: EntityQuery {
         let core = try AcryliusCore(
             config: defaultConfig(name: "Acrylius", platform: "ios"),
             identityKey: key,
-            peers: store.loadPeers()
+            peers: store.loadPeers(),
+            effects: []
         )
         return core.peers().map { PCEntity(id: $0.deviceId, name: $0.name) }
     }
