@@ -73,7 +73,18 @@ EOF
 fi
 echo "run $RUN  $SHA  $BRANCH  $WHEN"
 
-WORK=$(mktemp -d)
+# Under the cache directory, not /tmp, and that is load-bearing rather than
+# tidiness. `acryliusctl send` hands the daemon a path and the daemon is what
+# opens the file — and the unit sets `PrivateTmp=yes`, so the daemon's /tmp is
+# not this shell's. A file downloaded to /tmp is one it cannot see, and the
+# error it reports is "No such file or directory" against a path that plainly
+# exists, which is a confusing thing to be told.
+#
+# `ProtectHome=read-only` leaves everything under $HOME readable, which is all
+# a send needs.
+CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/acrylius"
+mkdir -p "$CACHE"
+WORK=$(mktemp -d "$CACHE/send-XXXXXX")
 cleanup() { [ "$KEEP" = 1 ] || rm -rf "$WORK"; }
 trap cleanup EXIT
 
