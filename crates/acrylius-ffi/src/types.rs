@@ -24,6 +24,21 @@ pub enum FfiTransportKind {
     Custom { name: String },
 }
 
+/// The direction the core does not need but a UI does: what is carrying a
+/// session, so a person can see which one took over.
+impl From<cl::TransportKind> for FfiTransportKind {
+    fn from(k: cl::TransportKind) -> Self {
+        match k {
+            cl::TransportKind::TcpLan => Self::TcpLan,
+            cl::TransportKind::UnixLoopback => Self::UnixLoopback,
+            cl::TransportKind::BleGatt => Self::BleGatt,
+            cl::TransportKind::Custom(name) => Self::Custom {
+                name: name.to_string(),
+            },
+        }
+    }
+}
+
 #[derive(uniffi::Enum, Clone, Copy, Debug)]
 pub enum FfiLatency {
     Loopback,

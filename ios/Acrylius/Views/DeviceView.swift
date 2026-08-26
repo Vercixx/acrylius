@@ -20,10 +20,30 @@ struct DeviceView: View {
 
     private var features: PeerFeatures { model.catalog[peer.deviceId] }
 
+    /// How a link kind reads to a person. `nil` when nothing is carrying the
+    /// session, since "Not connected" already says that and a second line
+    /// saying it again is noise.
+    private static func carrying(_ kind: FfiTransportKind?) -> String? {
+        switch kind {
+        case .tcpLan: "Wi-Fi"
+        case .bleGatt: "Bluetooth"
+        case .unixLoopback: "This device"
+        case let .custom(name): name
+        case nil: nil
+        }
+    }
+
     var body: some View {
         List {
             Section {
                 LabeledContent("Status", value: peer.reachable ? "Connected" : "Not connected")
+                // Which radio is carrying this. A second transport is only
+                // useful if it takes over quietly, and something that takes
+                // over quietly is indistinguishable from something broken
+                // unless it says so somewhere.
+                if let over = Self.carrying(peer.transport) {
+                    LabeledContent("Over", value: over)
+                }
                 if !peer.reachable {
                     TaskButton("Connect") { await model.connect(peer); return true }
                 }

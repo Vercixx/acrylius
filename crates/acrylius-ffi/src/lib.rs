@@ -107,6 +107,12 @@ pub struct FfiPeer {
     pub platform: String,
     pub fingerprint: String,
     pub reachable: bool,
+    /// What is carrying the session, when one is up.
+    ///
+    /// `None` means unreachable, not unknown. Worth showing because the whole
+    /// point of a second transport is that it takes over silently, and silence
+    /// is indistinguishable from a thing not working.
+    pub transport: Option<FfiTransportKind>,
 }
 
 #[derive(uniffi::Object)]
@@ -265,6 +271,7 @@ impl AcryliusCore {
                     platform: p.platform.clone(),
                     fingerprint: p.fingerprint()?.to_string(),
                     reachable: core.peer_state(&id) == PeerState::Reachable,
+                    transport: core.transport_for(&id).map(Into::into),
                 })
             })
             .collect()
