@@ -16,6 +16,21 @@ struct BluetoothView: View {
 
     var body: some View {
         List {
+            // First, and unmissable. Everything else on this screen describes a
+            // state; this one names the step that changes it, and it is no use
+            // to anybody buried under the notes.
+            if let trouble = model.ble.trouble {
+                Section {
+                    Label {
+                        Text(trouble)
+                    } icon: {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                    }
+                    .font(.callout)
+                }
+            }
+
             Section {
                 LabeledContent("State", value: model.ble.managerState)
                 LabeledContent("Permission", value: model.ble.authorization)

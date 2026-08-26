@@ -322,6 +322,24 @@ SnapshotStore.save(peers: [
 check(SnapshotStore.load()?.peers.first?.lastSeen == Date(timeIntervalSince1970: 2000),
       "and a peer seen again moves it forward")
 
+// --------------------------------------------------------------- diagnostics
+
+// The trouble channel: a Bluetooth failure a person can act on has to survive
+// to somewhere they will read it, and clear itself once acted on. The mapping
+// from a CBError lives in BLETransport, which no compiler here can see; this
+// is the half that can be checked.
+let diag = await BLEDiagnostics()
+await diag.apply(.trouble("forget the device in Settings"))
+check(await diag.trouble == "forget the device in Settings",
+      "a problem worth acting on is kept, not only logged")
+check(await diag.transcript().contains("forget the device"),
+      "and it is in what gets copied out")
+await diag.apply(.trouble(nil))
+check(await diag.trouble == nil,
+      "and it clears, so an instruction does not outlive being carried out")
+check(await diag.notes.count == 1,
+      "clearing leaves the record of what happened rather than a second entry")
+
 await alpha.stop(); await bravo.stop(); await mallory.stop()
 
 print(failures == 0 ? "\nall passed" : "\n\(failures) FAILED")

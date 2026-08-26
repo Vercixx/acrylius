@@ -73,6 +73,9 @@ public enum BLEUpdate: Sendable {
     case link(String)
     case fragment(Int)
     case note(String)
+    /// Something is wrong *and* there is something a person can do about it.
+    /// `nil` clears it, which is what connecting successfully does.
+    case trouble(String?)
 }
 
 @Observable @MainActor
@@ -91,6 +94,12 @@ public final class BLEDiagnostics {
     public var link: String = "none"
     /// The negotiated ATT payload, once known. Asked for, never assumed.
     public var fragmentBytes: Int?
+    /// The one line worth putting in front of someone.
+    ///
+    /// Separate from the notes, because a transcript is where a thing goes to
+    /// be scrolled past. This is for a failure that will not clear itself and
+    /// names the step that clears it.
+    public var trouble: String?
     public var notes: [BLENote] = []
 
     /// Kept short on purpose: this is read on a phone screen, and an unbounded
@@ -122,6 +131,9 @@ public final class BLEDiagnostics {
             fragmentBytes = n
         case let .note(t):
             note(t)
+        case let .trouble(t):
+            trouble = t
+            if let t { note("problem: \(t)") }
         }
     }
 
@@ -141,6 +153,7 @@ public final class BLEDiagnostics {
         var out = "state: \(managerState)\nauth: \(authorization)\n"
         out += "scanning: \(scanning)\nlink: \(link)\n"
         if let f = fragmentBytes { out += "fragment: \(f) bytes\n" }
+        if let t = trouble { out += "trouble: \(t)\n" }
         out += "\nsightings:\n"
         for s in sightings {
             out += "  \(s.name)  \(s.rssi) dBm  \(s.advertisedOurService ? "ours" : "-")\n"

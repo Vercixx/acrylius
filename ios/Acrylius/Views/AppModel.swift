@@ -106,7 +106,16 @@ final class AppModel {
                 // the fallback. Added before `start()`, which sends
                 // advertise/discover to whatever transports exist at that moment.
                 let ble = BLETransport(transportId: 2) { [weak self] update in
-                    Task { @MainActor in self?.ble.apply(update) }
+                    Task { @MainActor in
+                        self?.ble.apply(update)
+                        // A Bluetooth problem with a fix worth naming does not
+                        // belong only on a debug screen someone has to go
+                        // looking for. It is the same channel every other
+                        // failure reports through.
+                        if case let .trouble(message) = update {
+                            self?.lastError = message
+                        }
+                    }
                 }
                 bluetooth = ble
                 await rt.add(transport: ble)

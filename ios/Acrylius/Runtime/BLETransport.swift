@@ -399,6 +399,9 @@ extension BLETransport: CBCentralManagerDelegate {
         peripheral.delegate = self
         peripheral.discoverServices([serviceUUID])
         push(.note("connected; discovering services"))
+        // Whatever was wrong is not wrong any more. An instruction left on
+        // screen after it has been carried out is worse than none.
+        push(.trouble(nil))
     }
 
     public func centralManager(
@@ -406,6 +409,39 @@ extension BLETransport: CBCentralManagerDelegate {
     ) {
         let why = error?.localizedDescription ?? "unknown"
         push(.note("could not connect: \(why)"))
+        if let remedy = Self.remedy(for: error) { push(.trouble(remedy)) }
+    }
+
+    /// What to actually do about a failure, where there is something to do.
+    ///
+    /// These are all one shape of problem — the two Bluetooth stacks disagree
+    /// about a bond — and one shape of fix, which lives on the phone and
+    /// nowhere else. CoreBluetooth describes the state and never the remedy:
+    /// "Peer removed pairing information" is accurate and gives a person
+    /// nothing to act on, and no amount of staring at it suggests that
+    /// Settings is involved.
+    ///
+    /// Nothing in this app's GATT tree asks for encryption, so a bond should
+    /// never form at all. When one has, it is left over from something else,
+    /// and it stops every connection dead until it is cleared.
+    static func remedy(for error: (any Error)?) -> String? {
+        guard let code = (error as? CBError)?.code else { return nil }
+        switch code {
+        case .peerRemovedPairingInformation, .encryptionTimedOut:
+            return """
+                This iPhone still holds Bluetooth pairing for that computer and \
+                the computer no longer does, so it refuses the connection. Open \
+                Settings › Bluetooth, tap the ⓘ beside it and choose Forget This \
+                Device, then come back here.
+                """
+        case .tooManyLEPairedDevices:
+            return """
+                This iPhone has as many paired Bluetooth devices as it allows. \
+                Forget one you no longer use in Settings › Bluetooth.
+                """
+        default:
+            return nil
+        }
     }
 
     public func centralManager(
@@ -424,6 +460,8 @@ extension BLETransport: CBCentralManagerDelegate {
         lock.unlock()
         push(.link("none"))
         push(.note("disconnected\(why.map { ": \($0)" } ?? "")"))
+        // A bond can fail on the way out as well as on the way in.
+        if let remedy = Self.remedy(for: error) { push(.trouble(remedy)) }
         // Without this the desktop is gone until the app is relaunched: it has
         // already been reported once for this scan, and will not be reported
         // again. See `startScan`.
