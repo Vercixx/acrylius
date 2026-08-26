@@ -69,6 +69,10 @@ struct Net {
     /// Give new links BLE's attributes rather than loopback's. The differences
     /// that matter are `BulkSupport::None` and a 16 KiB `max_message`.
     pub links_are_ble: bool,
+    /// The same, for one transport only — so a pair can be on Bluetooth and
+    /// Wi-Fi at the same time, which is the arrangement a phone actually has
+    /// and the one where preferring the wrong link shows up.
+    pub ble_transport: Option<TransportId>,
 }
 
 impl Net {
@@ -87,6 +91,7 @@ impl Net {
             persisted: Vec::new(),
             dialed: Vec::new(),
             links_are_ble: false,
+            ble_transport: None,
         }
     }
 
@@ -211,7 +216,7 @@ impl Net {
                 self.next_link += 2;
                 self.peer_link.insert((side, mine), theirs);
                 self.peer_link.insert((side.other(), theirs), mine);
-                let attrs = if self.links_are_ble {
+                let attrs = if self.links_are_ble || self.ble_transport == Some(transport) {
                     LinkAttrs::ble(transport)
                 } else {
                     LinkAttrs::loopback(transport)
@@ -411,6 +416,35 @@ fn seeing_a_paired_device_is_enough_to_reach_it() {
         vec![(TRANSPORT, "B".to_string())],
         "a sighting of a device we have already paired with is dialled on its own"
     );
+    assert_eq!(net.a.peer_state(&b_id), PeerState::Reachable);
+}
+
+#[test]
+fn a_better_transport_is_taken_even_while_a_worse_one_is_working() {
+    // The bug this pins: a phone finds Bluetooth first, because it is already
+    // connected to the desktop's radio while mDNS has yet to resolve. Treating
+    // "a link exists" as "nothing more to do" left it there for the whole
+    // session — and a Bluetooth link cannot carry a file, so every transfer was
+    // refused with a working Wi-Fi route sitting unused.
+    let (mut net, _a_id, b_id) = paired();
+
+    // On the worse transport, and only that: pairing's route is overwritten
+    // with one that does not answer, so the fallback is what connects.
+    discover_via(&mut net, Side::A, Side::B, TRANSPORT, "not-listening");
+    discover_via(&mut net, Side::A, Side::B, SLOWER, "B");
+    assert_eq!(net.a.peer_state(&b_id), PeerState::Reachable);
+
+    net.dialed.clear();
+    // Wi-Fi turns up.
+    discover_via(&mut net, Side::A, Side::B, TRANSPORT, "B");
+
+    assert_eq!(
+        net.dialed,
+        vec![(TRANSPORT, "B".to_string())],
+        "being reachable already is no reason to stay on the worse transport"
+    );
+    // And the worse link is still there behind it, rather than torn down: two
+    // ways in is what the fallback needs, and the core sends over the better.
     assert_eq!(net.a.peer_state(&b_id), PeerState::Reachable);
 }
 
@@ -1033,6 +1067,75 @@ fn a_link_that_cannot_carry_files_refuses_instead_of_listening() {
     assert!(
         net.bulk_keys.is_empty(),
         "nothing may be listened for on a link that cannot carry it"
+    );
+}
+
+#[test]
+fn a_file_sends_again_once_wi_fi_takes_over_from_bluetooth() {
+    // The reported symptom, end to end. A phone finds Bluetooth first, and
+    // Bluetooth cannot carry a file — so while it was left there, every
+    // transfer was refused. Being on Wi-Fi as well has to un-refuse them.
+    let (a, b) = (sharing_core("phone"), sharing_core("pc"));
+    let b_id = b.device_id();
+    let mut net = Net::new(a, b);
+    // The slower transport is the radio; the better one is the network.
+    net.ble_transport = Some(SLOWER);
+    net.local(
+        Side::B,
+        LocalCommand::OpenPairingWindow {
+            code: CODE.to_string(),
+        },
+    );
+    net.local(
+        Side::A,
+        LocalCommand::RequestPairing {
+            transport: TRANSPORT,
+            addr: Side::B.addr().to_string(),
+            code: CODE.to_string(),
+        },
+    );
+    net.local(Side::A, LocalCommand::ConfirmPairing { accept: true });
+    net.local(Side::B, LocalCommand::ConfirmPairing { accept: true });
+
+    // Bluetooth only: the network route is overwritten with one that does not
+    // answer, so the radio is what connects.
+    discover_via(&mut net, Side::A, Side::B, TRANSPORT, "not-listening");
+    discover_via(&mut net, Side::A, Side::B, SLOWER, "B");
+    assert_eq!(net.a.peer_state(&b_id), PeerState::Reachable);
+
+    plugin(&mut net, Side::A, &b_id, "offer", offer_body(1, 4096));
+    assert!(
+        net.saw(Side::A, |e| matches!(e, UiEvent::Error { .. })),
+        "over Bluetooth alone a file is refused, and the sender is told"
+    );
+
+    // Wi-Fi turns up, a moment later. The clock has to move: a handshake
+    // opener must be strictly newer than the last one accepted, or it is a
+    // replay — so two sessions with one peer in the same millisecond is one
+    // session. Seconds pass between a radio connecting and a network
+    // resolving, but the harness's clock only moves when told.
+    net.wall += 1_000;
+    net.dialed.clear();
+    net.ui.clear();
+    discover_via(&mut net, Side::A, Side::B, TRANSPORT, "B");
+    assert_eq!(
+        net.dialed,
+        vec![(TRANSPORT, "B".to_string())],
+        "the better transport is dialled even though a link already exists"
+    );
+    net.ui.clear();
+
+    plugin(&mut net, Side::A, &b_id, "offer", offer_body(2, 4096));
+    assert!(
+        !net.saw(Side::A, |e| matches!(e, UiEvent::Error { .. })),
+        "and once there is a route that can carry it, it is not refused"
+    );
+    assert!(
+        net.saw(Side::B, |e| matches!(
+            e,
+            UiEvent::Plugin { ty, .. } if ty == "offer"
+        )),
+        "the offer reaches the far end over the better link"
     );
 }
 

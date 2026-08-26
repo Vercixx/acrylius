@@ -65,12 +65,17 @@ struct UpLink {
     /// went unenforced until a second transport existed to notice.
     bulk: BulkSupport,
     max_message: u32,
-    /// What is carrying this session, for a person to see.
+    /// Which transport is carrying this session, and how it reads to a person.
     ///
-    /// Not used to decide anything — the core routes by `LinkId` and asks
-    /// `LinkAttrs` about capability. It is here because "the phone is on
-    /// Bluetooth now" is invisible otherwise, and a transport that silently
-    /// changes under you is one nobody can tell is working.
+    /// The id is what orders them: preference is ascending, which is how the
+    /// hosts register them — Wi-Fi before Bluetooth. Kept on the link rather
+    /// than read back out of the `LinkId`'s high bits, because that would make
+    /// every routing decision depend on ids having been minted with the
+    /// namespacing rule, which is a convention a host can get wrong.
+    transport: TransportId,
+    /// The name for it. Not used to decide anything: it exists because "the
+    /// phone is on Bluetooth now" is invisible otherwise, and a transport that
+    /// silently changes under you is one nobody can tell is working.
     kind: TransportKind,
     /// Our `caps_out` ∩ their `caps_in`, which is what we may send.
     can_send: Vec<String>,
@@ -725,6 +730,7 @@ impl Core {
                 handshake_hash,
                 bulk: attrs.bulk,
                 max_message: attrs.max_message,
+                transport: attrs.transport,
                 kind: attrs.kind,
                 can_send,
                 can_recv,
@@ -1001,11 +1007,7 @@ impl Core {
     /// Encrypt and emit one plugin message.
     fn dispatch_send(&mut self, _now_ms: u64, s: PendingSend, out: &mut Outcome) {
         tracing::debug!(peer = %s.peer, cap = %s.cap, ty = %s.ty, "sending");
-        let Some((&link, _)) = self
-            .links
-            .iter()
-            .find(|(_, st)| matches!(st, LinkState::Up(u) if u.peer == s.peer))
-        else {
+        let Some(link) = self.best_link(&s.peer).map(|(id, _)| id) else {
             // Unreachable is an ordinary outcome, not an error. On iOS this is
             // simply what a peer is whenever the app is not in the foreground.
             out.ui(UiEvent::PeerUnreachable { peer: s.peer });
@@ -1127,9 +1129,6 @@ impl Core {
     /// repeatedly, and a dial per sighting would be a storm aimed at a device
     /// whose only offence is being switched on.
     fn connect_peer(&mut self, peer: DeviceId, out: &mut Outcome, by_hand: bool) {
-        if self.peer_state(&peer) != PeerState::Unreachable {
-            return;
-        }
         if !by_hand && self.pending_peer_dials.values().any(|(p, _, _)| p == &peer) {
             return;
         }
@@ -1142,6 +1141,41 @@ impl Core {
         });
         let mut routes: Vec<(TransportId, String)> =
             known.iter().flat_map(Routes::in_preference_order).collect();
+
+        match self.peer_state(&peer) {
+            PeerState::Unreachable => {}
+            // A handshake is already in flight. Let it finish.
+            PeerState::Connecting => return,
+            PeerState::Reachable => {
+                // Reachable is not the same as reachable *well*, and treating
+                // them as one thing is what put a phone on Bluetooth and left
+                // it there.
+                //
+                // A phone walking into the room finds Bluetooth first: it is
+                // already connected to the desktop's radio while mDNS has yet
+                // to resolve anything. Stopping here because a link exists
+                // meant Wi-Fi was never dialled for the rest of the session —
+                // and a Bluetooth link cannot carry a file, so every transfer
+                // was refused while a perfectly good route sat unused.
+                //
+                // So a strictly better transport is still worth dialling. The
+                // existing link is left alone rather than replaced: the core
+                // keys sends by `LinkId`, whose high bits are the transport,
+                // and picks the lowest — so the better link takes over by
+                // existing, and the worse one stays as the fallback it already
+                // was.
+                if by_hand {
+                    return;
+                }
+                let Some(current) = self.best_link_transport(&peer) else {
+                    return;
+                };
+                routes.retain(|(t, _)| *t < current);
+                if routes.is_empty() {
+                    return;
+                }
+            }
+        }
         // Best first; the rest stay behind it for `DialFailed` to walk.
         let first = (!routes.is_empty()).then(|| routes.remove(0));
         let Some((transport, addr)) = first else {
@@ -1172,10 +1206,7 @@ impl Core {
     }
 
     fn bulk_support_for(&self, peer: &DeviceId) -> Option<BulkSupport> {
-        self.links.values().find_map(|st| match st {
-            LinkState::Up(u) if &u.peer == peer => Some(u.bulk),
-            _ => None,
-        })
+        self.best_link(peer).map(|(_, u)| u.bulk)
     }
 
     /// What a peer is currently reached over, if anything.
@@ -1188,12 +1219,39 @@ impl Core {
     /// answers Wi-Fi, and that is the one a message would take. Anything that
     /// changes how a send picks its link has to change this too, or the screen
     /// starts naming a transport nothing is using.
+    /// Which transport the link a message would take belongs to.
+    ///
+    /// The same walk as [`Self::transport_for`], answered as the id rather than
+    /// the kind, because deciding whether something better exists is a
+    /// comparison and only the id orders.
+    /// The link a message to this peer would take.
+    ///
+    /// One definition, because everything that asks about a peer's connection
+    /// has to get the same answer: what a send goes over, what the screen
+    /// names, and whether a file can be carried at all. Those were three
+    /// separate walks that agreed only because a `BTreeMap` happens to order
+    /// `LinkId`s the way transports are numbered — true by convention in the
+    /// daemon, and quietly false anywhere ids are minted another way.
+    ///
+    /// Preference is ascending transport id: Wi-Fi before Bluetooth, which is
+    /// the order the hosts register them in.
+    fn best_link(&self, peer: &DeviceId) -> Option<(LinkId, &UpLink)> {
+        self.links
+            .iter()
+            .filter_map(|(id, st)| match st {
+                LinkState::Up(u) if &u.peer == peer => Some((*id, &**u)),
+                _ => None,
+            })
+            .min_by_key(|(_, u)| u.transport)
+    }
+
+    fn best_link_transport(&self, peer: &DeviceId) -> Option<TransportId> {
+        self.best_link(peer).map(|(_, u)| u.transport)
+    }
+
     #[must_use]
     pub fn transport_for(&self, peer: &DeviceId) -> Option<TransportKind> {
-        self.links.values().find_map(|st| match st {
-            LinkState::Up(u) if &u.peer == peer => Some(u.kind.clone()),
-            _ => None,
-        })
+        self.best_link(peer).map(|(_, u)| u.kind.clone())
     }
 
     fn dispatch_bulk(&mut self, request: BulkRequest, out: &mut Outcome) {
