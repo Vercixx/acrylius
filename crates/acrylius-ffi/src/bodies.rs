@@ -9,7 +9,7 @@
 //! up with five implementations of its protocol because each surface parsed the
 //! wire for itself. A view that wants a command list gets a `[FfiCommand]`.
 
-use acrylius_core::plugins::{clipboard, command, media, session, wol};
+use acrylius_core::plugins::{clipboard, command, media, session, share, wol};
 
 use crate::FfiError;
 
@@ -166,6 +166,10 @@ pub struct FfiMediaState {
     pub players: Vec<FfiMediaPlayer>,
     /// Which one a command with no player named goes to.
     pub active: String,
+    /// The machine's own output volume, 0 to 100. `None` where there is no
+    /// mixer, which is every phone: iOS gives an app no way to set the system
+    /// volume, and no way to read it that is not deprecated.
+    pub system_volume: Option<u8>,
 }
 
 #[uniffi::export]
@@ -192,6 +196,7 @@ pub fn decode_media_state(body: Vec<u8>) -> Result<FfiMediaState, FfiError> {
             })
             .collect(),
         active: s.active,
+        system_volume: s.system_volume,
     })
 }
 
@@ -253,6 +258,88 @@ pub fn encode_session_state(state: FfiSessionState) -> Vec<u8> {
         session_id: state.session_id,
         kind: state.kind,
         active: state.active,
+    })
+    .unwrap_or_default()
+}
+
+/// An offer of a file, as this device would send one.
+///
+/// A name, a size and an id. Never a path: where the file sits on the device
+/// that owns it is not the peer's business and does not appear on the wire.
+#[derive(uniffi::Record, Clone, Debug)]
+pub struct FfiOffer {
+    pub transfer: u64,
+    pub name: String,
+    pub size: u64,
+    pub mime: String,
+}
+
+#[uniffi::export]
+#[must_use]
+pub fn encode_share_offer(offer: FfiOffer) -> Vec<u8> {
+    minicbor::to_vec(share::Offer {
+        transfer: offer.transfer,
+        name: offer.name,
+        size: offer.size,
+        mime: offer.mime,
+    })
+    .unwrap_or_default()
+}
+
+#[uniffi::export]
+pub fn decode_share_offer(body: Vec<u8>) -> Result<FfiOffer, FfiError> {
+    let o: share::Offer = minicbor::decode(&body).map_err(|_| bad("share offer"))?;
+    Ok(FfiOffer {
+        transfer: o.transfer,
+        name: o.name,
+        size: o.size,
+        mime: o.mime,
+    })
+}
+
+/// How a transfer ended, from either end.
+#[derive(uniffi::Record, Clone, Debug)]
+pub struct FfiTransferEnd {
+    pub transfer: u64,
+    pub ok: bool,
+    pub detail: String,
+}
+
+#[uniffi::export]
+pub fn decode_share_finished(body: Vec<u8>) -> Result<FfiTransferEnd, FfiError> {
+    let f: share::Finished = minicbor::decode(&body).map_err(|_| bad("share result"))?;
+    Ok(FfiTransferEnd {
+        transfer: f.transfer,
+        ok: f.ok,
+        detail: f.detail,
+    })
+}
+
+#[uniffi::export]
+#[must_use]
+pub fn encode_media_state(state: FfiMediaState) -> Vec<u8> {
+    minicbor::to_vec(media::MediaState {
+        players: state
+            .players
+            .into_iter()
+            .map(|p| media::MediaPlayer {
+                id: p.id,
+                name: p.name,
+                status: p.status,
+                title: p.title,
+                artist: p.artist,
+                album: p.album,
+                length_ms: p.length_ms,
+                position_ms: p.position_ms,
+                volume_percent: p.volume_percent,
+                can_go_next: p.can_go_next,
+                can_go_previous: p.can_go_previous,
+                can_seek: p.can_seek,
+                can_control: p.can_control,
+            })
+            .collect(),
+        active: state.active,
+        system_volume: state.system_volume,
     })
     .unwrap_or_default()
 }
@@ -332,6 +419,12 @@ pub fn cap_command() -> String {
 #[must_use]
 pub fn cap_wol() -> String {
     wol::CAP.to_string()
+}
+
+#[uniffi::export]
+#[must_use]
+pub fn cap_share() -> String {
+    share::CAP.to_string()
 }
 
 #[uniffi::export]

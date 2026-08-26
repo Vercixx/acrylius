@@ -78,6 +78,15 @@ pub struct MediaState {
     /// nothing playing anywhere.
     #[n(1)]
     pub active: String,
+    /// The machine's own output volume, 0 to 100, or `None` where there is no
+    /// mixer to ask.
+    ///
+    /// Separate from a player's, and not the same question. MPRIS gives every
+    /// player a writable `Volume` that a great many of them ignore, so a remote
+    /// that offered only that would have a slider working for some of what you
+    /// play and silently not for the rest. This one always moves something.
+    #[n(2)]
+    pub system_volume: Option<u8>,
 }
 
 /// A command, from a peer or from a local UI.
@@ -140,7 +149,10 @@ fn worth_announcing(before: Option<&MediaState>, now: &MediaState) -> bool {
     let Some(before) = before else {
         return true;
     };
-    if before.active != now.active || before.players.len() != now.players.len() {
+    if before.active != now.active
+        || before.players.len() != now.players.len()
+        || before.system_volume != now.system_volume
+    {
         return true;
     }
     before.players.iter().zip(&now.players).any(|(a, b)| {
@@ -382,6 +394,7 @@ mod tests {
                 ..Default::default()
             }],
             active: "spotify".to_string(),
+            system_volume: Some(40),
         }
     }
 
@@ -557,6 +570,7 @@ mod tests {
             let body = minicbor::to_vec(MediaState {
                 players,
                 active: "spotify".to_string(),
+                system_volume: None,
             })
             .unwrap();
             run(0, |cx| {

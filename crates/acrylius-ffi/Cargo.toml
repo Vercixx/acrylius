@@ -26,3 +26,10 @@ uniffi = { workspace = true, features = ["cli"] }
 
 [lints]
 workspace = true
+
+# The daemon's side of a bulk transfer, so a test can put a phone's sender and a
+# computer's receiver on one socket. A dev-dependency only: nothing here reaches
+# the iOS binary, which has no tokio in it and needs none.
+[dev-dependencies]
+acrylius-rt.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

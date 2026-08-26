@@ -26,6 +26,13 @@ public struct PeerFeatures: Equatable, Sendable {
     /// What is playing there. Present once the peer has described its players,
     /// which it does on connect and after every command.
     public var media: FfiMediaState?
+    /// When that reading was taken, by this device's clock.
+    ///
+    /// A position is only true at the instant it was measured. Keeping the
+    /// instant is what lets a screen show a track advancing without inventing
+    /// where it has got to: the elapsed time is the reported position plus how
+    /// long ago this arrived, and nothing else.
+    public var mediaAt: Date?
     /// The most recent refusal, for showing why a button did nothing.
     public var lastError: String?
 
@@ -47,6 +54,26 @@ public struct PeerFeatures: Equatable, Sendable {
         guard let media else { return nil }
         return media.players.first { $0.id == media.active }
             ?? media.players.first
+    }
+
+    /// Where the active track has got to, as of now.
+    ///
+    /// The reported position plus the time since it was reported, and only
+    /// while the player said it was playing. A paused track stays where it was
+    /// put, and a reading with no timestamp is returned untouched rather than
+    /// guessed at.
+    ///
+    /// This is an estimate and is treated as one: it is never sent anywhere,
+    /// never stored, and is corrected by the next reading, which the screen
+    /// asks for every couple of seconds while someone is looking at it.
+    public func positionMs(at now: Date = Date()) -> UInt64 {
+        guard let player = activePlayer else { return 0 }
+        guard player.status == "playing", let mediaAt else { return player.positionMs }
+        let elapsed = max(0, now.timeIntervalSince(mediaAt))
+        let estimate = player.positionMs + UInt64(elapsed * 1000)
+        // Never past the end. A track that finished while nobody was asking
+        // would otherwise show a time longer than itself.
+        return player.lengthMs > 0 ? min(estimate, player.lengthMs) : estimate
     }
 }
 
@@ -122,6 +149,7 @@ public struct PeerCatalog: Equatable, Sendable {
         } else if cap == capMedia() {
             if ty == "state", let state = try? decodeMediaState(body: body) {
                 features.media = state
+                features.mediaAt = Date()
                 changed = true
             }
         }

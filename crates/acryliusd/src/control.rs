@@ -900,7 +900,13 @@ fn describe(cap: &str, ty: &str, body: &[u8]) -> String {
         && let Ok(s) = minicbor::decode::<media::MediaState>(body)
     {
         if s.players.is_empty() {
-            return "nothing is playing".to_string();
+            // The volume is still worth saying. It is a property of the
+            // machine and it can be turned down whether or not anything is
+            // playing through it.
+            return match s.system_volume {
+                Some(v) => format!("nothing is playing (output volume {v}%)"),
+                None => "nothing is playing".to_string(),
+            };
         }
         return s
             .players
@@ -928,6 +934,12 @@ fn describe(cap: &str, ty: &str, body: &[u8]) -> String {
                 }
                 line
             })
+            .chain(
+                // Last, and separate: this is the machine's, not a player's,
+                // and it is what a `volume` with no --player moves.
+                s.system_volume
+                    .map(|v| format!("  {:<12} {:<8} output volume {v}%", "system", "")),
+            )
             .collect::<Vec<_>>()
             .join("\n");
     }

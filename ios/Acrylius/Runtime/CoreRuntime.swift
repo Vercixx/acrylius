@@ -19,6 +19,9 @@ public actor CoreRuntime {
     private let core: AcryliusCore
     private let store: Store
     private let effector: Effector
+    /// Files this device has offered. It holds the paths so that nothing else
+    /// has to: not the core, not a plugin, and certainly not a peer.
+    public let outbox = FileOutbox()
     private weak var ui: UiSink?
 
     private var transports: [UInt16: any Transport] = [:]
@@ -193,14 +196,42 @@ public actor CoreRuntime {
         case let .discover(transport, enable):
             await transports[transport]?.discover(enable: enable)
 
+        case let .bulkSend(transfer, endpoint, key):
+            // Its own task, and a detached one: `bulkSend` is a blocking socket
+            // call that runs until the file is across, and running it on the
+            // pump would stop this device answering anything for the duration.
+            //
+            // The key comes from the core and is never worked out here. It is
+            // derived from the session, which is the core's alone — a host that
+            // could derive one could derive any of them.
+            Task.detached { [weak self, outbox] in
+                guard let path = await outbox.path(for: transfer) else {
+                    await self?.submit(.bulkFinished(
+                        transfer: transfer, ok: false,
+                        detail: "there is no file for that transfer"))
+                    return
+                }
+                do {
+                    let sent = try bulkSend(
+                        transfer: transfer, endpoint: endpoint, key: key, path: path)
+                    await self?.submit(.bulkFinished(
+                        transfer: transfer, ok: true, detail: "\(sent) bytes"))
+                } catch {
+                    await self?.submit(.bulkFinished(
+                        transfer: transfer, ok: false, detail: "\(error)"))
+                }
+                await outbox.forget(transfer)
+            }
+
         case let .bulkUnsupported(transfer):
-            // This phone has nowhere to put a file and no picker to choose one
-            // from. Saying so immediately is the point: a sender waiting for an
-            // endpoint that is never coming cannot tell that from a slow disk.
+            // Receiving. This phone has nowhere to put a file and no way to ask
+            // a person while its app is closed, so it says so immediately: a
+            // sender waiting for an endpoint that is never coming cannot tell
+            // that from a slow disk.
             submit(.bulkFinished(
                 transfer: transfer,
                 ok: false,
-                detail: "this device cannot transfer files yet"
+                detail: "this device cannot receive files"
             ))
 
         case let .ui(event):

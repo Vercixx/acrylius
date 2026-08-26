@@ -36,6 +36,9 @@ final class AppModel {
     var pairingCode: String?
     var status: String = "starting"
     var lastError: String?
+    /// Files offered but not yet finished, by transfer id, so a screen can say
+    /// what is in flight rather than going quiet between the tap and the reply.
+    var sending: [UInt64: String] = [:]
 
     private var runtime: CoreRuntime?
 
@@ -207,13 +210,43 @@ final class AppModel {
     /// ignores its destination, and iOS cannot broadcast without an entitlement
     /// a free account cannot get.
     func wake(_ peer: FfiPeer) async -> Bool {
-        guard let config = catalog[peer.deviceId].wake, let mac = config.macs.first
+        // Disk before the live catalogue, which is empty until a session opens
+        // — and a machine that is asleep will never open one. The computer
+        // handed this over while it was awake, for exactly this moment.
+        guard let config = catalog[peer.deviceId].wake
+            ?? WakeTargets.load(for: peer.deviceId)
         else { return false }
-        guard let packet = try? magicPacket(mac: mac) else { return false }
+
         var destinations: [String] = []
         if !config.lastIpv4.isEmpty { destinations.append(config.lastIpv4) }
         if !config.broadcast.isEmpty { destinations.append(config.broadcast) }
-        return await MagicPacketSender.send(packet, to: destinations, port: config.port)
+
+        // Every card it named, not the first. A laptop routes over Wi-Fi and
+        // Wake-on-Wireless is rarely enabled; the ethernet card that would
+        // actually answer is often the one with no route on it. One small
+        // datagram each, and whichever is listening wakes the machine.
+        var sent = false
+        for mac in config.macs {
+            guard let packet = try? magicPacket(mac: mac) else { continue }
+            if await MagicPacketSender.send(packet, to: destinations, port: config.port) {
+                sent = true
+            }
+        }
+        return sent
+    }
+
+    /// Offer a file to a computer.
+    ///
+    /// The path stays on this phone. What goes out is a name, a size and an id;
+    /// the bytes follow on their own connection, once the computer has said yes
+    /// and named somewhere to send them.
+    func sendFile(_ file: FileOutbox.Outgoing, to peer: FfiPeer) async {
+        guard let runtime else { return }
+        let offer = await runtime.outbox.offer(file)
+        sending[offer.transfer] = offer.name
+        await send(peer, cap: capShare(), ty: "offer",
+                   body: encodeShareOffer(offer: offer))
+        status = "Offered \(offer.name)"
     }
 
     private func send(_ peer: FfiPeer, cap: String, ty: String, body: Data) async {
@@ -310,6 +343,21 @@ final class AppModel {
             Task { await refresh() }
         case let .plugin(_, cap, ty, body):
             if ty == "pong" { status = "pong" }
+            // Both ends report a transfer, because each knows only its own
+            // half: this phone knows it finished writing, and only the computer
+            // knows whether it kept the file.
+            if cap == capShare(), ty == "finished" || ty == "reject",
+               let end = try? decodeShareFinished(body: body) {
+                let name = sending.removeValue(forKey: end.transfer) ?? "the file"
+                if ty == "reject" {
+                    status = "\(name) was refused"
+                } else if end.ok {
+                    status = "Sent \(name)"
+                } else {
+                    status = "\(name) failed"
+                    lastError = end.detail.isEmpty ? nil : end.detail
+                }
+            }
             // A clipboard value that came back from a peer goes onto this
             // phone's pasteboard. Asking for a computer's clipboard and only
             // being shown it is not much use on a device whose whole point is

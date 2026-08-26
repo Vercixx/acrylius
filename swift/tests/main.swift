@@ -251,6 +251,43 @@ check(catalog["p"].clipboard == "hello from the pc", "a clipboard value is kept"
 
 check(!catalog["p"].canWake, "a peer that never offered wake targets cannot be woken")
 
+// --- where the track has got to -----------------------------------------
+// A computer announces a track change but not a position; broadcasting one
+// every second so a clock can tick would be absurd. So the phone advances it
+// against the moment the reading was taken, and only while it is playing.
+func withMedia(_ status: String, positionMs: UInt64, lengthMs: UInt64) -> PeerCatalog {
+    var c = PeerCatalog()
+    let state = FfiMediaState(
+        players: [FfiMediaPlayer(
+            id: "p1", name: "Player", status: status, title: "A Song", artist: "", album: "",
+            lengthMs: lengthMs, positionMs: positionMs, volumePercent: nil,
+            canGoNext: true, canGoPrevious: true, canSeek: true, canControl: true)],
+        active: "p1", systemVolume: 40)
+    _ = c.ingest(.plugin(peer: "p", cap: capMedia(), ty: "state",
+                         body: encodeMediaState(state: state)))
+    return c
+}
+
+let playing = withMedia("playing", positionMs: 10_000, lengthMs: 200_000)
+let then = playing["p"].mediaAt ?? Date()
+check(playing["p"].positionMs(at: then) == 10_000, "at the instant it arrived, it is what was reported")
+check(playing["p"].positionMs(at: then.addingTimeInterval(5)) == 15_000,
+      "five seconds later, five seconds further in")
+
+let paused = withMedia("paused", positionMs: 10_000, lengthMs: 200_000)
+let pausedAt = paused["p"].mediaAt ?? Date()
+check(paused["p"].positionMs(at: pausedAt.addingTimeInterval(60)) == 10_000,
+      "a paused track does not move on its own")
+
+// A track that ended while nobody was asking must not report a time longer
+// than itself.
+let ended = withMedia("playing", positionMs: 190_000, lengthMs: 200_000)
+let endedAt = ended["p"].mediaAt ?? Date()
+check(ended["p"].positionMs(at: endedAt.addingTimeInterval(600)) == 200_000,
+      "and never past the end of it")
+
+check(playing["p"].media?.systemVolume == 40, "the machine's own volume comes through")
+
 // --- the widget's snapshot ---------------------------------------------
 // The widget renders this and nothing else. It runs in a process that can
 // open no session, so anything wrong here is a widget that is confidently

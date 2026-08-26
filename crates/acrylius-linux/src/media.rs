@@ -185,10 +185,22 @@ impl MediaEffector {
             }
         }
         let active = pick_active(&players);
-        MediaState { players, active }
+        MediaState {
+            players,
+            active,
+            system_volume: crate::mixer::volume().await,
+        }
     }
 
     pub async fn control(&self, player: &str, action: MediaAction) -> anyhow::Result<()> {
+        // The machine's volume, not a player's, when no player was named. It is
+        // what a person means by "turn it down", it is the one control that
+        // works whatever is playing, and it needs no player to exist at all —
+        // so it is answered before anything looks for one.
+        if let (MediaAction::SetVolume { percent }, true) = (&action, player.is_empty()) {
+            crate::mixer::set_volume(*percent).await?;
+            return Ok(());
+        }
         let state = self.state().await;
         let target = if player.is_empty() {
             state.active.clone()

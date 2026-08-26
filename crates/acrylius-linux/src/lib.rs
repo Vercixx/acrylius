@@ -14,6 +14,7 @@ pub mod command;
 pub mod compositor;
 pub mod effector;
 pub mod media;
+pub mod mixer;
 pub mod session;
 pub mod wol;
 

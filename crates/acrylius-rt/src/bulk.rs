@@ -24,30 +24,13 @@
 
 use std::path::{Path, PathBuf};
 
-use chacha20poly1305::aead::{Aead, KeyInit};
-use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-use acrylius_proto::bulk::{CHUNK, MAX_FRAME, hello, read_hello};
-
-/// A nonce from a chunk's sequence number.
-///
-/// The whole nonce is the counter, so two chunks of one transfer can never
-/// share one. Reusing a nonce under one key is the failure this shape makes
-/// impossible rather than merely unlikely.
-fn nonce(seq: u64) -> Nonce {
-    let mut out = [0u8; 12];
-    out[4..].copy_from_slice(&seq.to_be_bytes());
-    *Nonce::from_slice(&out)
-}
-
-fn cipher(key: &[u8]) -> anyhow::Result<ChaCha20Poly1305> {
-    let key: [u8; 32] = key
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("a bulk key is 32 bytes"))?;
-    Ok(ChaCha20Poly1305::new((&key).into()))
-}
+// How a chunk is sealed lives with the format, not here. A phone sends these
+// same frames over a blocking socket, and two transports each carrying their
+// own idea of the wire format is the one thing this project exists to avoid.
+use acrylius_proto::bulk::{CHUNK, MAX_FRAME, hello, open, read_hello, seal};
 
 async fn write_frame(stream: &mut TcpStream, frame: &[u8]) -> anyhow::Result<()> {
     let len = u32::try_from(frame.len())?;
@@ -106,7 +89,6 @@ impl Listening {
         expect_bytes: u64,
         dest: &Path,
     ) -> anyhow::Result<u64> {
-        let cipher = cipher(key)?;
         let (mut stream, from) = self.listener.accept().await?;
         tracing::debug!(%from, transfer, "bulk connection");
 
@@ -124,9 +106,7 @@ impl Listening {
 
         let outcome = async {
             while let Some(frame) = read_frame(&mut stream).await? {
-                let plain = cipher
-                    .decrypt(&nonce(seq), frame.as_ref())
-                    .map_err(|_| anyhow::anyhow!("chunk {seq} did not open"))?;
+                let plain = open(key, seq, &frame)?;
                 seq += 1;
                 written += plain.len() as u64;
                 if written > expect_bytes {
@@ -158,7 +138,6 @@ impl Listening {
 
 /// Connect to an endpoint the peer named and send `path`.
 pub async fn send(transfer: u64, endpoint: &str, key: &[u8], path: &Path) -> anyhow::Result<u64> {
-    let cipher = cipher(key)?;
     let mut file = tokio::fs::File::open(path).await?;
     let mut stream = TcpStream::connect(endpoint).await?;
     stream.set_nodelay(true).ok();
@@ -172,9 +151,7 @@ pub async fn send(transfer: u64, endpoint: &str, key: &[u8], path: &Path) -> any
         if n == 0 {
             break;
         }
-        let frame = cipher
-            .encrypt(&nonce(seq), &buf[..n])
-            .map_err(|_| anyhow::anyhow!("could not seal chunk {seq}"))?;
+        let frame = seal(key, seq, &buf[..n])?;
         write_frame(&mut stream, &frame).await?;
         seq += 1;
         sent += n as u64;
@@ -267,18 +244,6 @@ mod tests {
         // should have to think about again.
         assert_eq!(safe_name("in\u{1b}[2Kvoice.pdf"), "in[2Kvoice.pdf");
         assert!(!safe_name("a\nb.txt").contains('\n'));
-    }
-
-    #[test]
-    fn nonces_never_repeat_within_a_transfer() {
-        let a = nonce(0);
-        let b = nonce(1);
-        assert_ne!(a, b);
-        assert_eq!(
-            nonce(7),
-            nonce(7),
-            "and are a function of the sequence alone"
-        );
     }
 
     #[tokio::test]

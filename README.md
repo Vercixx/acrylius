@@ -30,7 +30,7 @@ desktop  UnOfEh0ZNHHuzLPviAR2fA
 | **Clipboard** | `acryliusctl clipboard <device>` to read, `--push` to send |
 | **Commands** | `acryliusctl commands <device>`, then `run <device> <id>` |
 | **Media** | `acryliusctl media <device>` to see, then `playpause`, `next`, `volume --value 40` |
-| **Files** | `acryliusctl send <device> <path>`; the other end runs `offers`, then `accept <n>` |
+| **Files** | `acryliusctl send <device> <path>`; the other end runs `offers`, then `accept <n>`. From the phone, a file or a photo — it sends but does not receive. |
 | **Wake** | The phone sends the packet. A sleeping machine runs no daemon, so it hands over its MAC and address while it is awake. |
 
 ## Installing it
@@ -111,6 +111,11 @@ cargo test --workspace          # protocol, plugins, effectors
 ./scripts/m1-acceptance.sh      # every feature, against this desktop
 ./scripts/xcodegen-check.sh     # validate ios/project.yml without Xcode
 ```
+
+The acceptance scripts run against your actual desktop, and one check is
+audible: setting the output volume. It is off unless you ask for it with
+`ACRYLIUS_TOUCH_AUDIO=1`, because a test that turns the speakers up is a test
+nobody wants to discover by accident.
 
 To prove an unlock really happened, read the state back rather than trusting an
 exit code:

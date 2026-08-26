@@ -28,25 +28,35 @@ struct MediaSection: View {
                             .lineLimit(1)
                     }
                     if player.lengthMs > 0 {
-                        // Reported, never counted forward here: a position this
-                        // phone advanced on its own would drift, and would keep
-                        // moving after the music stopped somewhere it cannot see.
-                        ProgressView(
-                            value: Double(player.positionMs),
-                            total: Double(player.lengthMs)
-                        )
-                        .tint(.secondary)
-                        Text("\(clock(player.positionMs)) / \(clock(player.lengthMs))")
-                            .font(.caption2.monospacedDigit())
-                            .foregroundStyle(.tertiary)
+                        // Redrawn every second against the reading's own
+                        // timestamp, and re-read from the computer every two.
+                        // Showing the last reported position alone froze the
+                        // clock until you pressed something; advancing it
+                        // without ever re-asking would drift and would keep
+                        // running after the music stopped somewhere this phone
+                        // cannot see. The refresh below is what makes the
+                        // estimate safe to draw.
+                        TimelineView(.periodic(from: .now, by: 1)) { tick in
+                            let at = features.positionMs(at: tick.date)
+                            VStack(alignment: .leading, spacing: 4) {
+                                ProgressView(
+                                    value: Double(at),
+                                    total: Double(player.lengthMs)
+                                )
+                                .tint(.secondary)
+                                Text("\(clock(at)) / \(clock(player.lengthMs))")
+                                    .font(.caption2.monospacedDigit())
+                                    .foregroundStyle(.tertiary)
+                            }
+                        }
                     }
                 }
                 .padding(.vertical, 2)
 
                 controls(for: player)
 
-                if let volume = player.volumePercent {
-                    volumeRow(player, volume)
+                if let volume = features.media?.systemVolume {
+                    volumeRow(volume)
                 }
 
                 if features.media?.players.count ?? 0 > 1 {
@@ -57,6 +67,17 @@ struct MediaSection: View {
             } footer: {
                 if !player.canControl {
                     Text("This player reports what it is doing but does not accept control.")
+                }
+            }
+            // A computer announces a media change on its own, but not a
+            // position: a track playing normally changes nothing else for
+            // minutes at a time, and broadcasting once a second forever so a
+            // clock can tick would be absurd. So the side that cares asks, and
+            // only while someone is looking at it.
+            .task(id: peer.deviceId) {
+                while !Task.isCancelled {
+                    await model.refreshMedia(peer)
+                    try? await Task.sleep(for: .seconds(2))
                 }
             }
         }
@@ -106,7 +127,14 @@ struct MediaSection: View {
         .disabled(!enabled)
     }
 
-    private func volumeRow(_ player: FfiMediaPlayer, _ volume: UInt8) -> some View {
+    /// The computer's output volume, not the player's.
+    ///
+    /// MPRIS gives every player a writable `Volume` and a great many ignore it
+    /// while still reporting that they accept control — so a per-player slider
+    /// worked for some of what you play and silently not for the rest. This one
+    /// moves the machine, which is what a person means by "turn it down" and is
+    /// the one control that works whatever is playing.
+    private func volumeRow(_ volume: UInt8) -> some View {
         HStack {
             Image(systemName: "speaker.fill").foregroundStyle(.secondary)
             Slider(
@@ -120,7 +148,6 @@ struct MediaSection: View {
                     Task { await model.media(peer, "volume", value: Int64(dragging)) }
                 }
             )
-            .disabled(!player.canControl)
             Image(systemName: "speaker.wave.3.fill").foregroundStyle(.secondary)
         }
         // Follow the peer while the user is not holding it. Binding straight to

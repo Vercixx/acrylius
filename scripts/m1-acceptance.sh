@@ -143,23 +143,40 @@ echo "$OUT" | grep -qE 'nothing is playing|[a-z]'; check $? "bravo answered abou
 OUT=$("$BIN/acryliusctl" --state $D/a media "$B_ID" volume --value 500 2>&1); echo "  $OUT"
 echo "$OUT" | grep -q "refused"; check $? "a volume out of range is refused, and promptly"
 
-# MPRIS `Volume` is a writable property and a player is free to accept the write
-# and do nothing — Chromium does exactly that, while reporting CanControl true.
-# So the invariant is not "volume works", which depends on what is open: it is
-# that a volume nobody set is never reported as one that was.
-WAS=$("$BIN/acryliusctl" --state $D/a media "$B_ID" 2>&1 | grep -oE 'vol [0-9]+%' | head -1 | tr -dc '0-9')
-if [ -z "$WAS" ]; then
-  echo "  skip  nothing open to set a volume on"
+# A volume command with no player named moves the machine, not a player. MPRIS
+# gives every player a writable `Volume` that a great many ignore — Chromium
+# accepts the write and does nothing, while reporting CanControl true — so the
+# slider people actually reach for has to move something that always moves.
+#
+# `output volume`, not `vol`: the latter is a player's own, and reading it here
+# is what left this desktop at full volume once.
+#
+# Off unless asked for. Everything else in this script is invisible from across
+# the room; this one is not, and a restore step that read the wrong number once
+# left a desktop at full volume with music playing. Run it deliberately:
+#
+#     ACRYLIUS_TOUCH_AUDIO=1 ./scripts/m1-acceptance.sh
+#
+sysvol() {
+  "$BIN/acryliusctl" --state $D/a media "$B_ID" 2>&1 \
+    | grep -oE 'output volume [0-9]+%' | head -1 | tr -dc '0-9'
+}
+WAS=$(sysvol)
+if [ "${ACRYLIUS_TOUCH_AUDIO:-0}" != "1" ]; then
+  echo "  skip  volume is audible; set ACRYLIUS_TOUCH_AUDIO=1 to test it"
+elif [ -z "$WAS" ]; then
+  echo "  skip  no mixer on this machine"
 else
   WANT=$(( WAS > 50 ? 42 : 73 ))
-  OUT=$("$BIN/acryliusctl" --state $D/a media "$B_ID" volume --value $WANT 2>&1); echo "  $OUT"
-  if echo "$OUT" | grep -q "refused"; then R=0
-  elif echo "$OUT" | grep -q "vol $WANT%"; then R=0
-  else R=1; fi
-  check $R "a volume change either happened or was refused, never neither"
-  # Put it back, in case the player did honour it. This runs against a real
-  # desktop and has no business leaving its music quieter than it found it.
+  "$BIN/acryliusctl" --state $D/a media "$B_ID" volume --value $WANT >/dev/null 2>&1
+  GOT=$(sysvol); echo "  asked for $WANT%, machine reports $GOT%"
+  [ -n "$GOT" ] && [ "$GOT" -ge $((WANT - 5)) ] && [ "$GOT" -le $((WANT + 5)) ]
+  check $? "a volume with no player named moves the machine"
+  # Put it back. This runs against a real desktop and has no business leaving
+  # it louder or quieter than it found it.
   "$BIN/acryliusctl" --state $D/a media "$B_ID" volume --value "$WAS" >/dev/null 2>&1
+  BACK=$(sysvol)
+  [ "$BACK" = "$WAS" ]; check $? "and it was put back to $WAS%"
 fi
 
 OUT=$("$BIN/acryliusctl" --state $D/a media "$B_ID" pause --player nosuchplayer 2>&1); echo "  $OUT"

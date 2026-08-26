@@ -1,0 +1,126 @@
+//
+//  Files this phone has offered, and where they actually are.
+//
+//  The mirror of the daemon's `FileBulk`, and it exists for the same reason:
+//  something has to know both which transfer is which and where the bytes are,
+//  and nothing above this is allowed to. What crosses the session is a name, a
+//  size and an id — a peer never learns a path, and neither does the core.
+//
+//  Picking a file on iOS is not the same as having one. A document comes back
+//  as a security-scoped URL that is only readable between
+//  `startAccessingSecurityScopedResource()` and its stop, and a photo is not a
+//  file at all until it is written out. Both are resolved to a plain readable
+//  file here, before an offer is made, so a transfer cannot fail halfway
+//  through for a reason the person who chose the file would never guess at.
+//
+
+import Foundation
+#if canImport(UniformTypeIdentifiers)
+import UniformTypeIdentifiers
+#endif
+
+public actor FileOutbox {
+    public struct Outgoing: Sendable {
+        public let url: URL
+        public let name: String
+        public let size: UInt64
+        public let mime: String
+        /// True when this is our copy in the temporary directory and deleting
+        /// it after the transfer is ours to do.
+        let temporary: Bool
+    }
+
+    private var byTransfer: [UInt64: Outgoing] = [:]
+    private var next: UInt64 = 0
+
+    public init() {}
+
+    /// Note a file to send, and give the transfer its id.
+    ///
+    /// Ids are unique within this process. They are scoped to a session by the
+    /// key derivation, so they need be no cleverer than a counter.
+    public func offer(_ file: Outgoing) -> FfiOffer {
+        next += 1
+        byTransfer[next] = file
+        return FfiOffer(
+            transfer: next, name: file.name, size: file.size, mime: file.mime)
+    }
+
+    public func path(for transfer: UInt64) -> String? {
+        byTransfer[transfer]?.url.path
+    }
+
+    public func name(for transfer: UInt64) -> String? {
+        byTransfer[transfer]?.name
+    }
+
+    /// Done with a transfer, however it ended.
+    ///
+    /// A copy this made is removed. A file the user chose is left exactly where
+    /// it was: it is theirs, and sending it is not a reason to touch it.
+    public func forget(_ transfer: UInt64) {
+        guard let file = byTransfer.removeValue(forKey: transfer) else { return }
+        if file.temporary {
+            try? FileManager.default.removeItem(at: file.url)
+        }
+    }
+
+    /// Take a security-scoped URL from a document picker and make it readable.
+    ///
+    /// Copied rather than held open. A scoped URL stops being readable the
+    /// moment the picker's grant lapses, and a transfer outlives the tap that
+    /// started it — a large file over a slow network by minutes.
+    public nonisolated static func fromPicked(_ url: URL) throws -> Outgoing {
+        #if canImport(Darwin)
+        let scoped = url.startAccessingSecurityScopedResource()
+        defer { if scoped { url.stopAccessingSecurityScopedResource() } }
+        #endif
+
+        let name = url.lastPathComponent
+        let copy = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: copy, withIntermediateDirectories: true)
+        let destination = copy.appendingPathComponent(name.isEmpty ? "file" : name)
+        try FileManager.default.copyItem(at: url, to: destination)
+
+        let size = (try? destination.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        return Outgoing(
+            url: destination,
+            name: destination.lastPathComponent,
+            size: UInt64(size),
+            mime: mimeType(for: destination),
+            temporary: true)
+    }
+
+    /// Write bytes a photo picker handed over, which are not a file yet.
+    public nonisolated static func fromData(
+        _ data: Data, suggestedName: String
+    ) throws -> Outgoing {
+        let copy = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: copy, withIntermediateDirectories: true)
+        let destination = copy.appendingPathComponent(
+            suggestedName.isEmpty ? "photo.jpg" : suggestedName)
+        try data.write(to: destination, options: .atomic)
+        return Outgoing(
+            url: destination,
+            name: destination.lastPathComponent,
+            size: UInt64(data.count),
+            mime: mimeType(for: destination),
+            temporary: true)
+    }
+}
+
+/// A content type for the offer, from the file's own extension.
+///
+/// Advisory. The receiver decides what to do with what arrives and is not
+/// entitled to trust this; it is here so a computer can show a sensible icon.
+private func mimeType(for url: URL) -> String {
+    #if canImport(UniformTypeIdentifiers)
+    if let type = UTType(filenameExtension: url.pathExtension),
+       let mime = type.preferredMIMEType {
+        return mime
+    }
+    #endif
+    return "application/octet-stream"
+}

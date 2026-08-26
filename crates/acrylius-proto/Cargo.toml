@@ -12,6 +12,10 @@ minicbor.workspace = true
 sha2.workspace = true
 hkdf.workspace = true
 thiserror.workspace = true
+# Sealing a bulk chunk is a pure buffer transform and belongs beside the format
+# it is part of, so the two transports that carry these frames — tokio in the
+# daemon, a blocking socket on the phone — share one implementation of it.
+chacha20poly1305.workspace = true
 
 [features]
 default = ["std"]

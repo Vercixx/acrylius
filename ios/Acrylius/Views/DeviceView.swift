@@ -42,7 +42,18 @@ struct DeviceView: View {
 
             MediaSection(peer: peer)
 
-            if features.canWake, !peer.reachable {
+            // Only while there is a session. An offer travels over it, and a
+            // picker that leads to "unreachable" is worse than no picker.
+            if peer.reachable {
+                SendFileSection(peer: peer)
+            }
+
+            // Whenever this phone is not talking to the computer, which is
+            // exactly when waking it means something — and it must not depend
+            // on the live catalogue, which is empty until a session opens. A
+            // machine that is asleep will never fill it in, so the answer comes
+            // off disk: the computer handed these over while it was awake.
+            if !peer.reachable, WakeTargets.load(for: peer.deviceId) != nil {
                 Section {
                     TaskButton("Wake up") {
                         let sent = await model.wake(peer)

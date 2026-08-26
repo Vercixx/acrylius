@@ -209,6 +209,12 @@ impl From<FfiEffectResult> for cv::EffectResult {
 pub enum FfiError {
     #[error("{detail}")]
     BadInput { detail: String },
+    /// Something the host was asked to carry out and could not. Separate from
+    /// `BadInput` because it is not the caller's fault and not worth fixing by
+    /// calling differently: a file went missing, a socket refused, a disk
+    /// filled.
+    #[error("{detail}")]
+    Effect { detail: String },
 }
 
 fn peer(s: &str) -> Result<acrylius_proto::ids::DeviceId, FfiError> {
@@ -549,6 +555,14 @@ pub enum FfiAction {
     Ui {
         event: FfiUiEvent,
     },
+    /// Send a file. The host looks the transfer up in whatever it offered from
+    /// and calls `bulk_send`; the key is the core's, derived from the session,
+    /// and is never something the host works out for itself.
+    BulkSend {
+        transfer: u64,
+        endpoint: String,
+        key: Vec<u8>,
+    },
     /// A bulk transfer this host has no way to carry out. The host answers with
     /// a failed `BulkFinished`, so the far end is told rather than left waiting.
     BulkUnsupported {
@@ -609,16 +623,23 @@ impl From<cv::Action> for FfiAction {
                 transport: transport.0,
                 enable,
             },
-            // Bulk actions do not cross to iOS yet. Sending a file from a phone
-            // needs a document picker and receiving one needs somewhere to put
-            // it, and neither exists; a host that cannot serve the capability
-            // refuses an offer rather than half-honouring it. Mapped rather
-            // than ignored so the day it does exist, this is a compile error
-            // and not a silent gap.
-            cv::Action::BulkListen { transfer, .. } => Self::BulkUnsupported {
+            cv::Action::BulkSend {
+                transfer,
+                endpoint,
+                key,
+            } => Self::BulkSend {
                 transfer: transfer.0,
+                endpoint,
+                key,
             },
-            cv::Action::BulkSend { transfer, .. } => Self::BulkUnsupported {
+            // Receiving still does not cross. A phone cannot accept a
+            // connection while its app is closed and has nowhere to put a file,
+            // so it refuses an offer outright rather than half-honouring one —
+            // and the share plugin refuses before this is ever reached, on a
+            // host that does not declare the effect. Mapped rather than ignored
+            // so the day a phone can receive, this is a compile error and not a
+            // silent gap.
+            cv::Action::BulkListen { transfer, .. } => Self::BulkUnsupported {
                 transfer: transfer.0,
             },
             cv::Action::BulkCancel { transfer } => Self::BulkUnsupported {

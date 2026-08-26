@@ -20,6 +20,7 @@
 //! still deadlock itself, so do not.
 
 pub mod bodies;
+pub mod bulk;
 pub mod types;
 
 use std::sync::Mutex;

@@ -474,7 +474,7 @@ one" means there, is the host's business; on Linux it is MPRIS.
 
 ```
 MediaCommand { 0: player, 1: value }
-MediaState   { 0: [MediaPlayer], 1: active }
+MediaState   { 0: [MediaPlayer], 1: active, 2: system_volume }
 MediaPlayer  { 0: id, 1: name, 2: status, 3: title, 4: artist, 5: album,
                6: length_ms, 7: position_ms, 8: volume_percent,
                9: can_go_next, 10: can_go_previous, 11: can_seek,
@@ -489,15 +489,36 @@ Every command is answered with `state`, never an acknowledgement. A player may
 ignore a command, clamp a seek, or stop of its own accord, and reading it back
 is the only honest answer.
 
-`position_ms` is reported and must never be counted forward by a receiver: it
-would drift, and it would keep advancing after the media stopped somewhere the
-receiver cannot see. A `state` is not broadcast for a position change alone,
+`position_ms` is a reading, true only at the instant it was taken, and it is
+never counted forward by anything that stores or forwards it: a position that
+advanced on its own would drift, and would keep advancing after the media
+stopped somewhere its holder cannot see.
+
+A screen showing it to a person may estimate between readings — the reported
+position plus the time since it arrived, while the player says it is playing —
+but only while it is also asking for a fresh one, and never past the track's own
+length. An estimate that nothing is correcting is the thing this rule forbids;
+one that is corrected every couple of seconds by the side that is looking at it
+is how a clock ticks without anyone inventing where a track has got to. A `state` is not broadcast for a position change alone,
 because a playing track would otherwise announce itself once a second forever;
 it is broadcast for a track change, a pause, a volume move, or a player
 appearing or leaving.
 
-`volume` is the player's own, not the machine's. Values outside 0 to 100 are
-refused before they reach a player, so a host need not range-check again.
+`volume` with no `player` named is the **machine's** output volume, reported as
+`system_volume`; with one named it is that player's own. That asymmetry is not
+tidy and is deliberate. MPRIS gives every player a writable `Volume` property
+that a great many of them accept and then ignore — Chromium does exactly this,
+while reporting `can_control` true — so a remote offering only the per-player
+control has a slider that works for some of what you play and silently does
+nothing for the rest. The machine's volume always moves something, and it is
+what a person means by "turn it down".
+
+A host that sets a player's volume must read it back and answer `not_allowed`
+if it did not move. Reporting a change that did not happen is worse than
+refusing one that cannot.
+
+Values outside 0 to 100 are refused before they reach a host, so no host need
+range-check again.
 
 Album art is not carried. MPRIS supplies a URL, usually to a file the peer
 cannot read, and an image is far past what an envelope should hold.
@@ -560,6 +581,12 @@ without announcing anything. It still advertises the capability — withdrawing 
 would mean nobody could be sent a file *by* that device either, and would break
 replies — but a device that cannot ask a person must not sit on an offer, because
 there is no later moment at which an answer could arrive.
+
+**Sending and receiving are not the same ability, and a device may have only
+one.** Sending needs a file and a socket to dial. Receiving needs a directory, a
+listening socket and somebody to ask. A phone has the first and none of the
+second, so it offers files freely and refuses every offer made to it. Nothing in
+the protocol requires the two to come together.
 
 #### The bulk connection
 

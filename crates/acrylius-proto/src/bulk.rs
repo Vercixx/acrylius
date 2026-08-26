@@ -14,6 +14,20 @@
 //! it travels in the clear so a listener can tell which transfer a connection
 //! belongs to before it can decrypt anything.
 
+//! ## Why the sealing is here and not in a transport
+//!
+//! Because there are two transports. The daemon moves these frames over tokio;
+//! a phone moves them over a blocking socket, since nothing async may cross the
+//! FFI boundary. If each carried its own idea of how a chunk is sealed there
+//! would be two implementations of the wire format, which is the single thing
+//! this project exists to avoid. So the format lives here as plain buffer
+//! transforms — no socket, no state, no runtime — and each transport only
+//! decides how bytes reach the wire.
+
+use alloc::vec::Vec;
+
+use chacha20poly1305::aead::{Aead, KeyInit};
+use chacha20poly1305::{ChaCha20Poly1305, Nonce};
 use hkdf::Hkdf;
 use sha2::Sha256;
 
@@ -76,9 +90,93 @@ pub fn read_hello(bytes: &[u8; 12]) -> Result<u64, HelloError> {
     Ok(u64::from_be_bytes(id))
 }
 
+/// A nonce from a chunk's sequence number.
+///
+/// The whole nonce is the counter, so two chunks of one transfer can never
+/// share one. Reusing a nonce under one key is the failure this shape makes
+/// impossible rather than merely unlikely — and it is safe to count from zero
+/// only because the key is fresh for every transfer.
+#[must_use]
+pub fn nonce(seq: u64) -> [u8; 12] {
+    let mut out = [0u8; 12];
+    out[4..].copy_from_slice(&seq.to_be_bytes());
+    out
+}
+
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub enum ChunkError {
+    #[error("a bulk key is 32 bytes")]
+    BadKey,
+    #[error("chunk {0} would not open: wrong key, or a frame out of order")]
+    Sealed(u64),
+    #[error("chunk {0} could not be sealed")]
+    Unsealed(u64),
+}
+
+/// Seal one chunk for sending.
+pub fn seal(key: &[u8], seq: u64, plaintext: &[u8]) -> Result<Vec<u8>, ChunkError> {
+    cipher(key)?
+        .encrypt(Nonce::from_slice(&nonce(seq)), plaintext)
+        .map_err(|_| ChunkError::Unsealed(seq))
+}
+
+/// Open one chunk that arrived.
+///
+/// A chunk that will not open is the end of the transfer, not a chunk to skip:
+/// the sequence number is in the nonce, so reordering, repeating or dropping
+/// one makes every chunk after it fail too.
+pub fn open(key: &[u8], seq: u64, frame: &[u8]) -> Result<Vec<u8>, ChunkError> {
+    cipher(key)?
+        .decrypt(Nonce::from_slice(&nonce(seq)), frame)
+        .map_err(|_| ChunkError::Sealed(seq))
+}
+
+fn cipher(key: &[u8]) -> Result<ChaCha20Poly1305, ChunkError> {
+    let key: [u8; 32] = key.try_into().map_err(|_| ChunkError::BadKey)?;
+    Ok(ChaCha20Poly1305::new((&key).into()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_chunk_round_trips() {
+        let k = key(b"hh", 1);
+        let sealed = seal(&k, 0, b"hello").unwrap();
+        assert_eq!(open(&k, 0, &sealed).unwrap(), b"hello");
+    }
+
+    #[test]
+    fn a_chunk_will_not_open_under_another_transfers_key() {
+        let sealed = seal(&key(b"hh", 1), 0, b"hello").unwrap();
+        assert_eq!(
+            open(&key(b"hh", 2), 0, &sealed),
+            Err(ChunkError::Sealed(0)),
+            "a key for another transfer opens nothing"
+        );
+    }
+
+    #[test]
+    fn a_chunk_will_not_open_at_the_wrong_position() {
+        // What makes reordering, repetition and truncation all one failure.
+        let k = key(b"hh", 1);
+        let sealed = seal(&k, 3, b"hello").unwrap();
+        assert_eq!(open(&k, 4, &sealed), Err(ChunkError::Sealed(4)));
+        assert_eq!(open(&k, 2, &sealed), Err(ChunkError::Sealed(2)));
+    }
+
+    #[test]
+    fn a_nonce_is_the_sequence_number_and_nothing_else() {
+        assert_ne!(nonce(0), nonce(1));
+        assert_eq!(nonce(0), [0u8; 12]);
+        assert_eq!(&nonce(1)[4..], &1u64.to_be_bytes());
+    }
+
+    #[test]
+    fn a_key_of_the_wrong_length_is_refused_rather_than_padded() {
+        assert_eq!(seal(b"short", 0, b"x"), Err(ChunkError::BadKey));
+    }
 
     #[test]
     fn two_transfers_on_one_session_do_not_share_a_key() {

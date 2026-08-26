@@ -253,9 +253,14 @@ pub enum EffectKind {
     Command,
     Wol,
     Media,
-    /// Somewhere to put an incoming file, and something to read an outgoing
-    /// one from. A host without it can still offer and be offered; it simply
-    /// refuses.
+    /// Somewhere to put an incoming file.
+    ///
+    /// Receiving only, and that asymmetry is the point. A host that can pick a
+    /// file can offer it — there is nothing to gate, because it starts the
+    /// transfer and reads the bytes itself. Accepting one means a directory, a
+    /// listening socket and a person to ask, and a phone has none of the three.
+    /// So a phone sends files without declaring this and refuses to be sent
+    /// them, which is exactly what it can do.
     Share,
     Custom,
 }
