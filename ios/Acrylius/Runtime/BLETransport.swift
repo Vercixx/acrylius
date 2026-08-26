@@ -280,13 +280,25 @@ extension BLETransport: CBCentralManagerDelegate {
             push(.scanning(false))
             return
         }
+        startScan(c, why: "powered on")
+        adoptConnected(c)
+    }
+
+    /// Begin, or begin again.
+    ///
+    /// `allowDuplicates: false` is deliberate — it is the battery-cheap mode,
+    /// and a filtered scan reporting one desktop repeatedly buys nothing. The
+    /// cost is that each peripheral is reported *once* for the life of a scan,
+    /// so a desktop already seen is not announced again when it comes back
+    /// from a disconnect. Restarting the scan is what makes it announceable
+    /// again, and doing that on every disconnect is why this is a method.
+    private func startScan(_ c: CBCentralManager, why: String) {
         c.scanForPeripherals(
             withServices: [serviceUUID],
             options: [CBCentralManagerScanOptionAllowDuplicatesKey: false]
         )
         push(.scanning(true))
-        push(.note("scanning for the acrylius service"))
-        adoptConnected(c)
+        push(.note("scanning for the acrylius service: \(why)"))
     }
 
     /// Pick up desktops iOS is already connected to, which a scan will never
@@ -319,7 +331,41 @@ extension BLETransport: CBCentralManagerDelegate {
             // list: a `CBPeripheral` that is released is implicitly cancelled.
             let p = remember(peripheral)
             if let name = peripheral.name { p.name = name }
-            c.connect(peripheral, options: nil)
+            beginConnect(peripheral, via: c, why: "already connected to iOS")
+        }
+    }
+
+    /// How long a connect may sit before we stop believing in it.
+    ///
+    /// Generous, because it also has to cover service and characteristic
+    /// discovery on a slow link.
+    private static let connectTimeout = 10.0
+
+    /// Connect, and refuse to wait forever.
+    ///
+    /// `connect(_:options:)` has no timeout — Apple documents it as pending
+    /// indefinitely, and there is no delegate callback for "this is not
+    /// happening". That matters more than it sounds, because `didDiscover`
+    /// only acts on a peripheral that is `.disconnected`: one connect wedged
+    /// in `.connecting` makes the app ignore every advertisement that follows,
+    /// for as long as it runs. That is what a second force-quit was clearing.
+    ///
+    /// Cancelling puts the peripheral back to `.disconnected`, and the scan —
+    /// which is still running — discovers it again and retries.
+    private func beginConnect(_ peripheral: CBPeripheral, via c: CBCentralManager, why: String) {
+        push(.note("connecting: \(why)"))
+        c.connect(peripheral, options: nil)
+        queue.asyncAfter(deadline: .now() + Self.connectTimeout) { [weak self, weak c] in
+            guard let self, let c else { return }
+            // Done, and usable: connected *and* the characteristics arrived.
+            // Connected with nothing discovered is its own failure, and one a
+            // stale attribute cache produces, so it is not left alone either.
+            let p = self.peer(peripheral.identifier)
+            if peripheral.state == .connected, p?.rx != nil, p?.tx != nil { return }
+            // Already given up on, or never started.
+            if peripheral.state == .disconnected { return }
+            self.push(.note("connect timed out after \(Int(Self.connectTimeout))s; retrying"))
+            c.cancelPeripheralConnection(peripheral)
         }
     }
 
@@ -345,7 +391,7 @@ extension BLETransport: CBCentralManagerDelegate {
         guard ours, peripheral.state == .disconnected else { return }
         // Connecting is how identity is learned: a 43-character fingerprint does
         // not fit in a 31-byte advertisement, so it is read over GATT instead.
-        c.connect(peripheral, options: nil)
+        beginConnect(peripheral, via: c, why: "seen advertising")
     }
 
     public func centralManager(_ c: CBCentralManager, didConnect peripheral: CBPeripheral) {
@@ -378,6 +424,12 @@ extension BLETransport: CBCentralManagerDelegate {
         lock.unlock()
         push(.link("none"))
         push(.note("disconnected\(why.map { ": \($0)" } ?? "")"))
+        // Without this the desktop is gone until the app is relaunched: it has
+        // already been reported once for this scan, and will not be reported
+        // again. See `startScan`.
+        if c.state == .poweredOn {
+            startScan(c, why: "after a disconnect")
+        }
         if let link {
             fire(
                 .linkDown(
