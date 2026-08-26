@@ -16,6 +16,7 @@
 extern crate alloc;
 
 pub mod b64;
+pub mod bulk;
 pub mod envelope;
 pub mod frame;
 pub mod handshake;

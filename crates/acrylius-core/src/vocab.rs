@@ -43,6 +43,14 @@ pub struct Now {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct EffectToken(pub u64);
 
+/// One bulk transfer, for as long as it lasts.
+///
+/// Allocated by the host that starts it, and carried in the envelope so the
+/// other end can name it. Unique within a session, which is all the key
+/// derivation needs.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct TransferId(pub u64);
+
 /// Correlates an [`Action::Dial`] with the link it eventually produces.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct DialToken(pub u64);
@@ -85,6 +93,21 @@ pub enum Event {
     },
     /// The single host timer fired. See [`Outcome::next_deadline_ms`].
     Tick,
+    /// A host has somewhere for the other end to connect for a bulk transfer.
+    ///
+    /// Only the side that can accept connections sends this. A phone cannot,
+    /// which is why the endpoint is negotiated rather than assumed.
+    BulkListening {
+        transfer: TransferId,
+        endpoint: String,
+    },
+    /// A bulk transfer ended, one way or the other. `detail` is empty on
+    /// success.
+    BulkFinished {
+        transfer: TransferId,
+        ok: bool,
+        detail: String,
+    },
     /// A local UI or CLI asked for something.
     Local(LocalCommand),
     EffectDone {
@@ -230,6 +253,10 @@ pub enum EffectKind {
     Command,
     Wol,
     Media,
+    /// Somewhere to put an incoming file, and something to read an outgoing
+    /// one from. A host without it can still offer and be offered; it simply
+    /// refuses.
+    Share,
     Custom,
 }
 
@@ -343,6 +370,32 @@ pub enum Action {
     Discover {
         transport: TransportId,
         enable: bool,
+    },
+    /// Accept a bulk connection for `transfer`, and say where.
+    ///
+    /// The host answers with [`Event::BulkListening`] once it has somewhere,
+    /// and with [`Event::BulkFinished`] when the transfer ends. A host that
+    /// cannot listen reports that as a finished-and-failed transfer rather than
+    /// staying silent.
+    BulkListen {
+        transfer: TransferId,
+        /// Derived from the session. The core is the only thing that knows the
+        /// session secret; the host gets a scoped, single-use key and nothing
+        /// else.
+        key: Vec<u8>,
+        /// What the far end says it is sending, so a host can decide whether it
+        /// wants it before anything arrives.
+        expect_bytes: u64,
+    },
+    /// Connect to `endpoint` and stream the bytes for `transfer`.
+    BulkSend {
+        transfer: TransferId,
+        endpoint: String,
+        key: Vec<u8>,
+    },
+    /// Stop a transfer that has not finished.
+    BulkCancel {
+        transfer: TransferId,
     },
     Ui(UiEvent),
 }

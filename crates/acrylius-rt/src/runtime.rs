@@ -14,7 +14,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use acrylius_core::core::Core;
 use acrylius_core::link::TransportId;
-use acrylius_core::vocab::{Action, Event, Now, UiEvent};
+use acrylius_core::vocab::{Action, Event, Now, TransferId, UiEvent};
 use tokio::sync::mpsc;
 
 use crate::effector::Effector;
@@ -24,6 +24,37 @@ use crate::transport::{Transport, TransportCmd};
 /// Where the runtime publishes UI events for a local consumer (the control
 /// socket, a CLI, a test).
 pub type UiSink = mpsc::UnboundedSender<UiEvent>;
+
+/// Where a bulk transfer's bytes come from and go to.
+///
+/// Kept out of the core and out of the transport alike: the core must not know
+/// what a file is, and the transport must not decide where one lands. A host
+/// that has no answer to these does not offer the capability, and an offer it
+/// receives is refused rather than half-honoured.
+#[async_trait::async_trait]
+pub trait BulkHost: Send + Sync + 'static {
+    /// Somewhere for the far end to connect, for this transfer.
+    async fn listen(
+        &self,
+        transfer: TransferId,
+        key: Vec<u8>,
+        expect_bytes: u64,
+    ) -> anyhow::Result<String>;
+
+    /// Wait for that connection and take what arrives.
+    async fn receive(&self, transfer: TransferId) -> anyhow::Result<()>;
+
+    /// Connect to somewhere the far end named, and send.
+    async fn send(
+        &self,
+        transfer: TransferId,
+        endpoint: String,
+        key: Vec<u8>,
+    ) -> anyhow::Result<()>;
+
+    /// Stop a transfer that has not finished.
+    fn cancel(&self, transfer: TransferId);
+}
 
 /// A read-only look at the core after each step. See [`Runtime::observe`].
 pub type Observer = Box<dyn Fn(&Core) + Send>;
@@ -36,6 +67,7 @@ pub struct Runtime {
     effector: Arc<dyn Effector>,
     store: Box<dyn Store>,
     ui: Option<UiSink>,
+    bulk: Option<Arc<dyn BulkHost>>,
     /// Called with the core after every step, so a host can keep a live
     /// snapshot for its own queries without ever holding the core itself.
     observer: Option<Observer>,
@@ -56,6 +88,7 @@ impl Runtime {
             effector,
             store,
             ui: None,
+            bulk: None,
             observer: None,
             started: Instant::now(),
         }
@@ -65,6 +98,13 @@ impl Runtime {
     #[must_use]
     pub fn events(&self) -> mpsc::UnboundedSender<Event> {
         self.events_tx.clone()
+    }
+
+    /// Give the runtime somewhere to put files. Without one, a bulk action is
+    /// reported as a failed transfer rather than ignored — a sender waiting
+    /// forever for an endpoint is worse than one told no.
+    pub fn set_bulk(&mut self, bulk: Arc<dyn BulkHost>) {
+        self.bulk = Some(bulk);
     }
 
     pub fn set_ui(&mut self, ui: UiSink) {
@@ -158,6 +198,18 @@ impl Runtime {
         }
     }
 
+    /// Report a transfer that never started as one that finished badly.
+    ///
+    /// Silence would leave the far end waiting for an endpoint that is never
+    /// coming, and it has no way to tell that from a slow disk.
+    fn bulk_failed(&self, transfer: TransferId, why: &str) {
+        let _ = self.events_tx.send(Event::BulkFinished {
+            transfer,
+            ok: false,
+            detail: why.to_string(),
+        });
+    }
+
     async fn apply(&mut self, action: Action) {
         match action {
             Action::Dial {
@@ -217,6 +269,73 @@ impl Runtime {
                     let _ = tx.send(TransportCmd::Discover { enable });
                 }
             }
+            Action::BulkListen {
+                transfer,
+                key,
+                expect_bytes,
+            } => {
+                let Some(bulk) = self.bulk.clone() else {
+                    self.bulk_failed(transfer, "this host cannot receive files");
+                    return;
+                };
+                let back = self.events_tx.clone();
+                tokio::spawn(async move {
+                    match bulk.listen(transfer, key, expect_bytes).await {
+                        Ok(endpoint) => {
+                            let _ = back.send(Event::BulkListening { transfer, endpoint });
+                            // Accepting blocks until the far end connects, so it
+                            // runs after the endpoint has been sent rather than
+                            // before it.
+                            let (ok, detail) = match bulk.receive(transfer).await {
+                                Ok(()) => (true, String::new()),
+                                Err(e) => (false, e.to_string()),
+                            };
+                            let _ = back.send(Event::BulkFinished {
+                                transfer,
+                                ok,
+                                detail,
+                            });
+                        }
+                        Err(e) => {
+                            let _ = back.send(Event::BulkFinished {
+                                transfer,
+                                ok: false,
+                                detail: e.to_string(),
+                            });
+                        }
+                    }
+                });
+            }
+
+            Action::BulkSend {
+                transfer,
+                endpoint,
+                key,
+            } => {
+                let Some(bulk) = self.bulk.clone() else {
+                    self.bulk_failed(transfer, "this host cannot send files");
+                    return;
+                };
+                let back = self.events_tx.clone();
+                tokio::spawn(async move {
+                    let (ok, detail) = match bulk.send(transfer, endpoint, key).await {
+                        Ok(()) => (true, String::new()),
+                        Err(e) => (false, e.to_string()),
+                    };
+                    let _ = back.send(Event::BulkFinished {
+                        transfer,
+                        ok,
+                        detail,
+                    });
+                });
+            }
+
+            Action::BulkCancel { transfer } => {
+                if let Some(bulk) = &self.bulk {
+                    bulk.cancel(transfer);
+                }
+            }
+
             Action::Ui(e) => {
                 tracing::debug!(?e, "ui");
                 if let Some(ui) = &self.ui {

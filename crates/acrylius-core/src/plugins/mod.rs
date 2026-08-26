@@ -10,4 +10,5 @@ pub mod command;
 pub mod media;
 pub mod ping;
 pub mod session;
+pub mod share;
 pub mod wol;

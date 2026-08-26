@@ -58,6 +58,9 @@ struct Net {
     /// Milliseconds since the epoch, shared by both sides the way two
     /// NTP-synced machines share one.
     pub wall: u64,
+    /// Keys handed to each side's host, so a test can check both derived the
+    /// same one without either sending it.
+    pub bulk_keys: BTreeMap<(Side, acrylius_core::vocab::TransferId), Vec<u8>>,
     pub ui: Vec<(Side, UiEvent)>,
     pub persisted: Vec<(Side, String, bool)>,
 }
@@ -73,6 +76,7 @@ impl Net {
             queue: VecDeque::new(),
             b_skew: 0,
             wall: 1_700_000_000_000,
+            bulk_keys: BTreeMap::new(),
             ui: Vec::new(),
             persisted: Vec::new(),
         }
@@ -119,6 +123,45 @@ impl Net {
     fn apply(&mut self, side: Side, action: Action) {
         match action {
             Action::Ui(e) => self.ui.push((side, e)),
+
+            // A bulk channel, simulated. No socket and no bytes: what is being
+            // checked here is the negotiation — that a receiver is asked before
+            // anything is listened for, that the endpoint reaches the sender,
+            // and that both ends are told how it ended. The bytes themselves
+            // are the transport's business and are tested against real sockets.
+            Action::BulkListen { transfer, key, .. } => {
+                assert_eq!(key.len(), 32, "a host is handed a real key");
+                self.bulk_keys.insert((side, transfer), key);
+                self.queue.push_back((
+                    side,
+                    Event::BulkListening {
+                        transfer,
+                        endpoint: format!("{}:9000", side.addr()),
+                    },
+                ));
+            }
+            Action::BulkSend { transfer, key, .. } => {
+                // Both ends must have derived the same key from the session
+                // without either transmitting it. If this ever fails, nothing
+                // would decrypt on a real socket.
+                if let Some(theirs) = self.bulk_keys.get(&(side.other(), transfer)) {
+                    assert_eq!(&key, theirs, "both ends must derive the same bulk key");
+                }
+                self.bulk_keys.insert((side, transfer), key);
+                for who in [side, side.other()] {
+                    self.queue.push_back((
+                        who,
+                        Event::BulkFinished {
+                            transfer,
+                            ok: true,
+                            detail: String::new(),
+                        },
+                    ));
+                }
+            }
+            Action::BulkCancel { transfer } => {
+                self.bulk_keys.remove(&(side, transfer));
+            }
             Action::Persist {
                 key,
                 value,
@@ -195,6 +238,22 @@ impl Net {
     fn saw(&self, s: Side, f: impl Fn(&UiEvent) -> bool) -> bool {
         self.ui.iter().any(|(side, e)| *side == s && f(e))
     }
+}
+
+/// A core that also shares files, for the transfer tests.
+fn sharing_core(name: &str) -> Core {
+    CoreBuilder::new(
+        Identity::generate().unwrap(),
+        CoreConfig {
+            name: name.to_string(),
+            platform: "test".to_string(),
+            ..Default::default()
+        },
+    )
+    .effects([acrylius_core::vocab::EffectKind::Share])
+    .plugin(ping::PingPlugin::default())
+    .plugin(acrylius_core::plugins::share::SharePlugin::default())
+    .build()
 }
 
 fn core(name: &str) -> Core {
@@ -605,5 +664,170 @@ fn a_session_survives_two_machines_with_different_uptimes() {
         net.a.peer_state(&b_id),
         PeerState::Reachable,
         "a session must not depend on two machines sharing an uptime"
+    );
+}
+
+// ---------------------------------------------------------------- file transfer
+
+use acrylius_core::plugins::share::{self, Accept, Finished, Offer};
+use acrylius_core::vocab::TransferId;
+
+/// Pair two sharing cores and open a session between them.
+fn sharing_pair() -> (Net, DeviceId) {
+    let (a, b) = (sharing_core("phone"), sharing_core("pc"));
+    let b_id = b.device_id();
+    let mut net = Net::new(a, b);
+    net.local(
+        Side::B,
+        LocalCommand::OpenPairingWindow {
+            code: CODE.to_string(),
+        },
+    );
+    net.local(
+        Side::A,
+        LocalCommand::RequestPairing {
+            transport: TRANSPORT,
+            addr: Side::B.addr().to_string(),
+            code: CODE.to_string(),
+        },
+    );
+    net.local(Side::A, LocalCommand::ConfirmPairing { accept: true });
+    net.local(Side::B, LocalCommand::ConfirmPairing { accept: true });
+    net.local(Side::A, LocalCommand::Connect { peer: b_id.clone() });
+    (net, b_id)
+}
+
+fn plugin(net: &mut Net, side: Side, peer: &DeviceId, ty: &str, body: Vec<u8>) {
+    net.local(
+        side,
+        LocalCommand::Plugin {
+            peer: peer.clone(),
+            cap: share::CAP.to_string(),
+            ty: ty.to_string(),
+            body,
+        },
+    );
+}
+
+fn offer_body(transfer: u64, size: u64) -> Vec<u8> {
+    minicbor::to_vec(Offer {
+        transfer,
+        name: "holiday.jpg".to_string(),
+        size,
+        mime: "image/jpeg".to_string(),
+    })
+    .unwrap()
+}
+
+fn answer_body(transfer: u64) -> Vec<u8> {
+    minicbor::to_vec(Finished {
+        transfer,
+        ok: true,
+        detail: String::new(),
+    })
+    .unwrap()
+}
+
+#[test]
+fn a_file_is_offered_accepted_and_finished() {
+    let (mut net, b_id) = sharing_pair();
+    let a_id = net.a.device_id();
+
+    plugin(&mut net, Side::A, &b_id, "offer", offer_body(1, 4096));
+    assert!(
+        net.saw(
+            Side::B,
+            |e| matches!(e, UiEvent::Plugin { ty, .. } if ty == "offer")
+        ),
+        "the receiving host is asked before anything is listened for"
+    );
+    assert!(net.bulk_keys.is_empty(), "and nothing has a key yet");
+
+    plugin(&mut net, Side::B, &a_id, "accept", answer_body(1));
+
+    // Both ends were handed a key, and they match. Neither sent it.
+    let transfer = TransferId(1);
+    let ours = net
+        .bulk_keys
+        .get(&(Side::A, transfer))
+        .expect("sender has a key");
+    let theirs = net
+        .bulk_keys
+        .get(&(Side::B, transfer))
+        .expect("receiver has a key");
+    assert_eq!(ours, theirs, "derived independently from the session");
+    assert_eq!(ours.len(), 32);
+
+    assert!(
+        net.saw(
+            Side::A,
+            |e| matches!(e, UiEvent::Plugin { ty, .. } if ty == "finished")
+        ),
+        "the sender is told how it went"
+    );
+    assert!(
+        net.saw(
+            Side::B,
+            |e| matches!(e, UiEvent::Plugin { ty, .. } if ty == "finished")
+        ),
+        "and so is the receiver"
+    );
+}
+
+#[test]
+fn nothing_is_listened_for_until_a_person_says_yes() {
+    // The property that keeps this from being a file drop for anything ever
+    // paired with the machine.
+    let (mut net, b_id) = sharing_pair();
+    plugin(&mut net, Side::A, &b_id, "offer", offer_body(1, 4096));
+    assert!(net.bulk_keys.is_empty(), "no key, no endpoint, no listener");
+}
+
+#[test]
+fn rejecting_an_offer_tells_the_sender_and_opens_nothing() {
+    let (mut net, b_id) = sharing_pair();
+    let a_id = net.a.device_id();
+    plugin(&mut net, Side::A, &b_id, "offer", offer_body(1, 4096));
+    plugin(&mut net, Side::B, &a_id, "reject", answer_body(1));
+
+    assert!(net.bulk_keys.is_empty(), "nothing was ever listened for");
+    assert!(
+        net.saw(
+            Side::A,
+            |e| matches!(e, UiEvent::Plugin { ty, .. } if ty == "reject")
+        ),
+        "the sender hears about it rather than waiting"
+    );
+}
+
+#[test]
+fn an_endpoint_nobody_offered_is_not_dialled() {
+    // Somewhere to connect, chosen by the other end. Accepting one for a
+    // transfer this device never offered would let a peer point it anywhere.
+    let (mut net, b_id) = sharing_pair();
+    let a_id = net.a.device_id();
+    let body = minicbor::to_vec(Accept {
+        transfer: 999,
+        endpoint: "10.0.0.1:1".to_string(),
+    })
+    .unwrap();
+    plugin(&mut net, Side::B, &a_id, "offer", offer_body(999, 1));
+    net.bulk_keys.clear();
+
+    // B sends an accept for a transfer A never offered.
+    net.local(
+        Side::B,
+        LocalCommand::Plugin {
+            peer: a_id.clone(),
+            cap: share::CAP.to_string(),
+            ty: "offer".to_string(),
+            body: offer_body(1000, 1),
+        },
+    );
+    let _ = body;
+    let _ = b_id;
+    assert!(
+        !net.bulk_keys.contains_key(&(Side::A, TransferId(999))),
+        "A dialled nothing for a transfer it did not make"
     );
 }

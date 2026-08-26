@@ -11,6 +11,7 @@ repository.workspace = true
 acrylius-core.workspace = true
 acrylius-proto.workspace = true
 anyhow.workspace = true
+chacha20poly1305.workspace = true
 async-trait.workspace = true
 mdns-sd.workspace = true
 minicbor.workspace = true

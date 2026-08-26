@@ -10,7 +10,7 @@ use crate::config::CoreConfig;
 use crate::link::{LinkAttrs, LinkDownReason, LinkId, TransportId};
 use crate::noise::{Handshake, Identity, Session};
 use crate::peer::{PeerRecord, PeerState};
-use crate::plugin::{Cx, PendingSend, Plugin};
+use crate::plugin::{BulkRequest, Cx, PendingSend, Plugin};
 use crate::proto::envelope::{Envelope, ErrorCode};
 use crate::proto::frame::{self, FrameKind};
 use crate::proto::handshake::{GreatestSeen, Hello};
@@ -18,7 +18,7 @@ use crate::proto::ids::{DeviceId, Fingerprint};
 use crate::proto::pairing;
 use crate::vocab::{
     Action, DialToken, EffectKind, EffectResult, EffectToken, Event, LocalCommand, Now, Outcome,
-    Sensitivity, UiEvent,
+    Sensitivity, TransferId, UiEvent,
 };
 
 /// A link that exists but has not said anything yet. We do not know whether it
@@ -48,6 +48,10 @@ struct HandshakingLink {
 struct UpLink {
     session: Session,
     peer: DeviceId,
+    /// Kept because every bulk key is derived from it. It is not a secret the
+    /// session still needs — the cipher has its own state — but it is the one
+    /// value both ends share and nobody else knows.
+    handshake_hash: Vec<u8>,
     /// Our `caps_out` ∩ their `caps_in`, which is what we may send.
     can_send: Vec<String>,
     /// Their `caps_out` ∩ our `caps_in`, which is what we will accept.
@@ -100,6 +104,8 @@ pub struct Core {
     plugins: Vec<Box<dyn Plugin>>,
     /// Which plugin asked for an outstanding effect.
     effect_owner: BTreeMap<EffectToken, usize>,
+    /// Which plugin owns a bulk transfer, so its answer reaches the right one.
+    bulk_owner: BTreeMap<TransferId, usize>,
     caps_out: Vec<String>,
     caps_in: Vec<String>,
     /// The subset of `caps_in` this host can actually act on, rather than only
@@ -219,6 +225,23 @@ impl Core {
                         self.addrs.insert(id, (transport, peer.addr));
                     }
                 }
+            }
+            Event::BulkListening { transfer, endpoint } => {
+                self.dispatch_to_transfer_owner(now_ms, transfer, &mut out, |p, cx| {
+                    p.on_bulk_listening(cx, transfer, &endpoint);
+                });
+            }
+            Event::BulkFinished {
+                transfer,
+                ok,
+                detail,
+            } => {
+                self.dispatch_to_transfer_owner(now_ms, transfer, &mut out, |p, cx| {
+                    p.on_bulk_finished(cx, transfer, ok, &detail);
+                });
+                // The transfer is over either way, so nothing should still be
+                // holding a key for it.
+                self.bulk_owner.remove(&transfer);
             }
             Event::Tick => self.on_tick(now_ms, &mut out),
             Event::Local(cmd) => self.on_local(now_ms, cmd, &mut out),
@@ -596,6 +619,7 @@ impl Core {
         peer: DeviceId,
         out: &mut Outcome,
     ) {
+        let handshake_hash = hs.handshake_hash().unwrap_or_default();
         let session = match hs.into_session(&attrs) {
             Ok(s) => s,
             Err(e) => {
@@ -620,6 +644,7 @@ impl Core {
             LinkState::Up(UpLink {
                 session,
                 peer: peer.clone(),
+                handshake_hash,
                 can_send,
                 can_recv,
             }),
@@ -854,9 +879,7 @@ impl Core {
         let mut cx = Cx::new(now_ms, self.next_token);
         let result = self.plugins[idx].on_message(&mut cx, &peer, &env);
         self.next_token = cx.next_token;
-        for (t, _) in &cx.effects {
-            self.effect_owner.insert(*t, idx);
-        }
+        self.remember_owner(&cx, idx);
         self.drain_cx(cx, out);
 
         if let Err(e) = result {
@@ -937,12 +960,31 @@ impl Core {
         }
     }
 
+    /// Record which plugin owns whatever a `Cx` just asked for.
+    ///
+    /// Both effects and bulk transfers are answered later, by which time the
+    /// only way back to the plugin that asked is this map. A transfer that was
+    /// never recorded here is one whose answers go nowhere, which is exactly
+    /// how an accepted offer sat waiting for an endpoint that had already
+    /// arrived.
+    fn remember_owner(&mut self, cx: &Cx, idx: usize) {
+        for (t, _) in &cx.effects {
+            self.effect_owner.insert(*t, idx);
+        }
+        for b in &cx.bulk {
+            if let BulkRequest::Listen { transfer, .. } | BulkRequest::Send { transfer, .. } = b {
+                self.bulk_owner.insert(*transfer, idx);
+            }
+        }
+    }
+
     fn drain_cx(&mut self, cx: Cx, out: &mut Outcome) {
         let Cx {
             sends,
             effects,
             ui,
             wake_at,
+            bulk,
             ..
         } = cx;
         for e in ui {
@@ -951,12 +993,67 @@ impl Core {
         for (token, effect) in effects {
             out.push(Action::Effect { token, effect });
         }
+        for b in bulk {
+            self.dispatch_bulk(b, out);
+        }
         for s in sends {
             self.dispatch_send(0, s, out);
         }
         if let Some(w) = wake_at {
             self.plugin_wake = Some(self.plugin_wake.map_or(w, |p: u64| p.min(w)));
         }
+    }
+
+    /// Turn a plugin's bulk request into an action, with a key it never sees.
+    ///
+    /// The key is derived here because the session secret is the core's alone.
+    /// A plugin that could derive one could derive any of them, and a host is
+    /// given a single-use key scoped to one transfer rather than anything it
+    /// could reuse.
+    fn dispatch_bulk(&mut self, request: BulkRequest, out: &mut Outcome) {
+        let (peer, transfer) = match &request {
+            BulkRequest::Listen { peer, transfer, .. }
+            | BulkRequest::Send { peer, transfer, .. } => (peer.clone(), *transfer),
+            BulkRequest::Cancel { transfer } => {
+                out.push(Action::BulkCancel {
+                    transfer: *transfer,
+                });
+                return;
+            }
+        };
+
+        let Some(hash) = self.handshake_hash_for(&peer) else {
+            // No session, no key, and therefore no transfer. Reported as a
+            // finished-and-failed one so the plugin unwinds the same way it
+            // would for any other failure rather than waiting forever.
+            out.ui(UiEvent::Error {
+                code: ErrorCode::NotAllowed,
+                detail: format!("no session with {peer} to derive a transfer key from"),
+            });
+            return;
+        };
+        let key = crate::proto::bulk::key(&hash, transfer.0).to_vec();
+
+        match request {
+            BulkRequest::Listen { expect_bytes, .. } => out.push(Action::BulkListen {
+                transfer,
+                key,
+                expect_bytes,
+            }),
+            BulkRequest::Send { endpoint, .. } => out.push(Action::BulkSend {
+                transfer,
+                endpoint,
+                key,
+            }),
+            BulkRequest::Cancel { .. } => unreachable!("handled above"),
+        }
+    }
+
+    fn handshake_hash_for(&self, peer: &DeviceId) -> Option<Vec<u8>> {
+        self.links.values().find_map(|st| match st {
+            LinkState::Up(u) if &u.peer == peer => Some(u.handshake_hash.clone()),
+            _ => None,
+        })
     }
 }
 
@@ -1103,9 +1200,7 @@ impl Core {
                 let mut cx = Cx::new(now_ms, self.next_token);
                 let r = self.plugins[idx].on_local(&mut cx, &peer, &ty, &body);
                 self.next_token = cx.next_token;
-                for (t, _) in &cx.effects {
-                    self.effect_owner.insert(*t, idx);
-                }
+                self.remember_owner(&cx, idx);
                 self.drain_cx(cx, out);
                 if let Err(e) = r {
                     out.ui(UiEvent::Error {
@@ -1142,6 +1237,27 @@ impl Core {
         }
     }
 
+    /// Hand something to the plugin that owns a transfer.
+    ///
+    /// A transfer that nobody owns is one that has already finished, or one a
+    /// host invented. Either way there is nothing to tell.
+    fn dispatch_to_transfer_owner(
+        &mut self,
+        now_ms: u64,
+        transfer: TransferId,
+        out: &mut Outcome,
+        f: impl FnOnce(&mut Box<dyn Plugin>, &mut Cx),
+    ) {
+        let Some(&idx) = self.bulk_owner.get(&transfer) else {
+            return;
+        };
+        let mut cx = Cx::new(now_ms, self.next_token);
+        f(&mut self.plugins[idx], &mut cx);
+        self.next_token = cx.next_token;
+        self.remember_owner(&cx, idx);
+        self.drain_cx(cx, out);
+    }
+
     fn on_effect_done(
         &mut self,
         now_ms: u64,
@@ -1155,9 +1271,7 @@ impl Core {
         let mut cx = Cx::new(now_ms, self.next_token);
         self.plugins[idx].on_effect_result(&mut cx, token, result);
         self.next_token = cx.next_token;
-        for (tok, _) in &cx.effects {
-            self.effect_owner.insert(*tok, idx);
-        }
+        self.remember_owner(&cx, idx);
         self.drain_cx(cx, out);
     }
 
@@ -1345,6 +1459,7 @@ impl CoreBuilder {
             pending_peer_dials: BTreeMap::new(),
             plugins,
             effect_owner: BTreeMap::new(),
+            bulk_owner: BTreeMap::new(),
             caps_out,
             caps_in,
             caps_served,

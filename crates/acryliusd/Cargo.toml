@@ -21,6 +21,7 @@ acrylius-linux.workspace = true
 acrylius-proto.workspace = true
 acrylius-rt.workspace = true
 anyhow.workspace = true
+async-trait.workspace = true
 clap.workspace = true
 rand.workspace = true
 serde.workspace = true

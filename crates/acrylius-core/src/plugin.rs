@@ -84,6 +84,33 @@ pub struct Cx {
     pub(crate) effects: Vec<(EffectToken, Effect)>,
     pub(crate) ui: Vec<UiEvent>,
     pub(crate) wake_at: Option<u64>,
+    /// Bulk transfers this plugin asked to start, filled in with a key by the
+    /// core once it knows which session they belong to.
+    pub(crate) bulk: Vec<BulkRequest>,
+}
+
+/// A plugin asking for a side channel.
+///
+/// It names a peer and a transfer and nothing else. The key is the core's to
+/// supply, because the session secret is the core's alone — a plugin that could
+/// derive one could derive any of them.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum BulkRequest {
+    /// Accept a connection for this transfer, and say where.
+    Listen {
+        peer: DeviceId,
+        transfer: crate::vocab::TransferId,
+        expect_bytes: u64,
+    },
+    /// Connect to somewhere the far end named, and send.
+    Send {
+        peer: DeviceId,
+        transfer: crate::vocab::TransferId,
+        endpoint: String,
+    },
+    Cancel {
+        transfer: crate::vocab::TransferId,
+    },
 }
 
 impl Cx {
@@ -95,6 +122,7 @@ impl Cx {
             effects: Vec::new(),
             ui: Vec::new(),
             wake_at: None,
+            bulk: Vec::new(),
         }
     }
 
@@ -161,6 +189,42 @@ impl Cx {
         self.ui.push(e);
     }
 
+    /// Accept a bulk connection for `transfer` and tell the peer where.
+    ///
+    /// The host answers with an endpoint, or with a failure if it cannot listen
+    /// — a phone cannot, which is why an endpoint is negotiated rather than
+    /// assumed by whichever side happens to be sending.
+    pub fn bulk_listen(
+        &mut self,
+        peer: &DeviceId,
+        transfer: crate::vocab::TransferId,
+        expect_bytes: u64,
+    ) {
+        self.bulk.push(BulkRequest::Listen {
+            peer: peer.clone(),
+            transfer,
+            expect_bytes,
+        });
+    }
+
+    /// Connect to an endpoint the peer named, and send.
+    pub fn bulk_send(
+        &mut self,
+        peer: &DeviceId,
+        transfer: crate::vocab::TransferId,
+        endpoint: &str,
+    ) {
+        self.bulk.push(BulkRequest::Send {
+            peer: peer.clone(),
+            transfer,
+            endpoint: endpoint.to_string(),
+        });
+    }
+
+    pub fn bulk_cancel(&mut self, transfer: crate::vocab::TransferId) {
+        self.bulk.push(BulkRequest::Cancel { transfer });
+    }
+
     /// Ask to be woken no later than `ms` from now. The core folds this into the
     /// single deadline it hands the host.
     pub fn wake_in(&mut self, ms: u64) {
@@ -206,6 +270,27 @@ pub trait Plugin: Send {
         let _ = (cx, token, result);
     }
 
+    /// The host has somewhere for the far end to connect.
+    fn on_bulk_listening(
+        &mut self,
+        cx: &mut Cx,
+        transfer: crate::vocab::TransferId,
+        endpoint: &str,
+    ) {
+        let _ = (cx, transfer, endpoint);
+    }
+
+    /// A bulk transfer ended. `detail` is empty on success.
+    fn on_bulk_finished(
+        &mut self,
+        cx: &mut Cx,
+        transfer: crate::vocab::TransferId,
+        ok: bool,
+        detail: &str,
+    ) {
+        let _ = (cx, transfer, ok, detail);
+    }
+
     fn on_tick(&mut self, cx: &mut Cx) {
         let _ = cx;
     }
@@ -228,7 +313,7 @@ pub fn handles(manifest: &PluginManifest, cap: &str) -> bool {
 /// happen.
 #[cfg(test)]
 pub(crate) mod harness {
-    use super::{Cx, PendingSend};
+    use super::{BulkRequest, Cx, PendingSend};
     use crate::proto::envelope::Envelope;
     use crate::vocab::{Effect, EffectToken, UiEvent};
 
@@ -240,6 +325,11 @@ pub(crate) mod harness {
             reason = "read by tests that assert what a plugin surfaced locally"
         )]
         pub ui: Vec<UiEvent>,
+        #[allow(
+            dead_code,
+            reason = "read by tests that assert a plugin asked for a side channel"
+        )]
+        pub bulk: Vec<BulkRequest>,
         pub next_token: u64,
     }
 
@@ -266,6 +356,7 @@ pub(crate) mod harness {
             sends: cx.sends,
             effects: cx.effects,
             ui: cx.ui,
+            bulk: cx.bulk,
             next_token: cx.next_token,
         }
     }

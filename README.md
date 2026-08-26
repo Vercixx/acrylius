@@ -1,8 +1,8 @@
 # acrylius
 
 Link an iPhone and a Linux computer over a local network. Lock and unlock the
-desktop, wake it, share the clipboard, control what is playing, and run commands
-it has offered.
+desktop, wake it, share the clipboard, send files, control what is playing, and
+run commands it has offered.
 
 Everything on the wire is defined once, in Rust, and compiled into both ends.
 The daemon uses that crate directly; the iOS app uses the same crate through
@@ -18,7 +18,8 @@ desktop  UnOfEh0ZNHHuzLPviAR2fA
   port         1971
   accepts      org.acrylius.clipboard/1, org.acrylius.command/1,
                org.acrylius.media/1, org.acrylius.ping/1,
-               org.acrylius.session/1, org.acrylius.wol/1
+               org.acrylius.session/1, org.acrylius.share/1,
+               org.acrylius.wol/1
 ```
 
 | | |
@@ -29,6 +30,7 @@ desktop  UnOfEh0ZNHHuzLPviAR2fA
 | **Clipboard** | `acryliusctl clipboard <device>` to read, `--push` to send |
 | **Commands** | `acryliusctl commands <device>`, then `run <device> <id>` |
 | **Media** | `acryliusctl media <device>` to see, then `playpause`, `next`, `volume --value 40` |
+| **Files** | `acryliusctl send <device> <path>`; the other end runs `offers`, then `accept <n>` |
 | **Wake** | The phone sends the packet. A sleeping machine runs no daemon. |
 
 ## Installing it
@@ -74,6 +76,9 @@ name = "desktop"
 macs = ["00:11:22:33:44:55"]
 broadcast = "192.168.1.255"
 
+[share]
+directory = "~/Downloads"       # where files sent to this machine land
+
 [commands.screenshot]
 name = "Take a screenshot"
 program = "/usr/bin/grim"       # absolute, always
@@ -82,6 +87,10 @@ args = ["/tmp/shot.png"]
 
 A command is chosen by an id the computer published. The wire never carries a
 command string, so there is nothing to quote and nothing to escape.
+
+A file offered to this machine waits until you answer it. Set
+`share.auto_accept` if you would rather it did not, knowing that a paired device
+can then write into that directory unasked.
 
 ## Checking it
 

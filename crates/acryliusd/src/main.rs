@@ -8,6 +8,7 @@
 
 mod config;
 mod control;
+mod files;
 mod reconcile;
 
 use std::path::PathBuf;
@@ -18,7 +19,7 @@ use acrylius_core::core::CoreBuilder;
 use acrylius_core::link::TransportId;
 use acrylius_core::noise::Identity;
 use acrylius_core::peer::PeerState;
-use acrylius_core::plugins::{clipboard, command, media, ping, session, wol};
+use acrylius_core::plugins::{clipboard, command, media, ping, session, share, wol};
 use acrylius_linux::effector::LinuxEffector;
 use acrylius_rt::effector::Effector;
 use acrylius_rt::store::{FileStore, Store};
@@ -70,6 +71,16 @@ enum ConfigAction {
     Update,
     /// Parse it and report anything wrong, without starting.
     Check,
+}
+
+/// Expand a leading `~`, which is the only thing a person writing a path in a
+/// config file expects to work and the one thing no library call does.
+fn expand_home(path: &str) -> PathBuf {
+    let Some(rest) = path.strip_prefix('~') else {
+        return PathBuf::from(path);
+    };
+    let home = std::env::var_os("HOME").unwrap_or_default();
+    PathBuf::from(home).join(rest.trim_start_matches('/'))
 }
 
 fn state_dir(arg: Option<PathBuf>) -> PathBuf {
@@ -265,7 +276,26 @@ async fn main() -> anyhow::Result<()> {
         )
         .await,
     );
-    let kinds = effector.supported();
+    // Files are the daemon's business, not the effector's: it is the only
+    // place that knows both where a download goes and what a transfer is.
+    let bulk = match files::FileBulk::new(
+        expand_home(&cfg.share.directory),
+        (!cfg.share.advertise_host.is_empty()).then(|| cfg.share.advertise_host.clone()),
+    ) {
+        Ok(b) => {
+            tracing::info!(dir = %b.dir().display(), "files sent here land in");
+            Some(Arc::new(b))
+        }
+        Err(e) => {
+            tracing::warn!(dir = %cfg.share.directory, error = %e, "no download directory; receiving files is off");
+            None
+        }
+    };
+
+    let mut kinds = effector.supported();
+    if bulk.is_some() {
+        kinds.push(acrylius_core::vocab::EffectKind::Share);
+    }
     tracing::info!(?kinds, "this machine can");
 
     let core = CoreBuilder::new(
@@ -297,6 +327,7 @@ async fn main() -> anyhow::Result<()> {
     }))
     .plugin(command::CommandPlugin::new(effector.catalog().manifest()))
     .plugin(media::MediaPlugin::default())
+    .plugin(share::SharePlugin::default())
     .restore(peers)
     .build();
 
@@ -340,10 +371,49 @@ async fn main() -> anyhow::Result<()> {
     // invocations can watch at once without stealing each other's events.
     let (ui_tx, _) = broadcast::channel(256);
     let (ui_mpsc_tx, mut ui_mpsc_rx) = tokio::sync::mpsc::unbounded_channel();
+    if let Some(bulk) = bulk.clone() {
+        rt.set_bulk(bulk);
+    }
     rt.set_ui(ui_mpsc_tx);
     let fanout = ui_tx.clone();
+    let offers_bulk = bulk.clone();
+    let auto_accept = cfg.share.auto_accept;
+    let auto_events = rt.events();
     tokio::spawn(async move {
         while let Some(e) = ui_mpsc_rx.recv().await {
+            // An offer has to be remembered before it can be accepted: by the
+            // time a person says yes, the name it chose is all we have to build
+            // a destination from.
+            if let acrylius_core::vocab::UiEvent::Plugin {
+                peer,
+                cap,
+                ty,
+                body,
+            } = &e
+                && cap == share::CAP
+                && ty == "offer"
+                && let Some(bulk) = &offers_bulk
+                && let Ok(offer) = minicbor::decode::<share::Offer>(body)
+            {
+                bulk.note_offer(&peer.to_string(), offer.clone());
+                if auto_accept {
+                    tracing::info!(name = %offer.name, size = offer.size, "accepting a file");
+                    let body = minicbor::to_vec(share::Finished {
+                        transfer: offer.transfer,
+                        ok: true,
+                        detail: String::new(),
+                    })
+                    .unwrap_or_default();
+                    let _ = auto_events.send(acrylius_core::vocab::Event::Local(
+                        acrylius_core::vocab::LocalCommand::Plugin {
+                            peer: peer.clone(),
+                            cap: share::CAP.to_string(),
+                            ty: "accept".to_string(),
+                            body,
+                        },
+                    ));
+                }
+            }
             let _ = fanout.send(e);
         }
     });
@@ -352,6 +422,7 @@ async fn main() -> anyhow::Result<()> {
         control::socket_path(&state, explicit_state),
         control::Handles {
             transport: TCP,
+            bulk: bulk.clone(),
             events: rt.events(),
             ui: ui_tx,
             status,

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
 # M1 acceptance. Two daemons on one machine pair, then exercise every feature:
-# session query, clipboard, run-a-command, and a relayed wake.
+# session query, clipboard, run-a-command, media, file transfer, and a relayed
+# wake.
 #
 # Both daemons share this machine's real desktop, so "the peer's session" and
 # "our session" are the same one. That is fine for checking the wire and the
@@ -36,7 +37,7 @@ rm -rf $D; mkdir -p $D/a $D/b
 export RUST_LOG=acryliusd=warn,acrylius_rt=warn,acrylius_linux=warn
 
 # What the "PC" is willing to do. Nothing here can be changed from the network.
-cat > $D/b/config.toml <<'CFG'
+cat > $D/b/config.toml <<CFG
 name = "bravo"
 
 [wol]
@@ -53,17 +54,27 @@ args = ["hello from bravo"]
 [commands.fail]
 name = "Fail on purpose"
 program = "/bin/false"
+
+# Both daemons sit on loopback, so the address a real deployment discovers for
+# itself would be this machine's LAN address and the peer could not reach it.
+[share]
+directory = "$D/b-dl"
+advertise_host = "127.0.0.1"
 CFG
 
 # Alpha stands in for a phone: it reads the peer's clipboard but never pushes
 # or owns one. Without this, two daemons on one desktop fight over selection
 # ownership, which no real deployment does.
-cat > $D/a/config.toml <<'ACFG'
+cat > $D/a/config.toml <<ACFG
 name = "alpha"
 
 [clipboard]
 send = false
 receive = false
+
+[share]
+directory = "$D/a-dl"
+advertise_host = "127.0.0.1"
 ACFG
 
 "$BIN/acryliusd" --state $D/a --port $PORT_A --config $D/a/config.toml > $D/a.log 2>&1 &
@@ -134,6 +145,58 @@ echo "$OUT" | grep -q "refused"; check $? "a volume out of range is refused, and
 
 OUT=$("$BIN/acryliusctl" --state $D/a media "$B_ID" pause --player nosuchplayer 2>&1); echo "  $OUT"
 echo "$OUT" | grep -q "refused"; check $? "a player that does not exist is refused"
+
+echo
+echo "### file transfer"
+# Bigger than one 64 KiB chunk, so the sequence numbering and the final short
+# chunk are both exercised rather than a single frame that happens to work.
+head -c 200000 /dev/urandom > $D/photo.bin
+
+OUT=$("$BIN/acryliusctl" --state $D/b offers 2>&1); echo "  $OUT"
+echo "$OUT" | grep -q "nothing offered"; check $? "an unoffered transfer is not waiting"
+
+# Backgrounded: the sender blocks until the receiver has answered, and nobody
+# has yet.
+"$BIN/acryliusctl" --state $D/a send "$B_ID" $D/photo.bin > $D/send.out 2>&1 &
+SENDER=$!
+for i in $(seq 1 50); do
+  "$BIN/acryliusctl" --state $D/b offers 2>&1 | grep -q photo.bin && break
+  sleep 0.1
+done
+OUT=$("$BIN/acryliusctl" --state $D/b offers 2>&1); echo "  $OUT"
+echo "$OUT" | grep -q "photo.bin"; check $? "bravo was told about the file, and its size"
+
+TRANSFER=$(echo "$OUT" | grep photo.bin | head -1 | awk '{print $1}')
+OUT=$("$BIN/acryliusctl" --state $D/b accept "$TRANSFER" 2>&1); echo "  $OUT"
+echo "$OUT" | grep -q "finished"; check $? "bravo accepted, and the transfer finished"
+wait $SENDER 2>/dev/null || true
+
+cmp -s $D/photo.bin $D/b-dl/photo.bin
+check $? "every byte arrived, unchanged"
+
+# A peer is told a name, a size and an id. Where the file sits on the sending
+# machine is never part of that, so it cannot appear in what bravo reports.
+if echo "$OUT" | grep -q "$D/photo.bin"; then R=1; else R=0; fi
+check $R "the sending machine's path stayed on the sending machine"
+
+OUT=$("$BIN/acryliusctl" --state $D/b accept 4242 2>&1); echo "  $OUT"
+echo "$OUT" | grep -q "no offer numbered"; check $? "a transfer nobody offered cannot be accepted"
+
+OUT=$("$BIN/acryliusctl" --state $D/b offers 2>&1); echo "  $OUT"
+echo "$OUT" | grep -q "nothing offered"; check $? "a transfer that is over is no longer waiting"
+
+# A second copy under the same name must not replace the first: two photos
+# called the same thing is ordinary, losing one is not.
+"$BIN/acryliusctl" --state $D/a send "$B_ID" $D/photo.bin > $D/send2.out 2>&1 &
+SENDER=$!
+for i in $(seq 1 50); do
+  T2=$("$BIN/acryliusctl" --state $D/b offers 2>&1 | grep photo.bin | head -1 | awk '{print $1}')
+  [ -n "$T2" ] && [ "$T2" != "$TRANSFER" ] && break
+  sleep 0.1
+done
+"$BIN/acryliusctl" --state $D/b accept "$T2" >/dev/null 2>&1
+wait $SENDER 2>/dev/null || true
+[ "$(ls $D/b-dl | wc -l)" = 2 ]; check $? "a second file of the same name did not replace the first"
 
 echo
 echo "### wake"

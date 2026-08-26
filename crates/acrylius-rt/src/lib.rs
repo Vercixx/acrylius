@@ -9,6 +9,7 @@
 //! quietly becoming "transports are Rust trait objects", which iOS could not
 //! satisfy.
 
+pub mod bulk;
 pub mod effector;
 pub mod runtime;
 pub mod store;

@@ -20,6 +20,7 @@ pub struct Config {
     pub wol: WolConfig,
     pub clipboard: ClipboardConfig,
     pub session: SessionConfig,
+    pub share: ShareConfig,
     /// Commands a paired device may run, keyed by the id that travels.
     pub commands: BTreeMap<String, CommandSpec>,
 }
@@ -63,6 +64,43 @@ pub struct SessionConfig {
     pub unlock_command: Vec<String>,
 }
 
+/// Receiving files.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ShareConfig {
+    /// Where an accepted file is written. Every incoming file lands here and
+    /// nowhere else: a peer chooses a name, never a directory.
+    pub directory: String,
+    /// Accept without asking. Off, because a device that wrote whatever a peer
+    /// sent it would be a file drop for anything ever paired with it.
+    pub auto_accept: bool,
+    /// What to tell a peer to connect to for a transfer. Empty means ask the
+    /// kernel which address it would use to reach the network.
+    pub advertise_host: String,
+}
+
+impl Default for ShareConfig {
+    fn default() -> Self {
+        Self {
+            directory: default_download_dir(),
+            auto_accept: false,
+            advertise_host: String::new(),
+        }
+    }
+}
+
+/// `$XDG_DOWNLOAD_DIR` if the session names one, else `~/Downloads`.
+fn default_download_dir() -> String {
+    if let Some(dir) = std::env::var_os("XDG_DOWNLOAD_DIR") {
+        return dir.to_string_lossy().into_owned();
+    }
+    let home = std::env::var_os("HOME").unwrap_or_default();
+    PathBuf::from(home)
+        .join("Downloads")
+        .to_string_lossy()
+        .into_owned()
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ClipboardConfig {
@@ -80,6 +118,7 @@ impl Default for Config {
             wol: WolConfig::default(),
             clipboard: ClipboardConfig::default(),
             session: SessionConfig::default(),
+            share: ShareConfig::default(),
             commands: BTreeMap::new(),
         }
     }

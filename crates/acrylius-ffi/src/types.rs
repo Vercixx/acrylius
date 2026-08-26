@@ -175,6 +175,15 @@ pub enum FfiEvent {
         token: u64,
         result: FfiEffectResult,
     },
+    BulkListening {
+        transfer: u64,
+        endpoint: String,
+    },
+    BulkFinished {
+        transfer: u64,
+        ok: bool,
+        detail: String,
+    },
 }
 
 #[derive(uniffi::Enum, Clone, Debug)]
@@ -286,6 +295,19 @@ impl TryFrom<FfiEvent> for cv::Event {
             FfiEvent::EffectDone { token, result } => Self::EffectDone {
                 token: cv::EffectToken(token),
                 result: result.into(),
+            },
+            FfiEvent::BulkListening { transfer, endpoint } => Self::BulkListening {
+                transfer: cv::TransferId(transfer),
+                endpoint,
+            },
+            FfiEvent::BulkFinished {
+                transfer,
+                ok,
+                detail,
+            } => Self::BulkFinished {
+                transfer: cv::TransferId(transfer),
+                ok,
+                detail,
             },
         })
     }
@@ -527,6 +549,11 @@ pub enum FfiAction {
     Ui {
         event: FfiUiEvent,
     },
+    /// A bulk transfer this host has no way to carry out. The host answers with
+    /// a failed `BulkFinished`, so the far end is told rather than left waiting.
+    BulkUnsupported {
+        transfer: u64,
+    },
 }
 
 /// UniFFI has no tuple type, so a TXT pair is a record.
@@ -581,6 +608,21 @@ impl From<cv::Action> for FfiAction {
             cv::Action::Discover { transport, enable } => Self::Discover {
                 transport: transport.0,
                 enable,
+            },
+            // Bulk actions do not cross to iOS yet. Sending a file from a phone
+            // needs a document picker and receiving one needs somewhere to put
+            // it, and neither exists; a host that cannot serve the capability
+            // refuses an offer rather than half-honouring it. Mapped rather
+            // than ignored so the day it does exist, this is a compile error
+            // and not a silent gap.
+            cv::Action::BulkListen { transfer, .. } => Self::BulkUnsupported {
+                transfer: transfer.0,
+            },
+            cv::Action::BulkSend { transfer, .. } => Self::BulkUnsupported {
+                transfer: transfer.0,
+            },
+            cv::Action::BulkCancel { transfer } => Self::BulkUnsupported {
+                transfer: transfer.0,
             },
             cv::Action::Ui(e) => Self::Ui { event: e.into() },
         }

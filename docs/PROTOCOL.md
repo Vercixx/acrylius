@@ -520,6 +520,75 @@ A command runs as an argv vector with an absolute path and no shell. It has a
 timeout, 10 seconds by default, and its captured output is capped, 64 KiB by
 default, with `truncated` set when the cap was reached.
 
+### org.acrylius.share/1
+
+Send a file. The envelope is the wrong place for one — a session frame is capped
+at 1 MiB and a photo is not — so this capability negotiates a transfer and the
+bytes travel beside the session, on their own connection.
+
+| direction | ty | body |
+|---|---|---|
+| →peer | `offer` | `Offer` |
+| ←peer | `accept` | `Accept`, answering the offer's `id` |
+| ←peer | `reject` | `Finished`, `ok` false |
+| ↔peer | `finished` | `Finished` |
+
+```
+Offer    { 0: transfer, 1: name, 2: size, 3: mime }
+Accept   { 0: transfer, 1: endpoint }
+Finished { 0: transfer, 1: ok, 2: detail }
+```
+
+`name` is a name and never a path. A receiver treats it as a suggestion: it
+strips every directory component, and it never replaces a file already there —
+two photos called the same thing is an ordinary event and losing the first one
+is not. `size` is what the sender claims; a receiver that gets fewer bytes than
+that has a failed transfer, not a short file, and keeps nothing.
+
+`transfer` is chosen by the sender and is unique only within that session.
+
+**The receiver listens, not the sender.** This is the one place the packet-layer
+symmetry does not reach: a phone cannot accept an incoming connection, so it can
+only ever be the side that dials. Naming the listener in `accept` puts the
+choice with the side that has already agreed to receive.
+
+An `offer` is never accepted automatically unless a host is configured to. It is
+announced, and a person answers.
+
+#### The bulk connection
+
+The bytes go over a separate connection to the `endpoint` in `accept`, framed as
+a big-endian `u32` length followed by that many bytes:
+
+```
+hello    "ACRB" || transfer as u64be              12 bytes, unencrypted
+chunk    ChaCha20-Poly1305(key, nonce, plaintext) up to 64 KiB per chunk
+```
+
+The key is never transmitted. Both ends derive it from something only a peer
+that completed the session handshake can have:
+
+```
+key = HKDF-SHA256(ikm = session handshake hash,
+                  info = "acrylius/bulk/v1" || transfer as u64be,
+                  salt = none)[0..32]
+```
+
+The nonce is the chunk's sequence number, counting from zero, in the last eight
+bytes of the twelve. Sequence numbers are never reused under a key, because a
+key is used for exactly one transfer.
+
+The hello is in the clear and is only a demultiplexer: it says which transfer is
+arriving so the listener can pick a key. It authenticates nothing. A connection
+that opens with the right hello and then fails to produce a chunk that decrypts
+gets nothing and leaves nothing behind — the file is written to a temporary name
+and only moved into place once every expected byte has arrived and been
+authenticated.
+
+Both ends report `finished`, because each knows only its own half: a sender that
+finished writing does not know whether the receiver kept the file, and a
+receiver cannot tell a cancelled send from a dropped connection.
+
 ## 12. Errors
 
 `ty = "err"`, with this body:

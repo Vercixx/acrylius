@@ -19,10 +19,11 @@ minicbor  = { version = "2.3", features = ["alloc", "derive"] }
 sha2      = { version = "0.10", default-features = false }
 hkdf      = { version = "0.12", default-features = false }
 snow      = "0.10"
+chacha20poly1305 = "0.10"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 thiserror = { version = "2", default-features = false }
 tracing   = "0.1"
-tokio     = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "io-std", "sync", "time", "process", "signal"] }
+tokio     = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "io-std", "fs", "sync", "time", "process", "signal"] }
 mdns-sd   = "0.21"
 anyhow    = "1"
 async-trait = "0.1"

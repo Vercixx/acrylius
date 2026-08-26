@@ -1,0 +1,519 @@
+//! `org.acrylius.share/1`: send a file.
+//!
+//! The bytes never touch this plugin, and never touch an envelope. All that
+//! travels on the session is an offer, an endpoint and a result; the file goes
+//! over a connection of its own, encrypted with a key the core derives from the
+//! session and hands to the host. See [`crate::proto::bulk`].
+//!
+//! ## Who listens
+//!
+//! Not "the sender listens", which is what a design that had only ever run on
+//! two computers would settle on. A phone cannot accept connections at all —
+//! there is no background push on a free developer account and nothing to keep
+//! a listener alive — so a rule that assumed the sender could listen would work
+//! in exactly one direction.
+//!
+//! So the endpoint is negotiated. The receiver is asked whether it can listen;
+//! if it can, it says where, and the sender connects. A phone therefore always
+//! dials, in both directions, which is the same shape the session itself has
+//! and for the same reason. If neither side can listen the transfer is refused
+//! rather than left hanging.
+//!
+//! ## Accepting
+//!
+//! An offer is not accepted automatically. A device that wrote whatever a peer
+//! sent it, wherever it liked, would be a file drop for anything that had ever
+//! been paired with it. The host decides, and until it does the sender waits.
+
+use std::collections::BTreeMap;
+
+use crate::plugin::{Cx, Plugin, PluginError, PluginManifest};
+use crate::proto::envelope::Envelope;
+use crate::proto::ids::DeviceId;
+use crate::vocab::{EffectKind, TransferId, UiEvent};
+
+pub const CAP: &str = "org.acrylius.share/1";
+
+/// Refused outright rather than attempted. Not a statement about disks: a
+/// transfer this big over a link this project targets is a mistake, and finding
+/// out four gigabytes in is worse than being told at the start.
+pub const MAX_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+
+/// What a sender is offering.
+#[derive(Clone, PartialEq, Eq, Debug, Default, minicbor::Encode, minicbor::Decode)]
+pub struct Offer {
+    /// Chosen by the sender and unique within the session.
+    #[n(0)]
+    pub transfer: u64,
+    /// A file name, never a path. A receiver treats it as a suggestion and is
+    /// responsible for making it safe: anything else would let a sender choose
+    /// where its bytes landed.
+    #[n(1)]
+    pub name: String,
+    #[n(2)]
+    pub size: u64,
+    #[n(3)]
+    pub mime: String,
+}
+
+/// The receiver saying where to connect.
+#[derive(Clone, PartialEq, Eq, Debug, Default, minicbor::Encode, minicbor::Decode)]
+pub struct Accept {
+    #[n(0)]
+    pub transfer: u64,
+    /// Transport-defined and opaque to this plugin.
+    #[n(1)]
+    pub endpoint: String,
+}
+
+/// How a transfer ended, from whichever side noticed.
+#[derive(Clone, PartialEq, Eq, Debug, Default, minicbor::Encode, minicbor::Decode)]
+pub struct Finished {
+    #[n(0)]
+    pub transfer: u64,
+    #[n(1)]
+    pub ok: bool,
+    #[n(2)]
+    pub detail: String,
+}
+
+static MANIFEST: PluginManifest = PluginManifest {
+    id: "org.acrylius.share",
+    outgoing: &[CAP],
+    incoming: &[CAP],
+    // Files are the host's business: this plugin never opens one. What it needs
+    // is somewhere to put an incoming one and something to read an outgoing one
+    // from, which is what a host declaring this effect kind is promising.
+    requires: &[EffectKind::Share],
+};
+
+/// A transfer this device is part of.
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct Incoming {
+    peer: DeviceId,
+    offer: Offer,
+    /// The envelope id of the offer, so a result can answer it.
+    request: u32,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct Outgoing {
+    peer: DeviceId,
+    offer: Offer,
+}
+
+#[derive(Default)]
+pub struct SharePlugin {
+    /// Offers made to us that a human has not answered yet.
+    offered: BTreeMap<TransferId, Incoming>,
+    /// Offers we made that have not finished.
+    sending: BTreeMap<TransferId, Outgoing>,
+}
+
+impl SharePlugin {
+    /// Offers waiting on a decision, for a host to show.
+    pub fn pending(&self) -> impl Iterator<Item = (TransferId, &DeviceId, &Offer)> {
+        self.offered.iter().map(|(id, i)| (*id, &i.peer, &i.offer))
+    }
+
+    fn announce(cx: &mut Cx, peer: &DeviceId, ty: &str, body: &impl minicbor::Encode<()>) {
+        if let Ok(encoded) = minicbor::to_vec(body) {
+            cx.ui(UiEvent::Plugin {
+                peer: peer.clone(),
+                cap: CAP.to_string(),
+                ty: ty.to_string(),
+                body: encoded,
+            });
+        }
+    }
+}
+
+impl Plugin for SharePlugin {
+    fn manifest(&self) -> &'static PluginManifest {
+        &MANIFEST
+    }
+
+    fn on_peer_disconnected(&mut self, _cx: &mut Cx, peer: &DeviceId) {
+        // A transfer cannot outlive the session it was keyed from, so nothing
+        // should still be waiting on one that has gone.
+        self.offered.retain(|_, i| &i.peer != peer);
+        self.sending.retain(|_, o| &o.peer != peer);
+    }
+
+    fn on_message(
+        &mut self,
+        cx: &mut Cx,
+        peer: &DeviceId,
+        env: &Envelope<'_>,
+    ) -> Result<(), PluginError> {
+        match env.ty {
+            "offer" => {
+                let offer: Offer = minicbor::decode(env.body).map_err(|_| PluginError::BadBody)?;
+                if offer.size > MAX_BYTES {
+                    return Err(PluginError::TooLarge);
+                }
+                if offer.name.is_empty() {
+                    return Err(PluginError::BadBody);
+                }
+                let transfer = TransferId(offer.transfer);
+                self.offered.insert(
+                    transfer,
+                    Incoming {
+                        peer: peer.clone(),
+                        offer: offer.clone(),
+                        request: env.id,
+                    },
+                );
+                // Nothing is accepted here. The host asks a person, and until
+                // it answers the sender waits.
+                Self::announce(cx, peer, "offer", &offer);
+                Ok(())
+            }
+
+            "accept" => {
+                let accept: Accept =
+                    minicbor::decode(env.body).map_err(|_| PluginError::BadBody)?;
+                let transfer = TransferId(accept.transfer);
+                if !self.sending.contains_key(&transfer) {
+                    // An endpoint for a transfer we never offered. Refused
+                    // rather than dialled: it is somewhere to connect chosen by
+                    // someone else.
+                    return Err(PluginError::NotAllowed);
+                }
+                cx.bulk_send(peer, transfer, &accept.endpoint);
+                Ok(())
+            }
+
+            "reject" => {
+                let f: Finished = minicbor::decode(env.body).map_err(|_| PluginError::BadBody)?;
+                self.sending.remove(&TransferId(f.transfer));
+                Self::announce(cx, peer, "reject", &f);
+                Ok(())
+            }
+
+            "finished" => {
+                let f: Finished = minicbor::decode(env.body).map_err(|_| PluginError::BadBody)?;
+                let transfer = TransferId(f.transfer);
+                self.sending.remove(&transfer);
+                self.offered.remove(&transfer);
+                Self::announce(cx, peer, "finished", &f);
+                Ok(())
+            }
+
+            other => Err(PluginError::UnknownType(other.to_string())),
+        }
+    }
+
+    fn on_local(
+        &mut self,
+        cx: &mut Cx,
+        peer: &DeviceId,
+        ty: &str,
+        body: &[u8],
+    ) -> Result<(), PluginError> {
+        match ty {
+            // The host has a file and an id for it. It keeps the path; this
+            // plugin never learns one.
+            "offer" => {
+                let offer: Offer = minicbor::decode(body).map_err(|_| PluginError::BadBody)?;
+                if offer.size > MAX_BYTES {
+                    return Err(PluginError::TooLarge);
+                }
+                self.sending.insert(
+                    TransferId(offer.transfer),
+                    Outgoing {
+                        peer: peer.clone(),
+                        offer: offer.clone(),
+                    },
+                );
+                cx.send(peer, CAP, "offer", body.to_vec());
+                Ok(())
+            }
+
+            // A person said yes to something offered to us.
+            "accept" => {
+                let f: Finished = minicbor::decode(body).map_err(|_| PluginError::BadBody)?;
+                let transfer = TransferId(f.transfer);
+                let Some(incoming) = self.offered.get(&transfer) else {
+                    return Err(PluginError::NotAllowed);
+                };
+                // Ask the host for somewhere to listen. The endpoint goes to
+                // the peer only once the host has one, because a peer told to
+                // connect to nothing has no way to tell that from a refusal.
+                cx.bulk_listen(&incoming.peer.clone(), transfer, incoming.offer.size);
+                Ok(())
+            }
+
+            "reject" => {
+                let f: Finished = minicbor::decode(body).map_err(|_| PluginError::BadBody)?;
+                let transfer = TransferId(f.transfer);
+                let Some(incoming) = self.offered.remove(&transfer) else {
+                    return Err(PluginError::NotAllowed);
+                };
+                cx.send_reply(
+                    &incoming.peer,
+                    CAP,
+                    "reject",
+                    body.to_vec(),
+                    incoming.request,
+                );
+                Ok(())
+            }
+
+            "cancel" => {
+                let f: Finished = minicbor::decode(body).map_err(|_| PluginError::BadBody)?;
+                let transfer = TransferId(f.transfer);
+                self.offered.remove(&transfer);
+                self.sending.remove(&transfer);
+                cx.bulk_cancel(transfer);
+                cx.send(peer, CAP, "finished", body.to_vec());
+                Ok(())
+            }
+
+            other => Err(PluginError::UnknownType(other.to_string())),
+        }
+    }
+
+    fn on_bulk_listening(&mut self, cx: &mut Cx, transfer: TransferId, endpoint: &str) {
+        let Some(incoming) = self.offered.get(&transfer) else {
+            return;
+        };
+        let body = minicbor::to_vec(Accept {
+            transfer: transfer.0,
+            endpoint: endpoint.to_string(),
+        })
+        .unwrap_or_default();
+        cx.send_reply(
+            &incoming.peer.clone(),
+            CAP,
+            "accept",
+            body,
+            incoming.request,
+        );
+    }
+
+    fn on_bulk_finished(&mut self, cx: &mut Cx, transfer: TransferId, ok: bool, detail: &str) {
+        let peer = self
+            .offered
+            .get(&transfer)
+            .map(|i| i.peer.clone())
+            .or_else(|| self.sending.get(&transfer).map(|o| o.peer.clone()));
+        self.offered.remove(&transfer);
+        self.sending.remove(&transfer);
+
+        let f = Finished {
+            transfer: transfer.0,
+            ok,
+            detail: detail.to_string(),
+        };
+        if let Some(peer) = peer {
+            // Both ends say how it went. Each knows only its own half: a sender
+            // that finished writing does not know whether the receiver kept the
+            // file, and a receiver cannot tell a cancelled send from a dropped
+            // connection.
+            if let Ok(body) = minicbor::to_vec(&f) {
+                cx.send(&peer, CAP, "finished", body);
+            }
+            Self::announce(cx, &peer, "finished", &f);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::plugin::{
+        BulkRequest,
+        harness::{envelope, run},
+    };
+
+    fn peer() -> DeviceId {
+        DeviceId::of(&[4u8; 32])
+    }
+
+    fn offer(size: u64) -> Vec<u8> {
+        minicbor::to_vec(Offer {
+            transfer: 1,
+            name: "notes.txt".to_string(),
+            size,
+            mime: "text/plain".to_string(),
+        })
+        .unwrap()
+    }
+
+    fn finished(transfer: u64) -> Vec<u8> {
+        minicbor::to_vec(Finished {
+            transfer,
+            ok: true,
+            detail: String::new(),
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn an_offer_is_not_accepted_by_itself() {
+        // A device that wrote whatever a peer sent it would be a file drop for
+        // anything ever paired with it.
+        let mut p = SharePlugin::default();
+        let body = offer(1024);
+        let r = run(0, |cx| {
+            p.on_message(cx, &peer(), &envelope(9, CAP, "offer", &body))
+                .unwrap();
+        });
+        assert!(
+            r.bulk.is_empty(),
+            "nothing is listened for until a person says so"
+        );
+        assert!(r.sent("accept").is_none(), "and nothing is accepted");
+        assert!(
+            r.ui.iter()
+                .any(|e| matches!(e, UiEvent::Plugin { ty, .. } if ty == "offer")),
+            "the host is asked"
+        );
+    }
+
+    #[test]
+    fn accepting_asks_for_somewhere_to_listen_before_answering() {
+        // The endpoint reaches the peer only once the host has one. A peer told
+        // to connect to nothing cannot tell that from a refusal.
+        let mut p = SharePlugin::default();
+        let body = offer(1024);
+        run(0, |cx| {
+            p.on_message(cx, &peer(), &envelope(9, CAP, "offer", &body))
+                .unwrap();
+        });
+        let yes = finished(1);
+        let r = run(0, |cx| p.on_local(cx, &peer(), "accept", &yes).unwrap());
+        assert!(r.sent("accept").is_none(), "not yet");
+        assert!(matches!(
+            r.bulk.first(),
+            Some(BulkRequest::Listen {
+                expect_bytes: 1024,
+                ..
+            })
+        ));
+
+        let r = run(0, |cx| {
+            p.on_bulk_listening(cx, TransferId(1), "127.0.0.1:5000")
+        });
+        let sent = r.sent("accept").expect("now the peer is told where");
+        let a: Accept = minicbor::decode(&sent.body).unwrap();
+        assert_eq!(a.endpoint, "127.0.0.1:5000");
+        assert_eq!(sent.re, Some(9), "answering the offer");
+    }
+
+    #[test]
+    fn an_endpoint_for_a_transfer_we_never_offered_is_refused() {
+        // Otherwise a peer names somewhere and this device connects to it.
+        let mut p = SharePlugin::default();
+        let body = minicbor::to_vec(Accept {
+            transfer: 77,
+            endpoint: "10.0.0.1:1234".to_string(),
+        })
+        .unwrap();
+        run(0, |cx| {
+            assert_eq!(
+                p.on_message(cx, &peer(), &envelope(1, CAP, "accept", &body))
+                    .unwrap_err(),
+                PluginError::NotAllowed
+            );
+        });
+    }
+
+    #[test]
+    fn a_sender_dials_the_endpoint_it_was_given() {
+        let mut p = SharePlugin::default();
+        let body = offer(10);
+        run(0, |cx| p.on_local(cx, &peer(), "offer", &body).unwrap());
+
+        let accept = minicbor::to_vec(Accept {
+            transfer: 1,
+            endpoint: "192.168.1.5:4444".to_string(),
+        })
+        .unwrap();
+        let r = run(0, |cx| {
+            p.on_message(cx, &peer(), &envelope(2, CAP, "accept", &accept))
+                .unwrap();
+        });
+        assert!(matches!(
+            r.bulk.first(),
+            Some(BulkRequest::Send { endpoint, .. }) if endpoint == "192.168.1.5:4444"
+        ));
+    }
+
+    #[test]
+    fn something_absurdly_large_is_refused_at_the_offer() {
+        // Finding out four gigabytes in is worse than being told at the start.
+        let mut p = SharePlugin::default();
+        let body = offer(MAX_BYTES + 1);
+        run(0, |cx| {
+            assert_eq!(
+                p.on_message(cx, &peer(), &envelope(1, CAP, "offer", &body))
+                    .unwrap_err(),
+                PluginError::TooLarge
+            );
+        });
+    }
+
+    #[test]
+    fn an_offer_with_no_name_is_refused() {
+        let mut p = SharePlugin::default();
+        let body = minicbor::to_vec(Offer {
+            transfer: 1,
+            name: String::new(),
+            size: 1,
+            mime: String::new(),
+        })
+        .unwrap();
+        run(0, |cx| {
+            assert_eq!(
+                p.on_message(cx, &peer(), &envelope(1, CAP, "offer", &body))
+                    .unwrap_err(),
+                PluginError::BadBody
+            );
+        });
+    }
+
+    #[test]
+    fn a_finished_transfer_is_forgotten_on_both_sides() {
+        let mut p = SharePlugin::default();
+        let body = offer(10);
+        run(0, |cx| p.on_local(cx, &peer(), "offer", &body).unwrap());
+        assert_eq!(p.sending.len(), 1);
+
+        let r = run(0, |cx| p.on_bulk_finished(cx, TransferId(1), true, ""));
+        assert!(
+            p.sending.is_empty(),
+            "nothing should still hold a key for it"
+        );
+        assert!(r.sent("finished").is_some(), "and the peer is told");
+    }
+
+    #[test]
+    fn a_peer_going_away_takes_its_transfers_with_it() {
+        // A transfer cannot outlive the session its key came from.
+        let mut p = SharePlugin::default();
+        let body = offer(10);
+        run(0, |cx| p.on_local(cx, &peer(), "offer", &body).unwrap());
+        run(0, |cx| {
+            p.on_message(cx, &peer(), &envelope(9, CAP, "offer", &body))
+                .unwrap();
+        });
+        run(0, |cx| p.on_peer_disconnected(cx, &peer()));
+        assert!(p.sending.is_empty() && p.offered.is_empty());
+    }
+
+    #[test]
+    fn rejecting_answers_the_offer_and_forgets_it() {
+        let mut p = SharePlugin::default();
+        let body = offer(10);
+        run(0, |cx| {
+            p.on_message(cx, &peer(), &envelope(9, CAP, "offer", &body))
+                .unwrap();
+        });
+        let no = finished(1);
+        let r = run(0, |cx| p.on_local(cx, &peer(), "reject", &no).unwrap());
+        assert_eq!(r.sent("reject").and_then(|s| s.re), Some(9));
+        assert!(p.offered.is_empty());
+    }
+}

@@ -193,6 +193,16 @@ public actor CoreRuntime {
         case let .discover(transport, enable):
             await transports[transport]?.discover(enable: enable)
 
+        case let .bulkUnsupported(transfer):
+            // This phone has nowhere to put a file and no picker to choose one
+            // from. Saying so immediately is the point: a sender waiting for an
+            // endpoint that is never coming cannot tell that from a slow disk.
+            submit(.bulkFinished(
+                transfer: transfer,
+                ok: false,
+                detail: "this device cannot transfer files yet"
+            ))
+
         case let .ui(event):
             ui?.emit(event)
         }

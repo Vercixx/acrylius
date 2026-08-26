@@ -70,6 +70,18 @@ pub enum Request {
         device: String,
         id: String,
     },
+    /// Offer a file to a peer.
+    Send {
+        device: String,
+        path: String,
+    },
+    /// Offers made to this machine that nobody has answered.
+    Offers,
+    /// Answer one.
+    Answer {
+        transfer: u64,
+        accept: bool,
+    },
     /// Ask a peer to wake a third machine.
     Wake {
         device: String,
@@ -196,6 +208,7 @@ fn render(e: &UiEvent) -> String {
 
 pub struct Handles {
     pub transport: acrylius_core::link::TransportId,
+    pub bulk: Option<std::sync::Arc<crate::files::FileBulk>>,
     pub events: mpsc::UnboundedSender<Event>,
     pub ui: broadcast::Sender<UiEvent>,
     pub status: std::sync::Arc<tokio::sync::Mutex<Option<Status>>>,
@@ -236,6 +249,7 @@ pub async fn serve(path: PathBuf, handles: Handles) -> anyhow::Result<ControlSoc
             }
             let h = Handles {
                 transport: handles.transport,
+                bulk: handles.bulk.clone(),
                 events: handles.events.clone(),
                 ui: handles.ui.clone(),
                 status: handles.status.clone(),
@@ -400,10 +414,13 @@ async fn handle_conn(stream: UnixStream, h: Handles) -> anyhow::Result<()> {
                     &mut wr,
                     &h,
                     &device,
-                    acrylius_core::plugins::session::CAP,
-                    &action,
-                    Vec::new(),
-                    &["state", "result", "err"],
+                    Ask {
+                        cap: acrylius_core::plugins::session::CAP,
+                        ty: &action,
+                        body: Vec::new(),
+                        expect: &["state", "result", "err"],
+                        patience: MACHINE,
+                    },
                 )
                 .await?;
             }
@@ -422,10 +439,13 @@ async fn handle_conn(stream: UnixStream, h: Handles) -> anyhow::Result<()> {
                     &mut wr,
                     &h,
                     &device,
-                    acrylius_core::plugins::media::CAP,
-                    &action,
-                    body,
-                    &["state", "err"],
+                    Ask {
+                        cap: acrylius_core::plugins::media::CAP,
+                        ty: &action,
+                        body,
+                        expect: &["state", "err"],
+                        patience: MACHINE,
+                    },
                 )
                 .await?;
             }
@@ -439,13 +459,140 @@ async fn handle_conn(stream: UnixStream, h: Handles) -> anyhow::Result<()> {
                     &mut wr,
                     &h,
                     &device,
-                    acrylius_core::plugins::clipboard::CAP,
-                    ty,
-                    body,
-                    expect,
+                    Ask {
+                        cap: acrylius_core::plugins::clipboard::CAP,
+                        ty,
+                        body,
+                        expect,
+                        patience: MACHINE,
+                    },
                 )
                 .await?;
             }
+            Request::Send { device, path } => {
+                let Some(bulk) = &h.bulk else {
+                    write(
+                        &mut wr,
+                        &Response::Error {
+                            message: "this machine has no download directory, so it sends nothing"
+                                .into(),
+                        },
+                    )
+                    .await?;
+                    continue;
+                };
+                let path = std::path::PathBuf::from(&path);
+                let meta = match tokio::fs::metadata(&path).await {
+                    Ok(m) if m.is_file() => m,
+                    Ok(_) => {
+                        write(
+                            &mut wr,
+                            &Response::Error {
+                                message: format!("{} is not a file", path.display()),
+                            },
+                        )
+                        .await?;
+                        continue;
+                    }
+                    Err(e) => {
+                        write(
+                            &mut wr,
+                            &Response::Error {
+                                message: format!("{}: {e}", path.display()),
+                            },
+                        )
+                        .await?;
+                        continue;
+                    }
+                };
+                let name = path
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "file".to_string());
+                // The path stops here. What crosses the session is a name, a
+                // size and an id, so a peer never learns where anything lives.
+                let offer = bulk.offer(path, meta.len(), name, String::new());
+                let body = minicbor::to_vec(&offer).unwrap_or_default();
+                plugin_request(
+                    &mut wr,
+                    &h,
+                    &device,
+                    Ask {
+                        cap: acrylius_core::plugins::share::CAP,
+                        ty: "offer",
+                        body,
+                        expect: &["finished", "reject", "err"],
+                        patience: PATIENT,
+                    },
+                )
+                .await?;
+            }
+
+            Request::Offers => {
+                let lines: Vec<String> = match &h.bulk {
+                    Some(bulk) => bulk
+                        .pending()
+                        .into_iter()
+                        .map(|o| format!("{:<6} {:<28} {}", o.transfer, o.name, human(o.size)))
+                        .collect(),
+                    None => Vec::new(),
+                };
+                let text = if lines.is_empty() {
+                    "nothing offered".to_string()
+                } else {
+                    lines.join("\n")
+                };
+                write(&mut wr, &Response::Event { text }).await?;
+            }
+
+            Request::Answer { transfer, accept } => {
+                let Some(bulk) = &h.bulk else {
+                    write(
+                        &mut wr,
+                        &Response::Error {
+                            message: "this machine receives no files".into(),
+                        },
+                    )
+                    .await?;
+                    continue;
+                };
+                let Some(peer) = bulk.peer_for(transfer) else {
+                    write(
+                        &mut wr,
+                        &Response::Error {
+                            message: format!("no offer numbered {transfer}"),
+                        },
+                    )
+                    .await?;
+                    continue;
+                };
+                let body = minicbor::to_vec(acrylius_core::plugins::share::Finished {
+                    transfer,
+                    ok: accept,
+                    detail: String::new(),
+                })
+                .unwrap_or_default();
+                let expect: &[&str] = if accept { &["finished", "err"] } else { &[] };
+                if !accept {
+                    // An accepted offer is dropped when the bytes stop moving.
+                    // A refused one has no later moment, so it goes here.
+                    bulk.forget(acrylius_core::vocab::TransferId(transfer));
+                }
+                plugin_request(
+                    &mut wr,
+                    &h,
+                    &peer,
+                    Ask {
+                        cap: acrylius_core::plugins::share::CAP,
+                        ty: if accept { "accept" } else { "reject" },
+                        body,
+                        expect,
+                        patience: PATIENT,
+                    },
+                )
+                .await?;
+            }
+
             Request::Commands { device } => {
                 // The catalog arrives unprompted when a peer connects, so this
                 // reads what was already cached rather than asking again.
@@ -453,10 +600,13 @@ async fn handle_conn(stream: UnixStream, h: Handles) -> anyhow::Result<()> {
                     &mut wr,
                     &h,
                     &device,
-                    acrylius_core::plugins::command::CAP,
-                    "list",
-                    Vec::new(),
-                    &["list"],
+                    Ask {
+                        cap: acrylius_core::plugins::command::CAP,
+                        ty: "list",
+                        body: Vec::new(),
+                        expect: &["list"],
+                        patience: MACHINE,
+                    },
                 )
                 .await?;
             }
@@ -467,10 +617,13 @@ async fn handle_conn(stream: UnixStream, h: Handles) -> anyhow::Result<()> {
                     &mut wr,
                     &h,
                     &device,
-                    acrylius_core::plugins::command::CAP,
-                    "run",
-                    body,
-                    &["exited", "err"],
+                    Ask {
+                        cap: acrylius_core::plugins::command::CAP,
+                        ty: "run",
+                        body,
+                        expect: &["exited", "err"],
+                        patience: MACHINE,
+                    },
                 )
                 .await?;
             }
@@ -481,10 +634,13 @@ async fn handle_conn(stream: UnixStream, h: Handles) -> anyhow::Result<()> {
                     &mut wr,
                     &h,
                     &device,
-                    acrylius_core::plugins::wol::CAP,
-                    "relay",
-                    body,
-                    &["ok", "err"],
+                    Ask {
+                        cap: acrylius_core::plugins::wol::CAP,
+                        ty: "relay",
+                        body,
+                        expect: &["ok", "err"],
+                        patience: MACHINE,
+                    },
                 )
                 .await?;
             }
@@ -549,21 +705,46 @@ async fn handle_conn(stream: UnixStream, h: Handles) -> anyhow::Result<()> {
 /// `expect` names the reply verbs worth waiting for. An empty list means the
 /// verb is fire-and-forget, which is the case for pushing a clipboard value: it
 /// is a broadcast to every peer, and there is nothing to answer it.
+///
+/// How long a machine gets to answer a machine.
+const MACHINE: std::time::Duration = std::time::Duration::from_secs(15);
+/// How long a file transfer gets. It waits on two things a clock cannot bound:
+/// a person noticing the offer, and however long the bytes take. Giving up here
+/// does not stop the transfer, it only stops reporting on it, so the generous
+/// figure costs nothing and the short one lies.
+const PATIENT: std::time::Duration = std::time::Duration::from_secs(3600);
+
 /// What came back: the peer's reply, or a refusal from our own core.
 enum Answer {
     Reply(String, Vec<u8>),
     Refused(String),
 }
 
+/// One question for a peer.
+struct Ask<'a> {
+    cap: &'a str,
+    ty: &'a str,
+    body: Vec<u8>,
+    /// The reply verbs worth waiting for.
+    expect: &'a [&'a str],
+    /// How long the reply is worth waiting for. A lock either happens or does
+    /// not, in seconds. A file offer waits on a person noticing it.
+    patience: std::time::Duration,
+}
+
 async fn plugin_request(
     wr: &mut tokio::net::unix::OwnedWriteHalf,
     h: &Handles,
     device: &str,
-    cap: &str,
-    ty: &str,
-    body: Vec<u8>,
-    expect: &[&str],
+    ask: Ask<'_>,
 ) -> anyhow::Result<()> {
+    let Ask {
+        cap,
+        ty,
+        body,
+        expect,
+        patience,
+    } = ask;
     let id = match DeviceId::parse(device) {
         Ok(id) => id,
         Err(e) => {
@@ -587,8 +768,7 @@ async fn plugin_request(
         return write(wr, &Response::Ok).await;
     }
 
-    let deadline = std::time::Duration::from_secs(15);
-    let waited = tokio::time::timeout(deadline, async {
+    let waited = tokio::time::timeout(patience, async {
         loop {
             match rx.recv().await {
                 Ok(UiEvent::Plugin {
@@ -682,6 +862,21 @@ fn describe(cap: &str, ty: &str, body: &[u8]) -> String {
         && let Ok(c) = minicbor::decode::<clipboard::ClipboardSet>(body)
     {
         return String::from_utf8_lossy(&c.data).into_owned();
+    }
+    if cap == acrylius_core::plugins::share::CAP {
+        use acrylius_core::plugins::share::{Finished, Offer};
+        if let Ok(o) = minicbor::decode::<Offer>(body) {
+            return format!("{} offers {} ({})", ty, o.name, human(o.size));
+        }
+        if let Ok(f) = minicbor::decode::<Finished>(body) {
+            return if f.ok {
+                format!("transfer {} finished", f.transfer)
+            } else if f.detail.is_empty() {
+                format!("transfer {} was refused", f.transfer)
+            } else {
+                format!("transfer {} failed: {}", f.transfer, f.detail)
+            };
+        }
     }
     if cap == media::CAP
         && let Ok(s) = minicbor::decode::<media::MediaState>(body)
@@ -792,6 +987,22 @@ async fn write(wr: &mut tokio::net::unix::OwnedWriteHalf, r: &Response) -> anyho
 
 /// A fresh pairing code from the Crockford-minus-`ILOU` alphabet.
 #[must_use]
+/// A size a person reads rather than counts.
+fn human(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut size = bytes as f64;
+    let mut unit = 0;
+    while size >= 1024.0 && unit < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{size:.1} {}", UNITS[unit])
+    }
+}
+
 /// Milliseconds as m:ss, for a line a person reads.
 fn clock(ms: u64) -> String {
     let secs = ms / 1000;

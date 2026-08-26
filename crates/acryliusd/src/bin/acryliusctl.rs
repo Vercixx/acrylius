@@ -123,6 +123,18 @@ enum Cmd {
         device: String,
         id: String,
     },
+    /// Offer a file to a peer. It decides whether to take it.
+    Send {
+        #[arg(allow_hyphen_values = true)]
+        device: String,
+        path: String,
+    },
+    /// Files offered to this machine that nobody has answered yet.
+    Offers,
+    /// Take a file that was offered.
+    Accept { transfer: u64 },
+    /// Refuse one.
+    Reject { transfer: u64 },
     /// Ask a peer to wake a third machine by MAC.
     Wake {
         #[arg(allow_hyphen_values = true)]
@@ -179,6 +191,15 @@ enum Request {
     Wake {
         device: String,
         mac: String,
+    },
+    Send {
+        device: String,
+        path: String,
+    },
+    Offers,
+    Answer {
+        transfer: u64,
+        accept: bool,
     },
 }
 
@@ -285,6 +306,25 @@ async fn main() -> anyhow::Result<()> {
                 action,
                 player,
                 value,
+            },
+            false,
+        ),
+        // Not streaming, either of them: a transfer reports once, when it is
+        // over. Waiting for a second line means waiting for one the daemon has
+        // no reason to send.
+        Cmd::Send { device, path } => (Request::Send { device, path }, false),
+        Cmd::Offers => (Request::Offers, false),
+        Cmd::Accept { transfer } => (
+            Request::Answer {
+                transfer,
+                accept: true,
+            },
+            false,
+        ),
+        Cmd::Reject { transfer } => (
+            Request::Answer {
+                transfer,
+                accept: false,
             },
             false,
         ),
