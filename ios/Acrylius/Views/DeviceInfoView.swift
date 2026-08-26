@@ -40,10 +40,6 @@ struct DeviceInfoView: View {
                 }
             } header: {
                 Text("Capabilities")
-            } footer: {
-                Text(
-                    "Names are not accurate."
-                )
             }
             Section {
                 LabeledContent("Widget data") {
