@@ -48,8 +48,10 @@ struct DeviceInfoView: View {
             }
             Section {
                 LabeledContent("Widget data") {
+                    // Both sides spelled as Color: `.secondary` on its own is a
+                    // HierarchicalShapeStyle and the two do not unify.
                     Text(SharedContainer.isShared ? "Shared" : "Not shared")
-                        .foregroundStyle(SharedContainer.isShared ? .secondary : .red)
+                        .foregroundStyle(SharedContainer.isShared ? Color.secondary : Color.red)
                 }
             } header: {
                 Text("Widget")
