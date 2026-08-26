@@ -1092,6 +1092,13 @@ impl Core {
     /// What a peer is currently reached over, if anything.
     ///
     /// `None` means no session is up — not that the transport is unknown.
+    ///
+    /// Deliberately the same walk `dispatch_send` makes: first match in
+    /// `LinkId` order, which is transport order, because the id's high bits are
+    /// the transport's. So with both a Wi-Fi and a Bluetooth session up this
+    /// answers Wi-Fi, and that is the one a message would take. Anything that
+    /// changes how a send picks its link has to change this too, or the screen
+    /// starts naming a transport nothing is using.
     #[must_use]
     pub fn transport_for(&self, peer: &DeviceId) -> Option<TransportKind> {
         self.links.values().find_map(|st| match st {
