@@ -271,8 +271,19 @@ impl IdentityChr {
         vec!["read".to_string()]
     }
 
-    async fn read_value(&self, _options: HashMap<String, OwnedValue>) -> Vec<u8> {
-        self.shared.identity.lock().await.clone()
+    async fn read_value(&self, options: HashMap<String, OwnedValue>) -> Vec<u8> {
+        let identity = self.shared.identity.lock().await.clone();
+        // Logged because this is the last step of the phone's discovery chain,
+        // and without it a connection that got everything right and a connection
+        // that stopped one call short look identical from here.
+        let (device, mtu) = device_and_mtu(&options);
+        tracing::debug!(
+            device = device.as_deref().unwrap_or("unknown"),
+            mtu,
+            bytes = identity.len(),
+            "identity read"
+        );
+        identity
     }
 }
 
