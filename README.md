@@ -31,7 +31,7 @@ desktop  UnOfEh0ZNHHuzLPviAR2fA
 | **Commands** | `acryliusctl commands <device>`, then `run <device> <id>` |
 | **Media** | `acryliusctl media <device>` to see, then `playpause`, `next`, `volume --value 40` |
 | **Files** | `acryliusctl send <device> <path>`; the other end runs `offers`, then `accept <n>` |
-| **Wake** | The phone sends the packet. A sleeping machine runs no daemon. |
+| **Wake** | The phone sends the packet. A sleeping machine runs no daemon, so it hands over its MAC and address while it is awake. |
 
 ## Installing it
 
@@ -91,6 +91,12 @@ command string, so there is nothing to quote and nothing to escape.
 A file offered to this machine waits until you answer it. Set
 `share.auto_accept` if you would rather it did not, knowing that a paired device
 can then write into that directory unasked.
+
+Waking needs no configuration. Every network card with real hardware behind it
+is found and handed to paired devices while this machine is awake, along with
+the address it routes over — which is what a phone aims at, since iOS cannot
+broadcast without an entitlement a free account does not get. `wol.macs` is
+there to override that, not to make it work.
 
 ## Checking it
 

@@ -124,6 +124,11 @@ const HINTS: &str = r#"
 #               broadcast behind an entitlement a free developer account cannot
 #               get, and a network card matches the packet's payload rather than
 #               its destination address.
+#
+#               Left empty, every network card with real hardware behind it is
+#               found and announced, along with this machine's routed address.
+#               Set them only to override that. Filling one in by hand and
+#               getting it wrong looks identical to the feature not existing.
 #   allowlist   MACs this machine will relay a wake to on request. Empty means
 #               it relays for nobody, which is the right default.
 #

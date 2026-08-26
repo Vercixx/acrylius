@@ -143,6 +143,25 @@ echo "$OUT" | grep -qE 'nothing is playing|[a-z]'; check $? "bravo answered abou
 OUT=$("$BIN/acryliusctl" --state $D/a media "$B_ID" volume --value 500 2>&1); echo "  $OUT"
 echo "$OUT" | grep -q "refused"; check $? "a volume out of range is refused, and promptly"
 
+# MPRIS `Volume` is a writable property and a player is free to accept the write
+# and do nothing — Chromium does exactly that, while reporting CanControl true.
+# So the invariant is not "volume works", which depends on what is open: it is
+# that a volume nobody set is never reported as one that was.
+WAS=$("$BIN/acryliusctl" --state $D/a media "$B_ID" 2>&1 | grep -oE 'vol [0-9]+%' | head -1 | tr -dc '0-9')
+if [ -z "$WAS" ]; then
+  echo "  skip  nothing open to set a volume on"
+else
+  WANT=$(( WAS > 50 ? 42 : 73 ))
+  OUT=$("$BIN/acryliusctl" --state $D/a media "$B_ID" volume --value $WANT 2>&1); echo "  $OUT"
+  if echo "$OUT" | grep -q "refused"; then R=0
+  elif echo "$OUT" | grep -q "vol $WANT%"; then R=0
+  else R=1; fi
+  check $R "a volume change either happened or was refused, never neither"
+  # Put it back, in case the player did honour it. This runs against a real
+  # desktop and has no business leaving its music quieter than it found it.
+  "$BIN/acryliusctl" --state $D/a media "$B_ID" volume --value "$WAS" >/dev/null 2>&1
+fi
+
 OUT=$("$BIN/acryliusctl" --state $D/a media "$B_ID" pause --player nosuchplayer 2>&1); echo "  $OUT"
 echo "$OUT" | grep -q "refused"; check $? "a player that does not exist is refused"
 

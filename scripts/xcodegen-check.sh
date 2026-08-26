@@ -113,9 +113,20 @@ rm -rf ios/Acrylius.xcodeproj
 # any of them builds, installs, runs, and produces a widget that is empty
 # forever with nothing anywhere saying why — so it is checked here, where it
 # costs nothing, rather than discovered on a device.
+#
+# This is the group as *built*. A sideloading tool rewrites it at signing to
+# keep it unique to its team, which is why the code discovers the real one from
+# the provisioning profile and treats this only as a fallback. The three still
+# have to agree: a build signed the ordinary way uses exactly this.
 echo
 echo "app group:"
-group_in() { grep -oE 'group\.[a-z.]+' "$1" | head -1; }
+# Quoted, so `group.flatMap` in the Swift is not mistaken for an identifier.
+# In the entitlements the quotes are XML <string> delimiters; in the Swift they
+# are a literal. Both come out the same.
+group_in() {
+    grep -oE '(<string>|")group\.[a-z0-9.]+' "$1" \
+        | sed -E 's/^(<string>|")//' | head -1
+}
 app_group=$(group_in ios/Acrylius/Acrylius.entitlements)
 widget_group=$(group_in ios/Acrylius/Widgets/AcryliusWidgets.entitlements)
 code_group=$(group_in ios/Acrylius/Runtime/SharedContainer.swift)

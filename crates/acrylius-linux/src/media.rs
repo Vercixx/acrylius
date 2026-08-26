@@ -237,6 +237,30 @@ impl MediaEffector {
             }
             MediaAction::SetVolume { percent } => {
                 proxy.set_volume(f64::from(percent) / 100.0).await?;
+                // Read it back, because the write is not the answer. `Volume`
+                // is a writable MPRIS property and a player is free to accept
+                // the write and do nothing with it — Chromium does exactly
+                // that, with `CanControl` reporting true — so trusting the call
+                // means reporting a volume change that never happened and
+                // leaving a slider to snap back with no explanation.
+                //
+                // A moment first: a player that does honour it applies the
+                // change asynchronously, and reading immediately would call it
+                // a refusal. Effects run off the pump, so this stalls nothing.
+                tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                let landed = proxy
+                    .volume()
+                    .await
+                    .map(|v| (v.clamp(0.0, 1.0) * 100.0).round() as u8)
+                    .unwrap_or(percent);
+                // A player may round or clamp, and that is not a failure. Only
+                // a value that did not move towards the target is.
+                if landed.abs_diff(percent) > 5 {
+                    anyhow::bail!(
+                        "{} ignores volume changes; use the player's own controls",
+                        found.name
+                    );
+                }
             }
         }
         Ok(())

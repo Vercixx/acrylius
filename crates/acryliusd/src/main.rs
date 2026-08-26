@@ -9,6 +9,7 @@
 mod config;
 mod control;
 mod files;
+mod netself;
 mod reconcile;
 
 use std::path::PathBuf;
@@ -117,6 +118,53 @@ fn load_identity(state: &std::path::Path) -> anyhow::Result<Identity> {
     }
     tracing::info!(fingerprint = %id.fingerprint(), "generated a new identity");
     Ok(id)
+}
+
+/// What this machine tells a phone about waking it.
+///
+/// Every field falls back to something the machine can work out about itself,
+/// because the alternative is what shipped: a config with `macs = []` and
+/// `last_ipv4 = ""`, a phone that shows no wake button, and no indication
+/// anywhere that a value was missing rather than the feature being broken.
+///
+/// `last_ipv4` matters as much as the MAC. A network card matches a magic
+/// packet by its payload and ignores the address it was sent to, so a unicast
+/// datagram at the machine's last known address wakes it — and that is the only
+/// kind iOS can send, since broadcast needs an entitlement a free Apple account
+/// cannot have. Announcing an empty one leaves the phone with nowhere to aim.
+fn wake_config(cfg: &config::WolConfig) -> wol::WolConfig {
+    let here = netself::routed_ipv4();
+    let macs = if cfg.macs.is_empty() {
+        netself::wakeable_macs()
+    } else {
+        cfg.macs.clone()
+    };
+    let last_ipv4 = if cfg.last_ipv4.is_empty() {
+        here.clone().unwrap_or_default()
+    } else {
+        cfg.last_ipv4.clone()
+    };
+    let broadcast = if cfg.broadcast.is_empty() {
+        here.as_deref()
+            .map(netself::broadcast_for)
+            .unwrap_or_default()
+    } else {
+        cfg.broadcast.clone()
+    };
+    if macs.is_empty() {
+        tracing::warn!(
+            "no wakeable network card found, and none configured: this machine \
+             cannot be woken remotely. Set wol.macs if it has one."
+        );
+    } else {
+        tracing::info!(?macs, %last_ipv4, "this machine can be woken at");
+    }
+    wol::WolConfig {
+        macs,
+        broadcast,
+        port: cfg.port,
+        last_ipv4,
+    }
 }
 
 /// A stand-in device id for a plugin verb that broadcasts.
@@ -313,12 +361,7 @@ async fn main() -> anyhow::Result<()> {
     .plugin(ping::PingPlugin::default())
     .plugin(session::SessionPlugin::default())
     .plugin(wol::WolPlugin::new(
-        wol::WolConfig {
-            macs: cfg.wol.macs.clone(),
-            broadcast: cfg.wol.broadcast.clone(),
-            port: cfg.wol.port,
-            last_ipv4: cfg.wol.last_ipv4.clone(),
-        },
+        wake_config(&cfg.wol),
         cfg.wol.allowlist.clone(),
     ))
     .plugin(clipboard::ClipboardPlugin::new(clipboard::Directions {
@@ -466,6 +509,38 @@ async fn main() -> anyhow::Result<()> {
                         acrylius_core::vocab::LocalCommand::Plugin {
                             peer: broadcast_placeholder(),
                             cap: session::CAP.to_string(),
+                            ty: "notify".to_string(),
+                            body: Vec::new(),
+                        },
+                    ))
+                    .is_err()
+                {
+                    return;
+                }
+            }
+        });
+    }
+
+    if kinds.contains(&acrylius_core::vocab::EffectKind::Media) {
+        let events = events.clone();
+        tokio::spawn(async move {
+            // MPRIS does emit PropertiesChanged, but a player is free not to,
+            // and several do not until something asks. Without this a phone saw
+            // the state from the moment it connected and then nothing until it
+            // pressed a button — a remote that only updates when you use it.
+            //
+            // Two seconds because this is a now-playing display and a track
+            // change any later than that reads as broken. The plugin drops a
+            // state that has not meaningfully changed, and a position moving on
+            // its own does not count, so an idle machine sends nothing.
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
+            loop {
+                interval.tick().await;
+                if events
+                    .send(acrylius_core::vocab::Event::Local(
+                        acrylius_core::vocab::LocalCommand::Plugin {
+                            peer: broadcast_placeholder(),
+                            cap: media::CAP.to_string(),
                             ty: "notify".to_string(),
                             body: Vec::new(),
                         },

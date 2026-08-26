@@ -59,12 +59,17 @@ struct DeviceInfoView: View {
                 // Nothing in the app reports this failing, because nothing in
                 // the app fails: it falls back to its own container and works.
                 // Only the widget notices, and a widget cannot tell anyone.
+                //
+                // The identifier is worth showing. A sideloading tool rewrites
+                // it at signing, so "shared, under a name you did not choose"
+                // is the normal case and looks alarming without an explanation.
                 Text(
-                    SharedContainer.isShared
+                    (SharedContainer.isShared
                         ? "The widget can see this app's data."
-                        : "This build has no App Group, so the widget will stay empty. "
-                            + "A free Apple account may not be able to register one."
+                        : "This build has no App Group, so the widget will stay empty.")
+                        + "\n\(SharedContainer.diagnosis())"
                 )
+                .monospaced()
             }
         }
         .navigationTitle("This device")

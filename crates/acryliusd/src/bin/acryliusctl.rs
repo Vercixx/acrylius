@@ -312,7 +312,17 @@ async fn main() -> anyhow::Result<()> {
         // Not streaming, either of them: a transfer reports once, when it is
         // over. Waiting for a second line means waiting for one the daemon has
         // no reason to send.
-        Cmd::Send { device, path } => (Request::Send { device, path }, false),
+        Cmd::Send { device, path } => (
+            Request::Send {
+                device,
+                // Resolved here, and it has to be here. The daemon has a working
+                // directory of its own — `/` under systemd — so a relative path
+                // sent verbatim is resolved against somewhere the person typing
+                // it has never been, and reports that their file does not exist.
+                path: absolute(&path)?,
+            },
+            false,
+        ),
         Cmd::Offers => (Request::Offers, false),
         Cmd::Accept { transfer } => (
             Request::Answer {
@@ -448,6 +458,34 @@ async fn answer(path: &std::path::Path, accept: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Turn what someone typed into a path the daemon can open.
+///
+/// `~` first, because a shell only expands it unquoted and people quote paths
+/// with spaces in them. Then made absolute against *this* process's working
+/// directory, which is the only one that has anything to do with what they
+/// meant. Symlinks are left alone: following them would send the target of a
+/// link rather than the thing that was named.
+fn absolute(path: &str) -> anyhow::Result<String> {
+    let home = std::env::var_os("HOME").unwrap_or_default();
+    Ok(resolve(path, home.as_ref(), &std::env::current_dir()?)
+        .to_string_lossy()
+        .into_owned())
+}
+
+/// The rule itself, asking the environment nothing, so a test can check it
+/// without changing the environment out from under everything else.
+fn resolve(path: &str, home: &std::ffi::OsStr, cwd: &std::path::Path) -> PathBuf {
+    let expanded = match path.strip_prefix("~/") {
+        Some(rest) => PathBuf::from(home).join(rest),
+        None => PathBuf::from(path),
+    };
+    if expanded.is_absolute() {
+        expanded
+    } else {
+        cwd.join(expanded)
+    }
+}
+
 fn join(v: &[String]) -> String {
     if v.is_empty() {
         "(none)".to_string()
@@ -460,6 +498,46 @@ fn join(v: &[String]) -> String {
 mod tests {
     use super::*;
     use clap::Parser;
+
+    fn resolved(path: &str) -> PathBuf {
+        resolve(
+            path,
+            std::ffi::OsStr::new("/home/someone"),
+            std::path::Path::new("/home/someone/photos"),
+        )
+    }
+
+    /// The daemon's working directory is `/` under systemd. A path relative to
+    /// it is relative to nothing the person typing it can see, so it has to be
+    /// resolved here, where the working directory is theirs.
+    #[test]
+    fn a_path_is_resolved_where_it_was_typed() {
+        assert_eq!(
+            resolved("holiday.jpg"),
+            PathBuf::from("/home/someone/photos/holiday.jpg")
+        );
+    }
+
+    #[test]
+    fn an_absolute_path_is_left_alone() {
+        assert_eq!(resolved("/etc/hostname"), PathBuf::from("/etc/hostname"));
+    }
+
+    /// A shell expands `~` only when it is unquoted, and a path with a space in
+    /// it is usually quoted. Both are ordinary things to type.
+    #[test]
+    fn a_tilde_becomes_the_home_directory() {
+        assert_eq!(
+            resolved("~/Pictures/a b.png"),
+            PathBuf::from("/home/someone/Pictures/a b.png")
+        );
+        // `~other` is another user's home, which no shell expands here either,
+        // so it stays a literal rather than becoming a wrong guess.
+        assert_eq!(
+            resolved("~other/file"),
+            PathBuf::from("/home/someone/photos/~other/file")
+        );
+    }
 
     /// A device id is strict base64url, and that alphabet contains `-`. Roughly
     /// one identity in sixty-four therefore produces an id starting with one,

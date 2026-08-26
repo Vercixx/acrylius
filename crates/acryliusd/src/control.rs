@@ -482,6 +482,24 @@ async fn handle_conn(stream: UnixStream, h: Handles) -> anyhow::Result<()> {
                     continue;
                 };
                 let path = std::path::PathBuf::from(&path);
+                // Refused, not resolved. This process's working directory is
+                // `/` under systemd and has nothing to do with where the person
+                // asking was standing, so quietly resolving against it reports
+                // that a file they are looking at does not exist. Clients make
+                // paths absolute themselves; `acryliusctl` does.
+                if !path.is_absolute() {
+                    write(
+                        &mut wr,
+                        &Response::Error {
+                            message: format!(
+                                "{} is a relative path, and this daemon's directory is not yours",
+                                path.display()
+                            ),
+                        },
+                    )
+                    .await?;
+                    continue;
+                }
                 let meta = match tokio::fs::metadata(&path).await {
                     Ok(m) if m.is_file() => m,
                     Ok(_) => {

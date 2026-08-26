@@ -16,7 +16,17 @@ public final class IosEffector: Effector, @unchecked Sendable {
     public init() {}
 
     /// What to hand `AcryliusCore` at construction.
-    public static let kinds: [FfiEffectKind] = [.clipboard, .wol]
+    ///
+    /// Not `.wol`, even though the magic packet case below is implemented and
+    /// correct. Serving that capability means relaying a wake for a *third*
+    /// machine on someone else's say-so, and the phone registers the plugin
+    /// with an empty allowlist, so every such request is refused before it gets
+    /// here. Declaring it made "This device" report Wake as "Send and receive",
+    /// which read as a promise the phone had no intention of keeping.
+    ///
+    /// Waking a paired computer is unaffected: that is the phone sending a
+    /// datagram of its own accord, and needs no capability from anyone.
+    public static let kinds: [FfiEffectKind] = [.clipboard]
 
     public func run(_ effect: FfiEffect) async -> FfiEffectResult {
         switch effect {
