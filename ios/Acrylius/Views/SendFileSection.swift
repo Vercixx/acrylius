@@ -45,9 +45,6 @@ struct SendFileSection: View {
             }
         } header: {
             Text("Files")
-        } footer: {
-            Text("Your computer is asked first, and chooses where to put it. "
-                 + "Nothing is sent until it says yes.")
         }
         .fileImporter(isPresented: $browsing, allowedContentTypes: [.item]) { result in
             guard case let .success(url) = result else { return }

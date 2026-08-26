@@ -1,6 +1,9 @@
 #if canImport(SwiftUI)
 
 import SwiftUI
+#if canImport(UIKit)
+import UIKit
+#endif
 
 struct DeviceListView: View {
     @Environment(AppModel.self) private var model
@@ -17,7 +20,7 @@ struct DeviceListView: View {
                         ContentUnavailableView(
                             "No devices",
                             systemImage: "desktopcomputer",
-                            description: Text("Run `acryliusctl pair` on your PC, then tap ＋.")
+                            description: Text("Tap ＋ to get started.")
                         )
                     } else {
                         ForEach(model.peers, id: \.deviceId) { peer in
@@ -28,7 +31,7 @@ struct DeviceListView: View {
                     }
                 }
 
-                Section("This device") {
+                Section("This \(UIDevice.current.model)") {
                     NavigationLink {
                         DeviceInfoView()
                     } label: {
@@ -51,7 +54,7 @@ struct DeviceListView: View {
                     ContentUnavailableView(
                         "Not paired",
                         systemImage: "desktopcomputer.trianglebadge.exclamationmark",
-                        description: Text("This computer is no longer paired with this phone.")
+                        description: Text("This device is no longer paired with this \(UIDevice.current.model).")
                     )
                 }
             }
@@ -99,7 +102,7 @@ private struct PeerRow: View {
             Button("Forget", role: .destructive) { Task { await model.forget(peer) } }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Pairing has to be done again from both ends to undo this.")
+            Text("You'll need to pair \(peer.name) with this \(UIDevice.current.model) again.")
         }
     }
 

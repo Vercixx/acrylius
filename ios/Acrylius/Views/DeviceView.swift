@@ -1,6 +1,9 @@
 #if canImport(SwiftUI)
 
 import SwiftUI
+#if canImport(UIKit)
+import UIKit
+#endif
 
 /// One paired computer.
 ///
@@ -35,8 +38,6 @@ struct DeviceView: View {
                         .disabled(!session.locked)
                 } header: {
                     Text("Session")
-                } footer: {
-                    Text("Unlocking asks for Face ID. Locking does not.")
                 }
             }
 
@@ -65,8 +66,7 @@ struct DeviceView: View {
                 } header: {
                     Text("Power")
                 } footer: {
-                    Text("Aims at the last known address first. Your router needs a "
-                         + "reservation and a static ARP entry for a sleeping machine.")
+                    Text("This will not work if your network blocks Wake on LAN.")
                 }
             }
 
@@ -78,8 +78,8 @@ struct DeviceView: View {
                 }
             }
 
-            Section("Clipboard") {
-                TaskButton("Get from \(peer.name)") { await model.fetchClipboard(peer); return true }
+            Section {
+                TaskButton("Get remote clipboard") { await model.fetchClipboard(peer); return true }
                 if let value = features.clipboard {
                     Text(value)
                         .font(.callout)
@@ -97,6 +97,10 @@ struct DeviceView: View {
                     Task { await model.pushClipboard(text, to: peer) }
                 }
                 .labelStyle(.titleAndIcon)
+            } header: {
+                Text("Clipboard")
+            } footer: {
+                Text("Pushes local clipboard to \(peer.name)")
             }
 
             if let error = features.lastError ?? model.lastError {
@@ -135,7 +139,7 @@ struct DeviceView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Pairing has to be done again from both ends to undo this.")
+            Text("You'll need to pair \(peer.name) with this \(UIDevice.current.model) again.")
         }
     }
 }
