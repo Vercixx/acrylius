@@ -170,31 +170,11 @@ fn temp_beside(dest: &Path) -> PathBuf {
     dest.with_file_name(name)
 }
 
-/// A file name from a peer, made safe to use.
-///
-/// A peer chooses what to call its file and nothing else. Anything that could
-/// steer where the bytes land is removed rather than rejected, because a
-/// refusal over a stray slash helps nobody: `../../.bashrc` becomes `.bashrc`
-/// in the directory that was going to be used anyway.
-#[must_use]
-pub fn safe_name(offered: &str) -> String {
-    let base = offered
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(offered)
-        .trim()
-        .trim_start_matches('.');
-    let cleaned: String = base
-        .chars()
-        .filter(|c| !c.is_control() && *c != '\0')
-        .take(120)
-        .collect();
-    if cleaned.is_empty() {
-        "received".to_string()
-    } else {
-        cleaned
-    }
-}
+// `safe_name` lives in `acrylius_proto::bulk` and is re-exported here, because
+// a phone receives files too and this is the rule that decides where a peer's
+// chosen name is allowed to put them. Two copies of that is exactly one too
+// many, and it is the copy that drifts which becomes the path traversal.
+pub use acrylius_proto::bulk::safe_name;
 
 /// A path in `dir` that is not already taken.
 ///
@@ -223,28 +203,8 @@ pub fn free_path(dir: &Path, name: &str) -> PathBuf {
 mod tests {
     use super::*;
 
-    #[test]
-    fn a_name_from_a_peer_cannot_choose_a_directory() {
-        assert_eq!(safe_name("../../.bashrc"), "bashrc");
-        assert_eq!(safe_name("/etc/passwd"), "passwd");
-        assert_eq!(safe_name(r"C:\windows\system32\x.dll"), "x.dll");
-        assert_eq!(safe_name("holiday.jpg"), "holiday.jpg");
-    }
-
-    #[test]
-    fn a_name_that_is_nothing_useful_still_gets_one() {
-        assert_eq!(safe_name(""), "received");
-        assert_eq!(safe_name("   "), "received");
-        assert_eq!(safe_name("../.."), "received");
-    }
-
-    #[test]
-    fn a_control_character_does_not_survive() {
-        // A name that rewrites the line it is printed on is a name nobody
-        // should have to think about again.
-        assert_eq!(safe_name("in\u{1b}[2Kvoice.pdf"), "in[2Kvoice.pdf");
-        assert!(!safe_name("a\nb.txt").contains('\n'));
-    }
+    // The `safe_name` tests moved with it, into `acrylius_proto::bulk`. What
+    // stays here is `free_path`, which is about a filesystem and so cannot.
 
     #[tokio::test]
     async fn a_file_goes_across_and_arrives_whole() {

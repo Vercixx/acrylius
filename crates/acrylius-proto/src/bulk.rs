@@ -136,6 +136,40 @@ fn cipher(key: &[u8]) -> Result<ChaCha20Poly1305, ChunkError> {
     Ok(ChaCha20Poly1305::new((&key).into()))
 }
 
+/// A file name from a peer, made safe to use.
+///
+/// A peer chooses what to call its file and nothing else. Anything that could
+/// steer where the bytes land is removed rather than rejected, because a
+/// refusal over a stray slash helps nobody: `../../.bashrc` becomes `.bashrc`
+/// in the directory that was going to be used anyway.
+///
+/// Here rather than beside a filesystem, because every device that can receive
+/// a file needs this rule and they do not share a filesystem — a phone writes
+/// into an app container and a desktop into a configured directory. What they
+/// must share is the answer, since a second copy of this is how one of them
+/// ends up with the path traversal the other does not.
+#[must_use]
+pub fn safe_name(offered: &str) -> alloc::string::String {
+    use alloc::string::{String, ToString};
+
+    let base = offered
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(offered)
+        .trim()
+        .trim_start_matches('.');
+    let cleaned: String = base
+        .chars()
+        .filter(|c| !c.is_control() && *c != '\0')
+        .take(120)
+        .collect();
+    if cleaned.is_empty() {
+        "received".to_string()
+    } else {
+        cleaned
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,5 +252,28 @@ mod tests {
         let mut junk = [0u8; 12];
         junk[..4].copy_from_slice(b"GET ");
         assert_eq!(read_hello(&junk), Err(HelloError::NotOurs));
+    }
+
+    #[test]
+    fn a_name_from_a_peer_cannot_choose_a_directory() {
+        assert_eq!(safe_name("../../.bashrc"), "bashrc");
+        assert_eq!(safe_name("/etc/passwd"), "passwd");
+        assert_eq!(safe_name(r"C:\windows\system32\x.dll"), "x.dll");
+        assert_eq!(safe_name("holiday.jpg"), "holiday.jpg");
+    }
+
+    #[test]
+    fn a_name_that_is_nothing_useful_still_gets_one() {
+        assert_eq!(safe_name(""), "received");
+        assert_eq!(safe_name("   "), "received");
+        assert_eq!(safe_name("../.."), "received");
+    }
+
+    #[test]
+    fn a_control_character_does_not_survive() {
+        // A name that rewrites the line it is printed on is a name nobody
+        // should have to think about again.
+        assert_eq!(safe_name("in\u{1b}[2Kvoice.pdf"), "in[2Kvoice.pdf");
+        assert!(!safe_name("a\nb.txt").contains('\n'));
     }
 }
