@@ -37,6 +37,7 @@ dependencies = [
  "acrylius-rt",
  "anyhow",
  "async-trait",
+ "futures-lite",
  "minicbor",
  "serde",
  "serde_json",

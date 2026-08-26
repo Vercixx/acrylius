@@ -10,6 +10,7 @@ mod config;
 mod control;
 mod files;
 mod netself;
+mod prompt;
 mod reconcile;
 
 use std::path::PathBuf;
@@ -422,11 +423,16 @@ async fn main() -> anyhow::Result<()> {
     let offers_bulk = bulk.clone();
     let auto_accept = cfg.share.auto_accept;
     let auto_events = rt.events();
+    // A question for the person at this desktop belongs on their screen. Absent
+    // on a machine with no notification daemon, and everything still works
+    // through `acryliusctl` — which is why nothing below requires one.
+    let prompter = match bulk.clone() {
+        Some(bulk) => prompt::Prompter::start(rt.events(), bulk).await,
+        None => None,
+    };
+    let names = devices.clone();
     tokio::spawn(async move {
         while let Some(e) = ui_mpsc_rx.recv().await {
-            // An offer has to be remembered before it can be accepted: by the
-            // time a person says yes, the name it chose is all we have to build
-            // a destination from.
             if let acrylius_core::vocab::UiEvent::Plugin {
                 peer,
                 cap,
@@ -434,27 +440,53 @@ async fn main() -> anyhow::Result<()> {
                 body,
             } = &e
                 && cap == share::CAP
-                && ty == "offer"
                 && let Some(bulk) = &offers_bulk
-                && let Ok(offer) = minicbor::decode::<share::Offer>(body)
             {
-                bulk.note_offer(&peer.to_string(), offer.clone());
-                if auto_accept {
-                    tracing::info!(name = %offer.name, size = offer.size, "accepting a file");
-                    let body = minicbor::to_vec(share::Finished {
-                        transfer: offer.transfer,
-                        ok: true,
-                        detail: String::new(),
-                    })
-                    .unwrap_or_default();
-                    let _ = auto_events.send(acrylius_core::vocab::Event::Local(
-                        acrylius_core::vocab::LocalCommand::Plugin {
-                            peer: peer.clone(),
-                            cap: share::CAP.to_string(),
-                            ty: "accept".to_string(),
-                            body,
-                        },
-                    ));
+                match ty.as_str() {
+                    // An offer has to be remembered before it can be accepted:
+                    // by the time a person says yes, the name it chose is all
+                    // there is to build a destination from.
+                    "offer" => {
+                        if let Ok(offer) = minicbor::decode::<share::Offer>(body) {
+                            bulk.note_offer(&peer.to_string(), offer.clone());
+                            tracing::info!(
+                                name = %offer.name, size = offer.size, transfer = offer.transfer,
+                                "a file was offered"
+                            );
+                            if auto_accept {
+                                let body = minicbor::to_vec(share::Finished {
+                                    transfer: offer.transfer,
+                                    ok: true,
+                                    detail: String::new(),
+                                })
+                                .unwrap_or_default();
+                                let _ = auto_events.send(acrylius_core::vocab::Event::Local(
+                                    acrylius_core::vocab::LocalCommand::Plugin {
+                                        peer: peer.clone(),
+                                        cap: share::CAP.to_string(),
+                                        ty: "accept".to_string(),
+                                        body,
+                                    },
+                                ));
+                            } else if let Some(prompter) = &prompter {
+                                let from = names
+                                    .lock()
+                                    .await
+                                    .iter()
+                                    .find(|d| d.device_id == peer.to_string())
+                                    .map_or_else(|| "A device".to_string(), |d| d.name.clone());
+                                prompter.ask(&peer.to_string(), &from, &offer).await;
+                            }
+                        }
+                    }
+                    "finished" => {
+                        if let Ok(f) = minicbor::decode::<share::Finished>(body)
+                            && let Some(prompter) = &prompter
+                        {
+                            prompter.done(bulk, f.transfer, f.ok, &f.detail).await;
+                        }
+                    }
+                    _ => {}
                 }
             }
             let _ = fanout.send(e);

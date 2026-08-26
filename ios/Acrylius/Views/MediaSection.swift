@@ -55,8 +55,15 @@ struct MediaSection: View {
 
                 controls(for: player)
 
+                // The machine's volume when it reports one, the player's own
+                // when it does not. Showing neither is how this control
+                // disappeared: a computer running an older daemon sends no
+                // machine volume, and a row that only knew about that had
+                // nothing left to draw.
                 if let volume = features.media?.systemVolume {
-                    volumeRow(volume)
+                    volumeRow(volume, machine: true)
+                } else if let volume = player.volumePercent {
+                    volumeRow(volume, machine: false)
                 }
 
                 if features.media?.players.count ?? 0 > 1 {
@@ -127,14 +134,13 @@ struct MediaSection: View {
         .disabled(!enabled)
     }
 
-    /// The computer's output volume, not the player's.
+    /// The computer's output volume where there is one, the player's otherwise.
     ///
     /// MPRIS gives every player a writable `Volume` and a great many ignore it
     /// while still reporting that they accept control — so a per-player slider
-    /// worked for some of what you play and silently not for the rest. This one
-    /// moves the machine, which is what a person means by "turn it down" and is
-    /// the one control that works whatever is playing.
-    private func volumeRow(_ volume: UInt8) -> some View {
+    /// works for some of what you play and silently not for the rest. The
+    /// machine's always moves something, which is why it wins when it is there.
+    private func volumeRow(_ volume: UInt8, machine: Bool) -> some View {
         HStack {
             Image(systemName: "speaker.fill").foregroundStyle(.secondary)
             Slider(
@@ -145,7 +151,14 @@ struct MediaSection: View {
                     // across its range emits a value per frame, and every one of
                     // them here is a round trip to another machine.
                     guard !editing else { return }
-                    Task { await model.media(peer, "volume", value: Int64(dragging)) }
+                    Task {
+                        // Naming the player is what asks for its own volume
+                        // rather than the machine's.
+                        await model.media(
+                            peer, "volume",
+                            player: machine ? "" : (player?.id ?? ""),
+                            value: Int64(dragging))
+                    }
                 }
             )
             Image(systemName: "speaker.wave.3.fill").foregroundStyle(.secondary)

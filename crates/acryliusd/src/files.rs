@@ -36,6 +36,8 @@ pub struct FileBulk {
     offers: Mutex<BTreeMap<TransferId, (String, Offer)>>,
     outgoing: Mutex<BTreeMap<TransferId, Outgoing>>,
     incoming: Mutex<BTreeMap<TransferId, Incoming>>,
+    /// Where a finished transfer's bytes went, until somebody asks once.
+    landed: Mutex<BTreeMap<TransferId, PathBuf>>,
     next: AtomicU64,
 }
 
@@ -48,6 +50,7 @@ impl FileBulk {
             offers: Mutex::new(BTreeMap::new()),
             outgoing: Mutex::new(BTreeMap::new()),
             incoming: Mutex::new(BTreeMap::new()),
+            landed: Mutex::new(BTreeMap::new()),
             next: AtomicU64::new(0),
         })
     }
@@ -118,8 +121,8 @@ impl FileBulk {
 
     /// Where an accepted transfer will be written.
     ///
-    /// Only the tests ask: the daemon logs the path once the bytes land, and
-    /// nothing above this is allowed to learn one before then.
+    /// Before it has been. Only the tests ask; see [`Self::landed`] for the
+    /// question worth asking afterwards.
     #[cfg(test)]
     fn destination(&self, transfer: TransferId) -> Option<PathBuf> {
         self.incoming
@@ -127,6 +130,20 @@ impl FileBulk {
             .expect("poisoned")
             .get(&transfer)
             .map(|i| i.dest.clone())
+    }
+
+    /// Where a transfer's bytes actually ended up.
+    ///
+    /// Taken, not read: it is asked once, to tell somebody where their file
+    /// went. Keeping every path a machine has ever received would be a list of
+    /// what somebody has been sent, which is nobody's business and is not worth
+    /// holding to answer a question once.
+    ///
+    /// This is the only route by which a path leaves this type, it goes to a
+    /// notification on this machine's own screen, and it goes nowhere near a
+    /// peer.
+    pub fn landed(&self, transfer: TransferId) -> Option<PathBuf> {
+        self.landed.lock().expect("poisoned").remove(&transfer)
     }
 }
 
@@ -189,9 +206,18 @@ impl BulkHost for FileBulk {
         match result {
             Ok(bytes) => {
                 tracing::info!(path = %dest.display(), bytes, "received a file");
+                self.landed
+                    .lock()
+                    .expect("poisoned")
+                    .insert(transfer, dest.clone());
                 Ok(())
             }
-            Err(e) => Err(e),
+            Err(e) => {
+                // Loud, because until now a transfer that failed said nothing
+                // anywhere and looked exactly like one that had not happened.
+                tracing::warn!(path = %dest.display(), error = %e, "a file did not arrive");
+                Err(e)
+            }
         }
     }
 

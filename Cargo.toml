@@ -37,6 +37,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rand = "0.9"
 uniffi = "0.32"
 zbus = "5.19"
+# For the notification signal stream. zbus is built on it but does not
+# re-export it, and a signal stream is only useful with a `StreamExt` in scope.
+futures-lite = "2"
 wl-clipboard-rs = "0.9"
 
 [workspace.lints.rust]

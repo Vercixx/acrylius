@@ -77,7 +77,9 @@ macs = ["00:11:22:33:44:55"]
 broadcast = "192.168.1.255"
 
 [share]
-directory = "~/Downloads"       # where files sent to this machine land
+# Where files sent to this machine land. Defaults to this desktop's own
+# downloads folder, whatever it is called; set this only to override that.
+directory = "~/Загрузки"
 
 [commands.screenshot]
 name = "Take a screenshot"
@@ -88,9 +90,17 @@ args = ["/tmp/shot.png"]
 A command is chosen by an id the computer published. The wire never carries a
 command string, so there is nothing to quote and nothing to escape.
 
-A file offered to this machine waits until you answer it. Set
-`share.auto_accept` if you would rather it did not, knowing that a paired device
-can then write into that directory unasked.
+A file offered to this machine puts a notification on your screen with Accept
+and Deny on it, and says where the file went once it arrives. `acryliusctl
+offers` and `accept` do the same job from a terminal, and are the only way on a
+desktop whose notifications have no buttons. Set `share.auto_accept` to skip the
+question entirely, knowing that a paired device can then write into that
+directory unasked.
+
+`share.directory` defaults to whatever this desktop calls its downloads folder,
+read from `user-dirs.dirs` — `Загрузки`, `Téléchargements`, or whatever else.
+Hardcoding `~/Downloads` invents a second folder beside the real one and fills
+it with files nobody thinks to look in.
 
 Waking needs no configuration. Every network card with real hardware behind it
 is found and handed to paired devices while this machine is awake, along with
@@ -158,8 +168,12 @@ whose app is closed anyway — so a live "connected" dot would be a claim nobody
 had checked. Its one button is Wake, which needs no session at all. Everything
 else opens the app.
 
-Sharing data with an extension needs an App Group, and whether a free Apple
-account can register one is not settled. Nothing depends on the answer: when
+Sharing data with an extension needs an App Group, and a sideloading tool
+decides at install time whether the app and its extension get one App ID or two,
+rewriting identifiers either way. Both arrangements have been seen to work and
+they fail differently, so the app does not reason about which happened: it reads
+the group out of the profile it was signed with and shows what it found under
+"This device". Nothing depends on the answer: when
 there is no group the app uses its own container and works exactly as before,
 "This device" reports **Widget data: Not shared**, and the widget says so rather
 than sitting there empty.

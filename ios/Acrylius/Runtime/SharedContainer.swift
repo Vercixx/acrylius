@@ -108,6 +108,34 @@ public enum SharedContainer {
         return "not applicable"
         #endif
     }
+
+    /// Everything worth knowing when the widget stops working.
+    ///
+    /// A sideloading tool decides at install time whether the app and its
+    /// extension get one App ID or two, and rewrites identifiers either way.
+    /// Both arrangements can work and they fail differently, so what matters is
+    /// being able to see which one happened rather than reasoning about what
+    /// the installer probably did.
+    public static func report() -> [(String, String)] {
+        #if canImport(Darwin)
+        var rows = [
+            ("Bundle", Bundle.main.bundleIdentifier ?? "unknown"),
+            ("App group", diagnosis()),
+        ]
+        let granted = Entitlements.appGroups()
+        if granted.count > 1 {
+            // More than one means the installer added its own alongside ours,
+            // and which is picked matters.
+            rows.append(("Granted", granted.joined(separator: ", ")))
+        }
+        if let team = Entitlements.teamIdentifier() {
+            rows.append(("Team", team))
+        }
+        return rows
+        #else
+        return [("App group", "not applicable")]
+        #endif
+    }
 }
 
 #if canImport(Darwin)
@@ -131,6 +159,14 @@ enum Entitlements {
 
     static func hasProfile(in bundle: Bundle = .main) -> Bool {
         bundle.url(forResource: "embedded", withExtension: "mobileprovision") != nil
+    }
+
+    /// Whose team this build was signed under.
+    ///
+    /// The prefix a sideloading tool appends to bundle identifiers and app
+    /// groups, so seeing it is how a rewritten identifier stops being a mystery.
+    static func teamIdentifier(in bundle: Bundle = .main) -> String? {
+        read(in: bundle)?["com.apple.developer.team-identifier"] as? String
     }
 
     private static func read(in bundle: Bundle) -> [String: Any]? {

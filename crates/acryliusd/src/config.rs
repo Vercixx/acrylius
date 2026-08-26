@@ -89,16 +89,70 @@ impl Default for ShareConfig {
     }
 }
 
-/// `$XDG_DOWNLOAD_DIR` if the session names one, else `~/Downloads`.
+/// Where this desktop actually puts downloads.
+///
+/// Not `~/Downloads`. That folder is called `Загрузки` on a Russian system,
+/// `Téléchargements` on a French one, and so on; hardcoding the English name
+/// invents a second folder beside the real one and quietly fills it with files
+/// nobody will think to look in. That is not hypothetical — it is what this did
+/// before, and the files went somewhere their owner could not find.
+///
+/// The answer lives in `user-dirs.dirs`, which `xdg-user-dirs-update` writes and
+/// every desktop reads. The environment variable is checked first but is rarely
+/// set: it is exported into a session by some setups and not by most.
 fn default_download_dir() -> String {
     if let Some(dir) = std::env::var_os("XDG_DOWNLOAD_DIR") {
         return dir.to_string_lossy().into_owned();
     }
-    let home = std::env::var_os("HOME").unwrap_or_default();
-    PathBuf::from(home)
-        .join("Downloads")
+    let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
+    xdg_user_dir("DOWNLOAD", &home)
+        .unwrap_or_else(|| home.join("Downloads"))
         .to_string_lossy()
         .into_owned()
+}
+
+/// Read one entry out of `~/.config/user-dirs.dirs`.
+///
+/// The file is shell syntax, but only barely: a line per directory, always
+/// quoted, always either absolute or relative to `$HOME`. Parsing that much is
+/// a good deal less trouble than running a shell to do it.
+fn xdg_user_dir(name: &str, home: &std::path::Path) -> Option<PathBuf> {
+    let config = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".config"));
+    xdg_user_dir_in(&config, name, home)
+}
+
+/// The parsing, with nowhere to look already decided, so a test needs no
+/// environment of its own.
+fn xdg_user_dir_in(
+    config: &std::path::Path,
+    name: &str,
+    home: &std::path::Path,
+) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(config.join("user-dirs.dirs")).ok()?;
+    let key = format!("XDG_{name}_DIR=");
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('#') {
+            continue;
+        }
+        let Some(value) = line.strip_prefix(&key) else {
+            continue;
+        };
+        let value = value.trim().trim_matches('"');
+        // "$HOME/Загрузки" is the usual form. An absolute path is also allowed.
+        let path = match value.strip_prefix("$HOME/") {
+            Some(rest) => home.join(rest),
+            None if value == "$HOME" => home.to_path_buf(),
+            None => PathBuf::from(value),
+        };
+        // A user dir pointing at $HOME itself means "I do not have one of
+        // these", and dropping files straight into a home directory is not what
+        // anybody wants.
+        return (path != home).then_some(path);
+    }
+    None
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -196,6 +250,35 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The bug this exists to prevent: a downloads folder called `Downloads` on
+    /// a desktop whose downloads folder is called something else, quietly
+    /// collecting files nobody can find.
+    #[test]
+    fn a_downloads_folder_is_whatever_this_desktop_calls_it() {
+        let dir = std::env::temp_dir().join(format!("acr-xdg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".config")).unwrap();
+        std::fs::write(
+            dir.join(".config/user-dirs.dirs"),
+            "# This file is written by xdg-user-dirs-update\n\
+             XDG_DESKTOP_DIR=\"$HOME/Рабочий стол\"\n\
+             XDG_DOWNLOAD_DIR=\"$HOME/Загрузки\"\n",
+        )
+        .unwrap();
+        let config = dir.join(".config");
+        assert_eq!(
+            xdg_user_dir_in(&config, "DOWNLOAD", &dir),
+            Some(dir.join("Загрузки")),
+            "the name this desktop actually uses"
+        );
+        assert_eq!(
+            xdg_user_dir_in(&config, "VIDEOS", &dir),
+            None,
+            "and nothing invented for one it does not have"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn defaults_are_usable_without_a_file() {

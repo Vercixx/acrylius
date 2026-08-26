@@ -53,23 +53,32 @@ struct DeviceInfoView: View {
                     Text(SharedContainer.isShared ? "Shared" : "Not shared")
                         .foregroundStyle(SharedContainer.isShared ? Color.secondary : Color.red)
                 }
+                // What the installer actually granted this build. It decides at
+                // install time whether the app and its extension get one App ID
+                // or two, and rewrites identifiers either way; both arrangements
+                // work and they fail differently, so the useful thing is being
+                // able to see which one happened rather than reasoning about
+                // what it probably did.
+                ForEach(SharedContainer.report(), id: \.0) { row in
+                    LabeledContent(row.0) {
+                        Text(row.1)
+                            .font(.caption.monospaced())
+                            .multilineTextAlignment(.trailing)
+                            .textSelection(.enabled)
+                    }
+                }
             } header: {
                 Text("Widget")
             } footer: {
                 // Nothing in the app reports this failing, because nothing in
                 // the app fails: it falls back to its own container and works.
                 // Only the widget notices, and a widget cannot tell anyone.
-                //
-                // The identifier is worth showing. A sideloading tool rewrites
-                // it at signing, so "shared, under a name you did not choose"
-                // is the normal case and looks alarming without an explanation.
                 Text(
-                    (SharedContainer.isShared
-                        ? "The widget can see this app's data."
-                        : "This build has no App Group, so the widget will stay empty.")
-                        + "\n\(SharedContainer.diagnosis())"
+                    SharedContainer.isShared
+                        ? "The widget can see this app's data. A group name you did not "
+                            + "choose is normal: the installer rewrites it to its own team."
+                        : "This build has no App Group, so the widget will stay empty."
                 )
-                .monospaced()
             }
         }
         .navigationTitle("This device")
