@@ -258,9 +258,14 @@ pub enum EffectKind {
     /// Receiving only, and that asymmetry is the point. A host that can pick a
     /// file can offer it — there is nothing to gate, because it starts the
     /// transfer and reads the bytes itself. Accepting one means a directory, a
-    /// listening socket and a person to ask, and a phone has none of the three.
-    /// So a phone sends files without declaring this and refuses to be sent
-    /// them, which is exactly what it can do.
+    /// listening socket and a person to ask, which is three things rather than
+    /// a capability, and any host that has all three may declare this.
+    ///
+    /// A phone does now, which it did not always: files land in the app's
+    /// Documents directory, it binds a port for one transfer, and a person taps
+    /// Accept. What it still cannot do is any of that with the app closed — but
+    /// that is a reason for the app to say so, not for the core to decide on
+    /// its behalf.
     Share,
     Custom,
 }

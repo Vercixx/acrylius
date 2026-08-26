@@ -305,6 +305,22 @@ pub struct FfiTransferEnd {
     pub detail: String,
 }
 
+/// The body of an answer to an offer, and of a report that one ended.
+///
+/// `accept` and `reject` carry the same shape as `finished`, because all three
+/// are the same sentence about the same transfer: only the id is read on the
+/// way in, so an acceptance is a `Finished` that has not happened yet.
+#[uniffi::export]
+#[must_use]
+pub fn encode_share_end(end: FfiTransferEnd) -> Vec<u8> {
+    minicbor::to_vec(share::Finished {
+        transfer: end.transfer,
+        ok: end.ok,
+        detail: end.detail,
+    })
+    .unwrap_or_default()
+}
+
 #[uniffi::export]
 pub fn decode_share_finished(body: Vec<u8>) -> Result<FfiTransferEnd, FfiError> {
     let f: share::Finished = minicbor::decode(&body).map_err(|_| bad("share result"))?;
@@ -500,6 +516,28 @@ mod tests {
         };
         let back = decode_wol_config(encode_wol_config(wake)).unwrap();
         assert_eq!(back.last_ipv4, "192.168.1.50");
+
+        // The answer to an offer, which a phone now has to be able to write and
+        // not only read.
+        let end = FfiTransferEnd {
+            transfer: 42,
+            ok: true,
+            detail: String::new(),
+        };
+        let back = decode_share_finished(encode_share_end(end)).unwrap();
+        assert_eq!((back.transfer, back.ok), (42, true));
+
+        let offer = FfiOffer {
+            transfer: 42,
+            name: "build.ipa".to_string(),
+            size: 9_000_000,
+            mime: "application/octet-stream".to_string(),
+        };
+        let back = decode_share_offer(encode_share_offer(offer)).unwrap();
+        assert_eq!(
+            (back.transfer, back.name, back.size),
+            (42, "build.ipa".to_string(), 9_000_000)
+        );
     }
 
     #[test]

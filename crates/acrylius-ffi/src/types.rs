@@ -377,6 +377,7 @@ pub enum FfiEffectKind {
     Command,
     Wol,
     Media,
+    Share,
     Custom,
 }
 
@@ -388,6 +389,7 @@ impl From<FfiEffectKind> for cv::EffectKind {
             FfiEffectKind::Command => Self::Command,
             FfiEffectKind::Wol => Self::Wol,
             FfiEffectKind::Media => Self::Media,
+            FfiEffectKind::Share => Self::Share,
             FfiEffectKind::Custom => Self::Custom,
         }
     }
@@ -610,6 +612,16 @@ pub enum FfiAction {
         endpoint: String,
         key: Vec<u8>,
     },
+    /// Accept a file. The host binds somewhere, answers with `BulkListening`
+    /// and the endpoint it bound, then writes what arrives.
+    ///
+    /// `expect_bytes` is what the far end says it is sending, so a host can
+    /// decide whether it wants it before a byte of it exists on disk.
+    BulkListen {
+        transfer: u64,
+        key: Vec<u8>,
+        expect_bytes: u64,
+    },
     /// A bulk transfer this host has no way to carry out. The host answers with
     /// a failed `BulkFinished`, so the far end is told rather than left waiting.
     BulkUnsupported {
@@ -679,15 +691,22 @@ impl From<cv::Action> for FfiAction {
                 endpoint,
                 key,
             },
-            // Receiving still does not cross. A phone cannot accept a
-            // connection while its app is closed and has nowhere to put a file,
-            // so it refuses an offer outright rather than half-honouring one —
-            // and the share plugin refuses before this is ever reached, on a
-            // host that does not declare the effect. Mapped rather than ignored
-            // so the day a phone can receive, this is a compile error and not a
-            // silent gap.
-            cv::Action::BulkListen { transfer, .. } => Self::BulkUnsupported {
+            // Receiving crosses now. It used to be turned into "unsupported"
+            // here, because a phone had nowhere to put a file — and the note
+            // that stood in this place said that the day one could receive,
+            // this should be the thing that changes. It is.
+            //
+            // A host that still cannot receive does not reach this at all: the
+            // share plugin refuses an offer outright unless the host declares
+            // the effect, which is the check that keeps the two in step.
+            cv::Action::BulkListen {
+                transfer,
+                key,
+                expect_bytes,
+            } => Self::BulkListen {
                 transfer: transfer.0,
+                key,
+                expect_bytes,
             },
             cv::Action::BulkCancel { transfer } => Self::BulkUnsupported {
                 transfer: transfer.0,
