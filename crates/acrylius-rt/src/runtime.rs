@@ -14,7 +14,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use acrylius_core::core::Core;
 use acrylius_core::link::TransportId;
-use acrylius_core::vocab::{Action, Event, UiEvent};
+use acrylius_core::vocab::{Action, Event, Now, UiEvent};
 use tokio::sync::mpsc;
 
 use crate::effector::Effector;
@@ -92,8 +92,8 @@ impl Runtime {
         u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX)
     }
 
-    /// Wall-clock milliseconds, used only for the handshake timestamp a peer
-    /// compares against its own clock. Never for a deadline.
+    /// Wall-clock milliseconds, for the handshake timestamp a peer compares
+    /// against its own clock. Never for a deadline: it can jump backwards.
     fn wall_ms() -> u64 {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -143,7 +143,10 @@ impl Runtime {
                 () = &mut sleep => Event::Tick,
             };
 
-            let now = self.now_ms();
+            let now = Now {
+                monotonic_ms: self.now_ms(),
+                wall_ms: Self::wall_ms(),
+            };
             let out = self.core.handle(now, ev);
             deadline = out.next_deadline_ms;
             for a in out.actions {

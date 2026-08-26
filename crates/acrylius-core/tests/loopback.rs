@@ -14,7 +14,9 @@ use acrylius_core::noise::Identity;
 use acrylius_core::peer::PeerState;
 use acrylius_core::plugins::ping;
 use acrylius_core::proto::ids::DeviceId;
-use acrylius_core::vocab::{Action, DiscoveredPeer, Event, LocalCommand, Sensitivity, UiEvent};
+use acrylius_core::vocab::{
+    Action, DiscoveredPeer, Event, LocalCommand, Now, Sensitivity, UiEvent,
+};
 
 const CODE: &str = "ABCD1234";
 const TRANSPORT: TransportId = TransportId(0);
@@ -50,6 +52,12 @@ struct Net {
     /// (side, link) -> the peer's link id for the same wire.
     peer_link: BTreeMap<(Side, u64), u64>,
     queue: VecDeque<(Side, Event)>,
+    /// Milliseconds to add to side B's clock. Two machines that booted at
+    /// different times do not share an uptime.
+    pub b_skew: u64,
+    /// Milliseconds since the epoch, shared by both sides the way two
+    /// NTP-synced machines share one.
+    pub wall: u64,
     pub ui: Vec<(Side, UiEvent)>,
     pub persisted: Vec<(Side, String, bool)>,
 }
@@ -63,8 +71,17 @@ impl Net {
             next_link: 0,
             peer_link: BTreeMap::new(),
             queue: VecDeque::new(),
+            b_skew: 0,
+            wall: 1_700_000_000_000,
             ui: Vec::new(),
             persisted: Vec::new(),
+        }
+    }
+
+    fn skew_for(&self, s: Side) -> u64 {
+        match s {
+            Side::A => 0,
+            Side::B => self.b_skew,
         }
     }
 
@@ -86,7 +103,12 @@ impl Net {
         while let Some((side, ev)) = self.queue.pop_front() {
             guard += 1;
             assert!(guard < 500, "the harness did not settle: a message loop?");
-            let now = self.now;
+            // Each side keeps its own monotonic origin — machines do not share
+            // an uptime — while the wall clock is the one thing they agree on.
+            let now = Now {
+                monotonic_ms: self.now + self.skew_for(side),
+                wall_ms: self.wall,
+            };
             let out = self.core(side).handle(now, ev);
             for action in out.actions {
                 self.apply(side, action);
@@ -399,12 +421,24 @@ fn the_pairing_window_expires_on_the_hosts_clock() {
     );
 
     // The core asked to be woken; honour that and no sooner.
-    let out = net.b.handle(net.now, Event::Tick);
+    let out = net.b.handle(
+        Now {
+            monotonic_ms: net.now,
+            wall_ms: net.wall,
+        },
+        Event::Tick,
+    );
     let deadline = out.next_deadline_ms.expect("a window sets a deadline");
     assert!(deadline > net.now);
 
     net.now = deadline;
-    let out = net.b.handle(net.now, Event::Tick);
+    let out = net.b.handle(
+        Now {
+            monotonic_ms: net.now,
+            wall_ms: net.wall,
+        },
+        Event::Tick,
+    );
     assert!(
         out.actions
             .iter()
@@ -528,5 +562,48 @@ fn a_peer_with_no_address_explains_itself() {
         net.saw(Side::B, |e| matches!(e, UiEvent::Error { detail, .. }
             if detail.contains("no address known"))),
         "it should say it does not know where the device is, not merely that it is unreachable"
+    );
+}
+
+#[test]
+fn a_session_survives_two_machines_with_different_uptimes() {
+    // Every test until now started both cores at the same instant, so their
+    // clocks agreed to the millisecond and nothing noticed which clock the
+    // handshake timestamp came from. Real machines do not boot together: a
+    // computer that has been up for hours and a phone just unlocked share no
+    // uptime at all.
+    let (a, b) = (core("phone"), core("pc"));
+    let b_id = b.device_id();
+    let mut net = Net::new(a, b);
+    // The PC has been up an hour longer than the phone.
+    net.b_skew = 3_600_000;
+
+    net.local(
+        Side::B,
+        LocalCommand::OpenPairingWindow {
+            code: CODE.to_string(),
+        },
+    );
+    net.local(
+        Side::A,
+        LocalCommand::RequestPairing {
+            transport: TRANSPORT,
+            addr: Side::B.addr().to_string(),
+            code: CODE.to_string(),
+        },
+    );
+    net.local(Side::A, LocalCommand::ConfirmPairing { accept: true });
+    net.local(Side::B, LocalCommand::ConfirmPairing { accept: true });
+    assert_eq!(
+        net.a.peers().count(),
+        1,
+        "pairing does not check freshness, so it works"
+    );
+
+    net.local(Side::A, LocalCommand::Connect { peer: b_id.clone() });
+    assert_eq!(
+        net.a.peer_state(&b_id),
+        PeerState::Reachable,
+        "a session must not depend on two machines sharing an uptime"
     );
 }

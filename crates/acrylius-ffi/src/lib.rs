@@ -154,12 +154,31 @@ impl AcryliusCore {
         })
     }
 
-    /// The single entry point. `now_ms` is the host's monotonic clock, so
-    /// that moving the wall clock cannot extend a pairing window.
-    pub fn handle(&self, now_ms: u64, event: FfiEvent) -> Result<FfiOutcome, FfiError> {
+    /// The single entry point.
+    ///
+    /// Two clocks, and they are not interchangeable. `monotonic_ms` counts from
+    /// an arbitrary origin and only ever moves forward; it drives deadlines, so
+    /// that changing the system clock cannot extend a pairing window. `wall_ms`
+    /// is milliseconds since the Unix epoch, and is used for one thing only:
+    /// the handshake timestamp the other device compares against its own clock.
+    ///
+    /// Passing the monotonic clock for both means sending your *uptime* as a
+    /// timestamp, which every peer reads as wildly stale and refuses.
+    pub fn handle(
+        &self,
+        monotonic_ms: u64,
+        wall_ms: u64,
+        event: FfiEvent,
+    ) -> Result<FfiOutcome, FfiError> {
         let ev = event.try_into()?;
         let mut core = self.inner.lock().expect("core mutex poisoned");
-        let out = core.handle(now_ms, ev);
+        let out = core.handle(
+            acrylius_core::vocab::Now {
+                monotonic_ms,
+                wall_ms,
+            },
+            ev,
+        );
         Ok(FfiOutcome {
             actions: out.actions.into_iter().map(Into::into).collect(),
             next_deadline_ms: out.next_deadline_ms,

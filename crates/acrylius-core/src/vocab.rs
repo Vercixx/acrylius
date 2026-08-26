@@ -17,6 +17,28 @@ use crate::link::{LinkAttrs, LinkDownReason, LinkId, TransportId};
 use crate::proto::envelope::ErrorCode;
 use crate::proto::ids::{DeviceId, Fingerprint};
 
+/// The two clocks the core needs. They are not interchangeable, and a struct
+/// rather than two arguments so they cannot be transposed by accident.
+///
+/// Conflating them is not a hypothetical mistake. When the handshake timestamp
+/// was taken from the monotonic clock, it carried each device's *uptime* — so a
+/// computer up for hours and a phone just unlocked disagreed by hours, every
+/// session was refused as stale, and the only reason no test caught it was that
+/// every test started both cores in the same instant.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Now {
+    /// Milliseconds from an arbitrary origin that only ever moves forward.
+    ///
+    /// Deadlines only. It must not jump when the system clock is corrected, or
+    /// a pairing window could be extended by changing the time.
+    pub monotonic_ms: u64,
+    /// Milliseconds since the Unix epoch.
+    ///
+    /// Used for exactly one thing: the handshake timestamp two devices compare
+    /// against each other. Nothing local may depend on it.
+    pub wall_ms: u64,
+}
+
 /// Correlates an [`Action::Effect`] with the [`Event::EffectDone`] answering it.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct EffectToken(pub u64);

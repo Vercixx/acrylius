@@ -17,7 +17,7 @@ use crate::proto::handshake::{GreatestSeen, Hello};
 use crate::proto::ids::{DeviceId, Fingerprint};
 use crate::proto::pairing;
 use crate::vocab::{
-    Action, DialToken, EffectKind, EffectResult, EffectToken, Event, LocalCommand, Outcome,
+    Action, DialToken, EffectKind, EffectResult, EffectToken, Event, LocalCommand, Now, Outcome,
     Sensitivity, UiEvent,
 };
 
@@ -105,6 +105,9 @@ pub struct Core {
     next_token: u64,
     next_dial: u64,
     next_msg_id: u32,
+    /// Refreshed at every entry to `handle`, so the handshake timestamp is
+    /// always current without threading a second clock through every function.
+    wall_ms: u64,
     plugin_wake: Option<u64>,
 }
 
@@ -168,7 +171,11 @@ impl Core {
     }
 
     /// The single entry point.
-    pub fn handle(&mut self, now_ms: u64, ev: Event) -> Outcome {
+    pub fn handle(&mut self, now: Now, ev: Event) -> Outcome {
+        // Everything below works in monotonic milliseconds. The wall clock is
+        // stashed for the one thing that needs it — see `Now`.
+        self.wall_ms = now.wall_ms;
+        let now_ms = now.monotonic_ms;
         let mut out = Outcome::default();
         match ev {
             Event::LinkUp { link, attrs, dial } => {
@@ -228,10 +235,12 @@ impl Core {
         best
     }
 
-    fn hello(&self, now_ms: u64) -> Hello {
+    fn hello(&self, _now_ms: u64) -> Hello {
         Hello {
             v: crate::proto::WIRE_VERSION,
-            ts_ms: now_ms,
+            // Wall clock, not monotonic: the peer compares this against its own
+            // clock, and an uptime means nothing to anyone else.
+            ts_ms: self.wall_ms,
             device_id: self.device_id().to_string(),
             name: self.config.name.clone(),
             platform: self.config.platform.clone(),
@@ -434,7 +443,7 @@ impl Core {
                 match Handshake::session_responder(&self.identity, &psk) {
                     Ok(mut hs) => match hs.read(body) {
                         Ok(payload) => {
-                            if !self.accept_hello(now_ms, &id, &payload, out) {
+                            if !self.accept_hello(&id, &payload, out) {
                                 self.fail_link(link, "stale or replayed opener", out);
                                 return;
                             }
@@ -522,7 +531,7 @@ impl Core {
                 self.fail_link(link, "session handshake with no expected peer", out);
                 return;
             };
-            if !self.accept_hello(now_ms, &peer, &payload, out) {
+            if !self.accept_hello(&peer, &payload, out) {
                 self.fail_link(link, "stale or replayed response", out);
                 return;
             }
@@ -531,13 +540,7 @@ impl Core {
     }
 
     /// Validate a peer's Hello and advance its replay watermark.
-    fn accept_hello(
-        &mut self,
-        now_ms: u64,
-        peer: &DeviceId,
-        payload: &[u8],
-        out: &mut Outcome,
-    ) -> bool {
+    fn accept_hello(&mut self, peer: &DeviceId, payload: &[u8], out: &mut Outcome) -> bool {
         let Ok(hello) = minicbor::decode::<Hello>(payload) else {
             out.ui(UiEvent::Error {
                 code: ErrorCode::BadBody,
@@ -548,7 +551,7 @@ impl Core {
         let Some(rec) = self.peers.get_mut(peer) else {
             return false;
         };
-        match hello.check_freshness(now_ms, GreatestSeen(rec.greatest_seen)) {
+        match hello.check_freshness(self.wall_ms, GreatestSeen(rec.greatest_seen)) {
             Ok(seen) => {
                 rec.greatest_seen = seen.0;
                 rec.name = hello.name;
@@ -1331,6 +1334,7 @@ impl CoreBuilder {
             next_token: 0,
             next_dial: 0,
             next_msg_id: 0,
+            wall_ms: 0,
             plugin_wake: None,
         }
     }

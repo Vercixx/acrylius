@@ -108,6 +108,18 @@ public actor CoreRuntime {
     public func fingerprint() -> String { core.fingerprint() }
     public func pendingSas() -> String? { core.pendingSas() }
 
+    /// Milliseconds since the Unix epoch.
+    ///
+    /// For the handshake timestamp only. The peer compares it against its own
+    /// clock, so it has to be a clock they can both name — an uptime means
+    /// nothing to anyone else, and sending one had every session refused as
+    /// stale.
+    private func wallMs() -> UInt64 {
+        UInt64(max(0, Date().timeIntervalSince1970 * 1000))
+    }
+
+    /// Monotonic milliseconds since this runtime started. Deadlines only, so
+    /// that changing the system clock cannot extend a pairing window.
     private func nowMs() -> UInt64 {
         let elapsed = origin.duration(to: .now)
         let (seconds, attoseconds) = elapsed.components
@@ -117,7 +129,7 @@ public actor CoreRuntime {
     private func step(_ event: FfiEvent) async {
         let outcome: FfiOutcome
         do {
-            outcome = try core.handle(nowMs: nowMs(), event: event)
+            outcome = try core.handle(monotonicMs: nowMs(), wallMs: wallMs(), event: event)
         } catch {
             ui?.emit(.error(code: "bad_input", detail: String(describing: error)))
             return

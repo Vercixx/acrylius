@@ -13,7 +13,7 @@ print("service type:   \(serviceType())  port \(defaultPort())")
 print("caps in/out:    \(core.capsIn()) / \(core.capsOut())")
 
 // Open a pairing window and read back what the UI would show.
-let out = try! core.handle(nowMs: 1000, event: .openPairingWindow(code: "ABCD1234"))
+let out = try! core.handle(monotonicMs: 1000, wallMs: 1_700_000_000_000, event: .openPairingWindow(code: "ABCD1234"))
 for a in out.actions {
     if case let .ui(event) = a, case let .pairingWindowOpen(code, ms) = event {
         print("ui:             window open, code \(code), \(ms/1000)s")
@@ -25,7 +25,7 @@ print("pending sas:    \(core.pendingSas() ?? "none")")
 // A malformed device id must be refused at the boundary, not turned into a
 // lookup that quietly matches nothing.
 do {
-    _ = try core.handle(nowMs: 1001, event: .connect(peer: "not-a-device-id"))
+    _ = try core.handle(monotonicMs: 1001, wallMs: 1_700_000_000_000, event: .connect(peer: "not-a-device-id"))
     print("FAIL: bad device id was accepted")
 } catch {
     print("bad id refused: ok")
