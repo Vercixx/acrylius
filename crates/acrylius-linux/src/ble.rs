@@ -118,6 +118,12 @@ trait Adapter {
     fn roles(&self) -> zbus::Result<Vec<String>>;
 }
 
+#[zbus::proxy(interface = "org.bluez.Device1", default_service = "org.bluez")]
+trait Device {
+    #[zbus(property)]
+    fn connected(&self) -> zbus::Result<bool>;
+}
+
 // ------------------------------------------------------------------- the state
 
 /// One connected central.
@@ -171,6 +177,50 @@ fn device_and_mtu(options: &HashMap<String, OwnedValue>) -> (Option<String>, Opt
         .map(|p| p.as_str().to_string());
     let mtu = options.get("mtu").and_then(|v| u16::try_from(v).ok());
     (device, mtu)
+}
+
+/// Whether bluetoothd still has this device, and still calls it connected.
+///
+/// A missing object counts as gone, and that is the ordinary case rather than
+/// an error: an unbonded central is a temporary device, and bluetoothd removes
+/// temporary devices outright when they disconnect instead of leaving one
+/// behind marked `Connected = false`.
+///
+/// Asked without the property cache, because the answer is only worth having if
+/// it is current.
+async fn device_is_connected(conn: &zbus::Connection, path: &str) -> bool {
+    let Ok(path) = ObjectPath::try_from(path.to_string()) else {
+        return false;
+    };
+    let Ok(builder) = DeviceProxy::builder(conn).path(path) else {
+        return false;
+    };
+    match builder
+        .cache_properties(zbus::proxy::CacheProperties::No)
+        .build()
+        .await
+    {
+        Ok(dev) => dev.connected().await.unwrap_or(false),
+        Err(_) => false,
+    }
+}
+
+/// Retire the link, if this device is the one holding it.
+///
+/// Shared by every path that can learn a central went away, because the core
+/// must be told exactly once and the transport must not keep a link nobody is
+/// on the other end of.
+async fn drop_link_for(shared: &Shared, path: &str, why: &'static str) {
+    let mut guard = shared.link.lock().await;
+    if !guard.as_ref().is_some_and(|l| l.device == path) {
+        return;
+    }
+    let Some(l) = guard.take() else { return };
+    tracing::info!(device = %path, link = ?l.link, why, "BLE link down");
+    let _ = shared.sink.send(Event::LinkDown {
+        link: l.link,
+        reason: LinkDownReason::Closed,
+    });
 }
 
 // ------------------------------------------------------------- the advertisement
@@ -316,7 +366,12 @@ impl RxChr {
     /// first thing it sends is a handshake message — so the first write from a
     /// device we have no link for is exactly the moment the link exists, and it
     /// is the only callback that tells us which device we are talking to.
-    async fn write_value(&self, value: Vec<u8>, options: HashMap<String, OwnedValue>) {
+    async fn write_value(
+        &self,
+        value: Vec<u8>,
+        options: HashMap<String, OwnedValue>,
+        #[zbus(connection)] conn: &zbus::Connection,
+    ) {
         let (device, mtu) = device_and_mtu(&options);
         let Some(device) = device else {
             tracing::warn!("a write with no device; ignoring");
@@ -324,6 +379,30 @@ impl RxChr {
         };
 
         let mut guard = self.shared.link.lock().await;
+
+        // Retire a holder that is not there any more, before deciding whether
+        // to refuse this one.
+        //
+        // A phone does not have to say goodbye, and bluetoothd does not have to
+        // announce the departure in a form we caught: an unbonded device is
+        // removed outright rather than marked disconnected. Refusing on the
+        // strength of a link record alone means one missed signal wedges BLE
+        // until the daemon restarts — and since the phone comes back under a
+        // fresh random address, it is a *different* device path that gets
+        // turned away, so the wedge never clears itself. Asking is cheap and
+        // happens only when a second device appears.
+        let holder = match guard.as_ref() {
+            Some(l) if l.device != device => Some(l.device.clone()),
+            _ => None,
+        };
+        if let Some(holder) = holder
+            && !device_is_connected(conn, &holder).await
+        {
+            drop(guard);
+            drop_link_for(&self.shared, &holder, "the central is gone").await;
+            guard = self.shared.link.lock().await;
+        }
+
         match guard.as_ref() {
             Some(l) if l.device == device => {}
             Some(l) => {
@@ -566,6 +645,17 @@ impl Transport for BleTransport {
         // is under no obligation to say goodbye. Handled the way every other
         // signal in this crate is — a task that only ever sends into a channel,
         // never into the core.
+        //
+        // It arrives in two shapes, and one departure can raise both. An
+        // unbonded central is only ever a *temporary* device, and bluetoothd
+        // marks it `Connected = false` and then, seconds later on its own
+        // timeout, removes the object entirely — observed on this adapter as an
+        // `InterfacesRemoved` at `/` naming the path and `org.bluez.Device1`.
+        //
+        // Watching only the property change means a link outlives a phone that
+        // left without one; watching only the removal means waiting out the
+        // timeout. So both are watched and the retirement is idempotent, which
+        // is the part the tests pin.
         {
             let shared = shared.clone();
             let rule = zbus::MatchRule::builder()
@@ -595,18 +685,38 @@ impl Transport for BleTransport {
                     if still_connected != Some(false) {
                         continue;
                     }
-                    let mut guard = shared.link.lock().await;
-                    if guard.as_ref().is_some_and(|l| l.device == path) {
-                        let link = guard.as_ref().map(|l| l.link);
-                        *guard = None;
-                        if let Some(link) = link {
-                            tracing::info!(device = %path, ?link, "BLE link down");
-                            let _ = shared.sink.send(Event::LinkDown {
-                                link,
-                                reason: LinkDownReason::Closed,
-                            });
-                        }
+                    drop_link_for(&shared, &path, "the central disconnected").await;
+                }
+            });
+        }
+
+        // The other shape. `InterfacesRemoved` names the object path and the
+        // interfaces it lost, so an unbonded central that bluetoothd forgets
+        // still ends its link promptly rather than at whatever moment something
+        // else happens to notice.
+        {
+            let shared = shared.clone();
+            let rule = zbus::MatchRule::builder()
+                .msg_type(zbus::message::Type::Signal)
+                .sender("org.bluez")?
+                .interface("org.freedesktop.DBus.ObjectManager")?
+                .member("InterfacesRemoved")?
+                .build();
+            let mut stream = zbus::MessageStream::for_match_rule(rule, &conn, None).await?;
+            tokio::spawn(async move {
+                while let Some(Ok(msg)) = stream.next().await {
+                    // Owned, because the body it is deserialised from is a
+                    // temporary that does not outlive the call below.
+                    let Ok((path, ifaces)) = msg
+                        .body()
+                        .deserialize::<(zbus::zvariant::OwnedObjectPath, Vec<String>)>()
+                    else {
+                        continue;
+                    };
+                    if !ifaces.iter().any(|i| i == "org.bluez.Device1") {
+                        continue;
                     }
+                    drop_link_for(&shared, path.as_str(), "bluetoothd forgot the device").await;
                 }
             });
         }
@@ -756,6 +866,59 @@ mod tests {
             ("fp".to_string(), "abc".to_string()),
         ];
         assert_eq!(encode_identity(&txt), b"v=1\nfp=abc");
+    }
+
+    /// A `Shared` holding a link to `device`, plus the receiver to watch.
+    fn holding(device: &str) -> (Arc<Shared>, tokio::sync::mpsc::UnboundedReceiver<Event>) {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let id = TransportId(2);
+        let shared = Arc::new(Shared {
+            id,
+            sink: tx,
+            next_link: AtomicU64::new(1),
+            link: Mutex::new(None),
+            identity: Mutex::new(Vec::new()),
+        });
+        let link = shared.next_link();
+        *shared.link.try_lock().unwrap() = Some(Link {
+            link,
+            device: device.to_string(),
+            mtu: 517,
+            reassembler: frag::Reassembler::new(LinkAttrs::ble(id).max_message as usize),
+        });
+        (shared, rx)
+    }
+
+    #[tokio::test]
+    async fn a_departing_central_frees_the_link_for_the_next_one() {
+        // The phone comes back under a fresh random address, so if a departure
+        // is ever missed it is a *different* device path that gets refused and
+        // the transport never recovers on its own. This is the retirement that
+        // stops that, whichever signal carried the news.
+        let (shared, mut rx) = holding("/org/bluez/hci0/dev_75_C3_D4_C8_ED_AB");
+        drop_link_for(&shared, "/org/bluez/hci0/dev_75_C3_D4_C8_ED_AB", "gone").await;
+
+        assert!(shared.link.lock().await.is_none());
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Event::LinkDown {
+                reason: LinkDownReason::Closed,
+                ..
+            })
+        ));
+        // Exactly once: two signals can describe one departure, and the core
+        // must not be told a link died twice.
+        drop_link_for(&shared, "/org/bluez/hci0/dev_75_C3_D4_C8_ED_AB", "gone").await;
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn some_other_device_leaving_does_not_touch_our_link() {
+        let (shared, mut rx) = holding("/org/bluez/hci0/dev_75_C3_D4_C8_ED_AB");
+        drop_link_for(&shared, "/org/bluez/hci0/dev_AA_BB_CC_DD_EE_FF", "gone").await;
+
+        assert!(shared.link.lock().await.is_some());
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]
