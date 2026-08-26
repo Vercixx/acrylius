@@ -102,6 +102,14 @@ read from `user-dirs.dirs` — `Загрузки`, `Téléchargements`, or whate
 Hardcoding `~/Downloads` invents a second folder beside the real one and fills
 it with files nobody thinks to look in.
 
+Point it somewhere else and re-run `./scripts/install.sh`. The service runs
+under `ProtectHome=read-only`, so a directory it has not been told about fails
+with "read-only file system" the moment a file arrives; the installer asks the
+daemon which paths it needs and writes a drop-in naming them. The daemon also
+checks at startup, by writing something and deleting it, because a directory
+inside that sandbox is listable and correctly owned and still refuses writes —
+nothing short of trying reveals it.
+
 Waking needs no configuration. Every network card with real hardware behind it
 is found and handed to paired devices while this machine is awake, along with
 the address it routes over — which is what a phone aims at, since iOS cannot

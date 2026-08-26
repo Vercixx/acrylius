@@ -60,6 +60,20 @@ impl FileBulk {
         &self.dir
     }
 
+    /// Whether a file could actually be written here.
+    ///
+    /// Asked at startup, by writing something and removing it, because the
+    /// alternative is finding out during a transfer. The systemd unit runs
+    /// under `ProtectHome=read-only`, so a directory outside its
+    /// `ReadWritePaths=` exists, is listable, has the right owner and mode, and
+    /// still refuses every write — nothing short of trying reveals that.
+    pub fn writable(&self) -> Result<(), std::io::Error> {
+        let probe = self.dir.join(".acrylius-write-test");
+        std::fs::write(&probe, b"")?;
+        let _ = std::fs::remove_file(&probe);
+        Ok(())
+    }
+
     /// Note a file to send, and give the transfer its id.
     ///
     /// The path stays here. Nothing above this ever sees one, so no plugin and
@@ -297,6 +311,33 @@ mod tests {
         let first = b.offer(PathBuf::from("/a"), 1, "a".into(), String::new());
         let second = b.offer(PathBuf::from("/b"), 1, "b".into(), String::new());
         assert_ne!(first.transfer, second.transfer);
+        let _ = std::fs::remove_dir_all(b.dir());
+    }
+
+    /// The systemd unit runs under `ProtectHome=read-only`, and a directory
+    /// outside its `ReadWritePaths=` exists, lists, and has the right owner and
+    /// mode while refusing every write. Nothing short of trying reveals it, and
+    /// finding out halfway through receiving a file is how it was found.
+    #[test]
+    fn a_directory_that_cannot_be_written_to_says_so_before_a_transfer() {
+        let b = bulk_in("acr-files-w");
+        assert!(b.writable().is_ok(), "an ordinary directory");
+
+        let mut perms = std::fs::metadata(b.dir()).unwrap().permissions();
+        let readable = 0o555;
+        {
+            use std::os::unix::fs::PermissionsExt;
+            perms.set_mode(readable);
+        }
+        std::fs::set_permissions(b.dir(), perms).unwrap();
+        assert!(b.writable().is_err(), "and one nothing may write to");
+
+        let mut perms = std::fs::metadata(b.dir()).unwrap().permissions();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            perms.set_mode(0o755);
+        }
+        let _ = std::fs::set_permissions(b.dir(), perms);
         let _ = std::fs::remove_dir_all(b.dir());
     }
 

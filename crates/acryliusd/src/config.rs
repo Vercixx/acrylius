@@ -111,6 +111,39 @@ fn default_download_dir() -> String {
         .into_owned()
 }
 
+/// Whether a configured download directory looks like one an earlier version
+/// wrote by mistake, and what to do about it.
+///
+/// A narrow check on purpose. Somebody who deliberately chose a folder is not
+/// to be second-guessed, so this fires only on the exact shape the bug left
+/// behind: literally `$HOME/Downloads`, on a desktop whose downloads folder is
+/// called something else, with nothing in the English one. That combination is
+/// not a choice anybody made.
+#[must_use]
+pub fn stale_download_dir(configured: &str) -> Option<String> {
+    let home = PathBuf::from(std::env::var_os("HOME")?);
+    let english = home.join("Downloads");
+    if Path::new(configured) != english {
+        return None;
+    }
+    let real = xdg_user_dir("DOWNLOAD", &home)?;
+    if real == english || !real.is_dir() {
+        return None;
+    }
+    let empty = std::fs::read_dir(&english)
+        .map(|mut d| d.next().is_none())
+        .unwrap_or(true);
+    empty.then(|| {
+        format!(
+            "this desktop's downloads folder is {}, and nothing has ever been \
+             put in {}. An earlier version guessed the English name. Change \
+             share.directory if files should go where the rest of them do.",
+            real.display(),
+            english.display()
+        )
+    })
+}
+
 /// Read one entry out of `~/.config/user-dirs.dirs`.
 ///
 /// The file is shell syntax, but only barely: a line per directory, always

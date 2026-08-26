@@ -67,6 +67,14 @@ enum Command {
 enum ConfigAction {
     /// Print where the config file lives.
     Path,
+    /// Print every directory the daemon must be able to write to, one per line.
+    ///
+    /// For the systemd unit. It runs under `ProtectHome=read-only`, so anything
+    /// outside `ReadWritePaths=` fails with "read-only file system" at the
+    /// moment it is used rather than at startup — and the download directory is
+    /// a config setting, so no unit shipped in this repository can name it. The
+    /// installer asks instead.
+    WritablePaths,
     /// Write a commented config, if there is none. Never overwrites.
     Init,
     /// Add settings a newer version introduced, leaving everything else alone.
@@ -200,6 +208,17 @@ fn run_config_action(action: &ConfigAction, path: &std::path::Path) -> anyhow::R
     match action {
         ConfigAction::Path => println!("{}", path.display()),
 
+        ConfigAction::WritablePaths => {
+            // From the config as it stands, not from the defaults: somebody who
+            // pointed downloads somewhere else needs that path allowed, not the
+            // one they did not choose.
+            let cfg = config::Config::load(path).unwrap_or_default();
+            let dir = expand_home(&cfg.share.directory);
+            if !dir.as_os_str().is_empty() {
+                println!("{}", dir.display());
+            }
+        }
+
         ConfigAction::Init => {
             if path.exists() {
                 println!("{} exists; left alone", path.display());
@@ -262,6 +281,10 @@ fn run_config_action(action: &ConfigAction, path: &std::path::Path) -> anyhow::R
                     "using logind"
                 }
             );
+            println!("  files      land in {}", cfg.share.directory);
+            if let Some(note) = config::stale_download_dir(&cfg.share.directory) {
+                println!("  NOTE       {note}");
+            }
         }
     }
     Ok(())
@@ -332,7 +355,20 @@ async fn main() -> anyhow::Result<()> {
         (!cfg.share.advertise_host.is_empty()).then(|| cfg.share.advertise_host.clone()),
     ) {
         Ok(b) => {
-            tracing::info!(dir = %b.dir().display(), "files sent here land in");
+            // Checked now rather than during a transfer. Under the systemd
+            // unit's `ProtectHome=read-only` a directory outside
+            // `ReadWritePaths=` looks entirely normal until something writes to
+            // it, and the failure then arrives as "read-only file system" in
+            // the middle of receiving a file, pointing at nothing.
+            match b.writable() {
+                Ok(()) => tracing::info!(dir = %b.dir().display(), "files sent here land in"),
+                Err(e) => tracing::warn!(
+                    dir = %b.dir().display(), error = %e,
+                    "cannot write to the download directory, so no file can be received. \
+                     If this daemon runs under systemd, its unit has to allow that path: \
+                     re-run scripts/install.sh, which adds one for whatever share.directory says."
+                ),
+            }
             Some(Arc::new(b))
         }
         Err(e) => {

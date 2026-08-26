@@ -89,8 +89,14 @@ if [ -e "$CONFIG" ]; then
 else
     "$BIN_DIR/acryliusd" config init | sed 's/^/  /'
 fi
-"$BIN_DIR/acryliusd" config check >/dev/null 2>&1 \
-    || warn "the config does not parse; the service will refuse to start. Run: acryliusd config check"
+if CHECK="$("$BIN_DIR/acryliusd" config check 2>&1)"; then
+    # Where files land is worth saying out loud. It is the one setting whose
+    # being wrong looks like a broken feature rather than a wrong setting: files
+    # arrive, and nobody can find them.
+    echo "$CHECK" | grep -E '^  (files|NOTE)' | sed 's/^  /  /'
+else
+    warn "the config does not parse; the service will refuse to start. Run: acryliusd config check"
+fi
 
 # --- service -----------------------------------------------------------------
 
@@ -98,6 +104,32 @@ step "Service"
 mkdir -p "$UNIT_DIR"
 install -m 644 "systemd/$UNIT" "$UNIT_DIR/$UNIT"
 say "$UNIT_DIR/$UNIT"
+
+# The unit runs under ProtectHome=read-only, so anything the daemon writes to
+# has to be named in ReadWritePaths= or it fails with "read-only file system"
+# at the moment it is used — which for a download directory means halfway
+# through receiving a file.
+#
+# The shipped unit cannot name it: where downloads go is a config setting, and
+# on this desktop that folder may be called Загрузки or Téléchargements or
+# anything else. So the daemon is asked, and the answer becomes a drop-in.
+# Rewritten on every run, so moving the directory and re-running is enough.
+DROPIN_DIR="$UNIT_DIR/$UNIT.d"
+mkdir -p "$DROPIN_DIR"
+{
+    echo "# Written by scripts/install.sh from share.directory. Edit the config,"
+    echo "# not this file, and run the installer again."
+    echo "[Service]"
+    "$BIN_DIR/acryliusd" config writable-paths | while read -r p; do
+        [ -n "$p" ] || continue
+        # A leading '-' so a directory that is not there yet is not a reason
+        # for the whole service to refuse to start.
+        echo "ReadWritePaths=-$p"
+    done
+} > "$DROPIN_DIR/writable.conf"
+chmod 644 "$DROPIN_DIR/writable.conf"
+grep '^ReadWritePaths=' "$DROPIN_DIR/writable.conf" | sed 's/^ReadWritePaths=-*/  may write to /'
+
 systemctl --user daemon-reload
 
 # A daemon someone started by hand holds the port, and the service would then
