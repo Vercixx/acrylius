@@ -5,9 +5,12 @@ import SwiftUI
 struct DeviceListView: View {
     @Environment(AppModel.self) private var model
     @State private var showPair = false
+    /// Device ids. A path rather than plain links so a widget tap can push a
+    /// computer's screen without the user finding it in the list.
+    @State private var path: [String] = []
 
     var body: some View {
-        NavigationStack {
+        NavigationStack(path: $path) {
             List {
                 Section {
                     if model.peers.isEmpty {
@@ -18,9 +21,7 @@ struct DeviceListView: View {
                         )
                     } else {
                         ForEach(model.peers, id: \.deviceId) { peer in
-                            NavigationLink {
-                                DeviceView(peer: peer)
-                            } label: {
+                            NavigationLink(value: peer.deviceId) {
                                 PeerRow(peer: peer)
                             }
                         }
@@ -42,11 +43,30 @@ struct DeviceListView: View {
                 }
             }
             .navigationTitle("Acrylius")
+            .navigationDestination(for: String.self) { deviceId in
+                if let peer = model.peers.first(where: { $0.deviceId == deviceId }) {
+                    DeviceView(peer: peer)
+                } else {
+                    // A widget can outlive the pairing it was made for.
+                    ContentUnavailableView(
+                        "Not paired",
+                        systemImage: "desktopcomputer.trianglebadge.exclamationmark",
+                        description: Text("This computer is no longer paired with this phone.")
+                    )
+                }
+            }
             .toolbar {
                 Button("Pair", systemImage: "plus") { showPair = true }
             }
             .sheet(isPresented: $showPair) { PairView() }
             .sheet(isPresented: .constant(model.pairingSas != nil)) { ConfirmPairingView() }
+        }
+        .onOpenURL { url in
+            // acrylius://peer/<device-id>, which is what a widget carries.
+            guard url.scheme == "acrylius", url.host == "peer" else { return }
+            let deviceId = url.lastPathComponent
+            guard !deviceId.isEmpty else { return }
+            path = [deviceId]
         }
     }
 }

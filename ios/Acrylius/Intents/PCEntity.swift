@@ -30,7 +30,14 @@ struct PCQuery: EntityQuery {
     ///
     /// An intent runs in a short-lived process, and listing what is paired needs
     /// no network at all: the records are already on disk.
+    ///
+    /// The snapshot is tried first, and not only because it is cheaper. A widget
+    /// runs in a process with no Keychain access and no identity, so building a
+    /// core there is not merely wasteful — it returns nothing at all.
     func suggestedEntities() async throws -> [PCEntity] {
+        if let snapshot = SnapshotStore.load(), !snapshot.peers.isEmpty {
+            return snapshot.peers.map { PCEntity(id: $0.deviceId, name: $0.name) }
+        }
         let store = try KeychainStore()
         guard let key = store.identityKey() else { return [] }
         let core = try AcryliusCore(

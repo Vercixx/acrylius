@@ -555,6 +555,12 @@ choice with the side that has already agreed to receive.
 An `offer` is never accepted automatically unless a host is configured to. It is
 announced, and a person answers.
 
+A device with nowhere to put a file answers `not_allowed` immediately instead,
+without announcing anything. It still advertises the capability — withdrawing it
+would mean nobody could be sent a file *by* that device either, and would break
+replies — but a device that cannot ask a person must not sit on an offer, because
+there is no later moment at which an answer could arrive.
+
 #### The bulk connection
 
 The bytes go over a separate connection to the `endpoint` in `accept`, framed as

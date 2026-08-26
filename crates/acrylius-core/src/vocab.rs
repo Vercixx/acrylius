@@ -260,6 +260,42 @@ pub enum EffectKind {
     Custom,
 }
 
+/// What a host can actually carry out, as a set.
+///
+/// A plugin registers on every device and negotiates down, so "can this machine
+/// do the thing behind this capability" is a question it has to be able to ask
+/// — a phone has no desktop session to lock and nowhere to put a file, and
+/// refusing a request it can never serve is better than accepting one and
+/// leaving the far end waiting for an answer that is not coming.
+///
+/// A bitmask rather than a slice because a `Cx` is built for every message and
+/// carrying this must not mean an allocation for every message.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub struct EffectSet(u16);
+
+impl EffectSet {
+    #[must_use]
+    pub fn new(kinds: impl IntoIterator<Item = EffectKind>) -> Self {
+        Self(kinds.into_iter().fold(0, |set, k| set | Self::bit(k)))
+    }
+
+    /// Everything. For a host that has not said otherwise, and for tests that
+    /// are not about this.
+    #[must_use]
+    pub fn all() -> Self {
+        Self(u16::MAX)
+    }
+
+    #[must_use]
+    pub fn contains(self, kind: EffectKind) -> bool {
+        self.0 & Self::bit(kind) != 0
+    }
+
+    const fn bit(kind: EffectKind) -> u16 {
+        1 << (kind as u16)
+    }
+}
+
 impl Effect {
     #[must_use]
     pub fn kind(&self) -> EffectKind {

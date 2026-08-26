@@ -112,6 +112,9 @@ pub struct Core {
     /// relay to a plugin that will refuse. Every device advertises the full set;
     /// this is what separates "can do" from "can ask for".
     caps_served: Vec<String>,
+    /// The same fact as `caps_served`, in the form a plugin asks about it: what
+    /// this machine can carry out, handed to every `Cx`.
+    serves: crate::vocab::EffectSet,
     next_token: u64,
     next_dial: u64,
     next_msg_id: u32,
@@ -654,7 +657,7 @@ impl Core {
             name,
         });
 
-        let mut cx = Cx::new(now_ms, self.next_token);
+        let mut cx = Cx::new(now_ms, self.next_token, self.serves);
         for p in &mut self.plugins {
             p.on_peer_connected(&mut cx, &peer);
         }
@@ -876,7 +879,7 @@ impl Core {
             return;
         };
 
-        let mut cx = Cx::new(now_ms, self.next_token);
+        let mut cx = Cx::new(now_ms, self.next_token, self.serves);
         let result = self.plugins[idx].on_message(&mut cx, &peer, &env);
         self.next_token = cx.next_token;
         self.remember_owner(&cx, idx);
@@ -1197,7 +1200,7 @@ impl Core {
                     return;
                 };
                 tracing::debug!(%peer, %cap, %ty, "local plugin command");
-                let mut cx = Cx::new(now_ms, self.next_token);
+                let mut cx = Cx::new(now_ms, self.next_token, self.serves);
                 let r = self.plugins[idx].on_local(&mut cx, &peer, &ty, &body);
                 self.next_token = cx.next_token;
                 self.remember_owner(&cx, idx);
@@ -1251,7 +1254,7 @@ impl Core {
         let Some(&idx) = self.bulk_owner.get(&transfer) else {
             return;
         };
-        let mut cx = Cx::new(now_ms, self.next_token);
+        let mut cx = Cx::new(now_ms, self.next_token, self.serves);
         f(&mut self.plugins[idx], &mut cx);
         self.next_token = cx.next_token;
         self.remember_owner(&cx, idx);
@@ -1268,7 +1271,7 @@ impl Core {
         let Some(idx) = self.effect_owner.remove(&token) else {
             return;
         };
-        let mut cx = Cx::new(now_ms, self.next_token);
+        let mut cx = Cx::new(now_ms, self.next_token, self.serves);
         self.plugins[idx].on_effect_result(&mut cx, token, result);
         self.next_token = cx.next_token;
         self.remember_owner(&cx, idx);
@@ -1316,7 +1319,7 @@ impl Core {
             && now_ms >= w
         {
             self.plugin_wake = None;
-            let mut cx = Cx::new(now_ms, self.next_token);
+            let mut cx = Cx::new(now_ms, self.next_token, self.serves);
             for p in &mut self.plugins {
                 p.on_tick(&mut cx);
             }
@@ -1330,7 +1333,7 @@ impl Core {
             out.ui(UiEvent::PeerUnreachable {
                 peer: u.peer.clone(),
             });
-            let mut cx = Cx::new(now_ms, self.next_token);
+            let mut cx = Cx::new(now_ms, self.next_token, self.serves);
             for p in &mut self.plugins {
                 p.on_peer_disconnected(&mut cx, &u.peer);
             }
@@ -1463,6 +1466,7 @@ impl CoreBuilder {
             caps_out,
             caps_in,
             caps_served,
+            serves: crate::vocab::EffectSet::new(self.effects.iter().copied()),
             next_token: 0,
             next_dial: 0,
             next_msg_id: 0,

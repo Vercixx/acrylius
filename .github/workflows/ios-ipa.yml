@@ -74,13 +74,69 @@ jobs:
 
       - name: Ad-hoc sign
         run: |
+          set -euo pipefail
           app="$(ls -d build/Build/Products/Release-iphoneos/*.app | head -n1)"
-          # Nested code first, then the bundle. Signing the outside first would
-          # be invalidated by everything signed after it.
+          # Depth first: nested code, then extensions, then the app. Signing the
+          # outside first would be invalidated by everything signed after it.
+          #
+          # Entitlements are passed explicitly at every level. The build ran
+          # with CODE_SIGNING_ALLOWED=NO, so nothing is embedded yet, and a
+          # plain `codesign --sign -` would produce a signature with none —
+          # which is not a build failure, it is a widget that installs and can
+          # never see the app's data.
           find "$app" -depth \( -name "*.framework" -o -name "*.dylib" \) \
             -exec codesign --force --sign - {} \;
-          codesign --force --sign - "$app"
-          codesign -d --entitlements :- "$app" || true
+          for appex in "$app"/PlugIns/*.appex; do
+            [ -e "$appex" ] || continue
+            echo "signing $(basename "$appex")"
+            codesign --force --sign - \
+              --entitlements ios/Acrylius/Widgets/AcryliusWidgets.entitlements "$appex"
+          done
+          codesign --force --sign - \
+            --entitlements ios/Acrylius/Acrylius.entitlements "$app"
+
+      - name: The entitlements must be in the signature
+        run: |
+          set -euo pipefail
+          app="$(ls -d build/Build/Products/Release-iphoneos/*.app | head -n1)"
+          group="$(grep -oE 'group\.[a-z.]+' ios/Acrylius/Acrylius.entitlements | head -1)"
+          echo "looking for $group"
+          # AltStore and SideStore read entitlements out of the code signature
+          # with ldid, never from a file beside the IPA. One that is missing
+          # here is one the installer will never request, and the failure lands
+          # on the phone as a widget that is silently empty forever.
+          fail=0
+          for bundle in "$app" "$app"/PlugIns/*.appex; do
+            [ -e "$bundle" ] || continue
+            name="$(basename "$bundle")"
+            if codesign -d --entitlements :- "$bundle" 2>/dev/null | grep -q "$group"; then
+              echo "  ok   $name"
+            else
+              echo "  FAIL $name has no $group in its signature"
+              codesign -d --entitlements :- "$bundle" 2>&1 | head -20 || true
+              fail=1
+            fi
+          done
+          exit $fail
+
+      - name: The widget must actually be in there
+        run: |
+          set -euo pipefail
+          app="$(ls -d build/Build/Products/Release-iphoneos/*.app | head -n1)"
+          # An extension that failed to embed is not a build error. It is a
+          # widget that never appears in the gallery, with nothing to explain it.
+          test -d "$app/PlugIns/AcryliusWidgets.appex" || {
+            echo "no widget extension in the app bundle"; ls -R "$app" | head -40; exit 1
+          }
+          # Both binaries link the same Rust core. If that ever stops being true
+          # there are two protocol implementations again, which is the one thing
+          # this project exists to prevent.
+          for bin in "$app/$(basename "$app" .app)" \
+                     "$app/PlugIns/AcryliusWidgets.appex/AcryliusWidgets"; do
+            echo "$(basename "$bin"): $(lipo -info "$bin")"
+            nm -U "$bin" 2>/dev/null | grep -c uniffi_acrylius_ffi \
+              | xargs -I{} echo "  {} uniffi symbols"
+          done
 
       - name: Verify it is a device build
         run: |
@@ -92,13 +148,6 @@ jobs:
           if lipo -info "$bin" | grep -q x86_64; then
             echo "simulator architecture in a device build"; exit 1
           fi
-
-      # NOTE: M1 declares no entitlements, so there is nothing to verify yet.
-      # When the first one arrives (an App Group for a widget), it MUST be
-      # embedded in each bundle's Mach-O signature and checked here. AltStore
-      # and SideStore read entitlements out of the code signature via ldid,
-      # never from a file beside the IPA, so an entitlement missing there is
-      # one the installer will never request, silently.
 
       - name: Package
         run: |

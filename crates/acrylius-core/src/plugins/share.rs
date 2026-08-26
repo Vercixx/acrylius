@@ -148,6 +148,14 @@ impl Plugin for SharePlugin {
     ) -> Result<(), PluginError> {
         match env.ty {
             "offer" => {
+                // A device with nowhere to put a file says so now, while the
+                // sender is still listening. It cannot wait for a person to
+                // decide, because there is no way for one to say yes: a phone
+                // has no download directory and the capability is advertised
+                // only so this refusal can be sent at all.
+                if !cx.serves(EffectKind::Share) {
+                    return Err(PluginError::NotAllowed);
+                }
                 let offer: Offer = minicbor::decode(env.body).map_err(|_| PluginError::BadBody)?;
                 if offer.size > MAX_BYTES {
                     return Err(PluginError::TooLarge);

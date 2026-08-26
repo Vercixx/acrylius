@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- The only entitlement this project asks for, and the only one it can
+         ask for: a free Apple account has no multicast, no push, no associated
+         domains. It must match the group in SharedContainer.swift and in the
+         widget's entitlements exactly.
+
+         Whether a free account can register an App Group at all is the thing
+         this milestone is here to find out. The code does not depend on the
+         answer — SharedContainer falls back to this process's own container —
+         so a build where it is refused still runs, with a widget that says it
+         has nothing to show. -->
+    <key>com.apple.security.application-groups</key>
+    <array>
+        <string>group.org.acrylius</string>
+    </array>
+</dict>
+</plist>

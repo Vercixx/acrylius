@@ -9,18 +9,20 @@ options:
   deploymentTarget:
     iOS: "17.0"
   createIntermediateGroups: true
-  # Every extension is another App ID against a free account's ten per week,
-  # and SideStore has been observed silently removing extensions on upgrade.
-  # M1 ships none; App Intents live in the app target and need no entitlement.
+  # One extension, and it costs: another App ID against a free account's ten per
+  # week, and SideStore has been observed removing extensions on upgrade. It
+  # earns that by being the proof of the thing this project is for — the widget
+  # links the same libacrylius_ffi.a the app does, so there is one compiled
+  # protocol in two processes and no Swift source kept in step between them.
 
 settings:
   base:
     SWIFT_VERSION: "6.0"
     SWIFT_STRICT_CONCURRENCY: complete
     ENABLE_USER_SCRIPT_SANDBOXING: NO
-    # No entitlements are required in M1: no App Group (no extensions), and no
-    # multicast (the phone dials and never broadcasts). The ad-hoc signing step
-    # in CI stays anyway, so it is already correct the day one is added.
+    # Ad-hoc signed in CI. The entitlements below must end up in each bundle's
+    # Mach-O signature, because that is the only place SideStore reads them
+    # from — an entitlement in a file beside the IPA is one nothing requests.
     CODE_SIGNING_ALLOWED: NO
     CODE_SIGNING_REQUIRED: NO
     CODE_SIGN_IDENTITY: ""
@@ -29,8 +31,17 @@ targets:
   Acrylius:
     type: application
     platform: iOS
+    dependencies:
+      # Embeds and signs the .appex inside the .app. Without this the extension
+      # builds and is never installed, which looks exactly like a widget iOS
+      # refuses to offer.
+      - target: AcryliusWidgets
     sources:
       - path: Acrylius
+        excludes:
+          # The widget bundle has its own @main. Two in one module do not
+          # compile, and the error names neither file usefully.
+          - "Widgets/**"
       # UniFFI output. Produced by the build, so it is gitignored; the CI step
       # that generates it runs before xcodegen.
       #
@@ -44,9 +55,49 @@ targets:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: org.acrylius.app
         INFOPLIST_FILE: Acrylius/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Acrylius/Acrylius.entitlements
         # The Rust staticlib, plus the C header and modulemap UniFFI emits
         # beside the Swift. No XCFramework: that exists to bundle several
         # platform slices, and device-only arm64 is one.
+        LIBRARY_SEARCH_PATHS:
+          - $(inherited)
+          - $(SRCROOT)/Generated
+        SWIFT_INCLUDE_PATHS:
+          - $(inherited)
+          - $(SRCROOT)/Generated
+        OTHER_LDFLAGS:
+          - $(inherited)
+          - -lacrylius_ffi
+        TARGETED_DEVICE_FAMILY: "1,2"
+
+  AcryliusWidgets:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: Acrylius/Runtime
+        excludes:
+          # Reads and writes the pasteboard, which an extension has no business
+          # doing and may not be allowed to compile against. The widget builds
+          # no core with effects, so nothing here wants it.
+          - "IosEffector.swift"
+      - path: Acrylius/Intents
+        excludes:
+          # An app and its extension may not each declare an
+          # AppShortcutsProvider. The intents themselves are shared; these are
+          # the app's phrases.
+          - "Shortcuts.swift"
+      - path: Acrylius/Widgets
+      # The same generated binding and, through OTHER_LDFLAGS below, the same
+      # static library. This is the whole point of the Rust core: two targets
+      # that each compile on their own, sharing one compiled protocol rather
+      # than two copies of a Swift file that must agree field for field.
+      - path: Generated/acrylius_ffi.swift
+        optional: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: org.acrylius.app.widgets
+        INFOPLIST_FILE: Acrylius/Widgets/Info.plist
+        CODE_SIGN_ENTITLEMENTS: Acrylius/Widgets/AcryliusWidgets.entitlements
         LIBRARY_SEARCH_PATHS:
           - $(inherited)
           - $(SRCROOT)/Generated

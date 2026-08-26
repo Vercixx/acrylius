@@ -51,6 +51,74 @@ echo "$schemes" | grep -qx Acrylius || {
     exit 1
 }
 
+PBX=ios/Acrylius.xcodeproj/project.pbxproj
+
+echo
+echo "targets:"
+targets=$(grep -oE 'PBXNativeTarget "[A-Za-z]+"' "$PBX" | cut -d'"' -f2 | sort -u)
+echo "$targets" | sed 's/^/  /'
+for want in Acrylius AcryliusWidgets; do
+    echo "$targets" | grep -qx "$want" || {
+        echo "  missing target $want"; rm -rf ios/Acrylius.xcodeproj; exit 1
+    }
+done
+
+# Which target compiles what. A build file appears twice per target it is in:
+# once as a definition and once in that target's Sources phase. So 2 is one
+# target, 4 is both.
+#
+# All three of these are silent when wrong. Two @main in one module does at
+# least fail the build, but it names neither file; the other two produce an app
+# that builds and misbehaves — duplicate Siri phrases, or an extension
+# compiling against pasteboard APIs it has no business touching.
+echo
+echo "target membership:"
+membership() {
+    local count; count=$(grep -c "$1 in Sources" "$PBX" || true)
+    case "$count" in
+        2) echo "one target" ;;
+        4) echo "both targets" ;;
+        *) echo "$((count / 2)) targets" ;;
+    esac
+}
+for pair in "AcryliusWidget.swift:one target" "Shortcuts.swift:one target" \
+            "IosEffector.swift:one target" "PCEntity.swift:both targets" \
+            "SharedContainer.swift:both targets"; do
+    file=${pair%%:*}; want=${pair#*:}
+    got=$(membership "$file")
+    printf '  %-24s %s\n' "$file" "$got"
+    [ "$got" = "$want" ] || {
+        echo "    expected $want"; rm -rf ios/Acrylius.xcodeproj; exit 1
+    }
+done
+
+# An extension that is built but never embedded looks, on the phone, exactly
+# like a widget iOS declines to offer: no error, no widget in the gallery.
+grep -q 'AcryliusWidgets.appex in Embed' "$PBX" || {
+    echo
+    echo "the widget is not embedded in the app"
+    rm -rf ios/Acrylius.xcodeproj; exit 1
+}
+
 rm -rf ios/Acrylius.xcodeproj
+
+# The App Group is named in three places and all three must agree. A typo in
+# any of them builds, installs, runs, and produces a widget that is empty
+# forever with nothing anywhere saying why — so it is checked here, where it
+# costs nothing, rather than discovered on a device.
+echo
+echo "app group:"
+group_in() { grep -oE 'group\.[a-z.]+' "$1" | head -1; }
+app_group=$(group_in ios/Acrylius/Acrylius.entitlements)
+widget_group=$(group_in ios/Acrylius/Widgets/AcryliusWidgets.entitlements)
+code_group=$(group_in ios/Acrylius/Runtime/SharedContainer.swift)
+echo "  app         $app_group"
+echo "  widget      $widget_group"
+echo "  source      $code_group"
+if [ -z "$app_group" ] || [ "$app_group" != "$widget_group" ] || [ "$app_group" != "$code_group" ]; then
+    echo "  they must all be the same"
+    exit 1
+fi
+
 echo
 echo "project.yml is valid."

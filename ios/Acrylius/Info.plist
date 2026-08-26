@@ -74,6 +74,21 @@
     <key>NSFaceIDUsageDescription</key>
     <string>Face ID confirms it is you before unlocking your PC.</string>
 
+    <!-- What a widget tap opens: acrylius://peer/<device-id>. Registered here
+         and nowhere else, so it is not a URL any other app is invited to use;
+         the scheme carries a device id and nothing actionable. -->
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>org.acrylius.app</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>acrylius</string>
+            </array>
+        </dict>
+    </array>
+
     <!-- Raw NWConnection is not subject to App Transport Security, which
          governs URLSession and CFNetwork; no ATS exception is needed. -->
     <key>ITSAppUsesNonExemptEncryption</key>

@@ -28,7 +28,7 @@ use acrylius_core::config::CoreConfig;
 use acrylius_core::core::{Core, CoreBuilder};
 use acrylius_core::noise::Identity;
 use acrylius_core::peer::{PeerRecord, PeerState};
-use acrylius_core::plugins::{clipboard, command, media, ping, session, wol};
+use acrylius_core::plugins::{clipboard, command, media, ping, session, share, wol};
 
 pub use bodies::*;
 pub use types::*;
@@ -177,6 +177,12 @@ impl AcryliusCore {
         // A phone plays its own audio through its own controls. It registers
         // this to drive a computer's players, not to offer its own.
         .plugin(media::MediaPlugin::default())
+        // Registered without an `EffectKind::Share` to serve it, which is the
+        // difference between "cannot" and "does not answer". A computer that
+        // offers this phone a file gets a refusal it can show a person; without
+        // the registration it would get silence and a capability the phone
+        // never admitted to knowing about.
+        .plugin(share::SharePlugin::default())
         .restore(records)
         .build();
         Ok(Self {

@@ -801,6 +801,74 @@ fn rejecting_an_offer_tells_the_sender_and_opens_nothing() {
 }
 
 #[test]
+fn a_device_with_nowhere_to_put_a_file_refuses_at_once() {
+    // The phone's shape: it registers the plugin and advertises the capability
+    // — otherwise a computer's `send` would fail with `cap_not_negotiated` and
+    // it could never send files either — but it has no download directory and
+    // no way to ask a person. Accepting the offer into a queue nobody can drain
+    // would leave the sender waiting on an answer that is never coming.
+    let phone = CoreBuilder::new(
+        Identity::generate().unwrap(),
+        CoreConfig {
+            name: "phone".to_string(),
+            platform: "test".to_string(),
+            ..Default::default()
+        },
+    )
+    // No EffectKind::Share. That is the whole difference.
+    .plugin(ping::PingPlugin::default())
+    .plugin(acrylius_core::plugins::share::SharePlugin::default())
+    .build();
+
+    assert!(
+        phone.caps_in().iter().any(|c| c == share::CAP),
+        "still advertised, or a computer could not be sent files by it either"
+    );
+    assert!(
+        !phone.caps_served().iter().any(|c| c == share::CAP),
+        "but not as something it can act on"
+    );
+
+    let pc = sharing_core("pc");
+    let pc_id = pc.device_id();
+    let mut net = Net::new(phone, pc);
+    net.local(
+        Side::B,
+        LocalCommand::OpenPairingWindow {
+            code: CODE.to_string(),
+        },
+    );
+    net.local(
+        Side::A,
+        LocalCommand::RequestPairing {
+            transport: TRANSPORT,
+            addr: Side::B.addr().to_string(),
+            code: CODE.to_string(),
+        },
+    );
+    net.local(Side::A, LocalCommand::ConfirmPairing { accept: true });
+    net.local(Side::B, LocalCommand::ConfirmPairing { accept: true });
+    net.local(
+        Side::A,
+        LocalCommand::Connect {
+            peer: pc_id.clone(),
+        },
+    );
+
+    let phone_id = net.a.device_id();
+    plugin(&mut net, Side::B, &phone_id, "offer", offer_body(1, 4096));
+
+    assert!(net.bulk_keys.is_empty(), "nothing was listened for");
+    assert!(
+        net.saw(
+            Side::B,
+            |e| matches!(e, UiEvent::Plugin { ty, .. } if ty == "err")
+        ),
+        "the computer is told now, not in an hour"
+    );
+}
+
+#[test]
 fn an_endpoint_nobody_offered_is_not_dialled() {
     // Somewhere to connect, chosen by the other end. Accepting one for a
     // transfer this device never offered would let a peer point it anywhere.

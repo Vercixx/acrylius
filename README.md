@@ -132,9 +132,26 @@ it. There is no push, so a computer can reach the phone only while the app is
 open, and every feature here is therefore phone-initiated. There is no multicast
 entitlement, so the phone never broadcasts: it aims a wake packet at the last
 known address, which works because a network interface matches the packet's
-payload and ignores where it was sent. And App IDs are limited per week, so the
-app ships no extensions at all; the Shortcuts actions live in the app target,
-where they need no entitlement.
+payload and ignores where it was sent.
+
+There is one extension, a Home Screen widget, and it costs another App ID
+against a weekly limit of ten. It earns that by being the proof of the whole
+idea: the widget links the same compiled Rust core the app does, so two
+processes share one implementation of the protocol rather than two copies of a
+Swift file that have to agree field for field. That is exactly what went wrong
+in the project this replaces.
+
+The widget draws what the app saw last and says how long ago. It does not
+connect to anything — it has no session, and a computer cannot reach a phone
+whose app is closed anyway — so a live "connected" dot would be a claim nobody
+had checked. Its one button is Wake, which needs no session at all. Everything
+else opens the app.
+
+Sharing data with an extension needs an App Group, and whether a free Apple
+account can register one is not settled. Nothing depends on the answer: when
+there is no group the app uses its own container and works exactly as before,
+"This device" reports **Widget data: Not shared**, and the widget says so rather
+than sitting there empty.
 
 ## Security
 

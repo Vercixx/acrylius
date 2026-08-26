@@ -251,6 +251,40 @@ check(catalog["p"].clipboard == "hello from the pc", "a clipboard value is kept"
 
 check(!catalog["p"].canWake, "a peer that never offered wake targets cannot be woken")
 
+// --- the widget's snapshot ---------------------------------------------
+// The widget renders this and nothing else. It runs in a process that can
+// open no session, so anything wrong here is a widget that is confidently
+// wrong with no way to notice.
+SnapshotStore.save(peers: [
+    PeerSnapshot(deviceId: "p", name: "desktop", platform: "linux",
+                 lastSeen: Date(timeIntervalSince1970: 1000), locked: false,
+                 canWake: true, nowPlaying: "Someone — A Song"),
+])
+let first = SnapshotStore.load()
+check(first?.peers.count == 1, "a snapshot round-trips")
+check(first?.peers.first?.nowPlaying == "Someone — A Song", "and what was playing")
+check(first?.shared == SharedContainer.isShared, "and says whether it is shared at all")
+
+// A peer that is not reachable right now keeps the time it last was. The
+// running app is the only thing that ever knows, so losing it on the next
+// write would mean a widget that can only ever say "open the app".
+SnapshotStore.save(peers: [
+    PeerSnapshot(deviceId: "p", name: "desktop", platform: "linux",
+                 lastSeen: nil, locked: true, canWake: true),
+])
+let second = SnapshotStore.load()
+check(second?.peers.first?.lastSeen == Date(timeIntervalSince1970: 1000),
+      "an unreachable peer keeps when it was last seen")
+check(second?.peers.first?.locked == true, "while everything else is replaced")
+
+// A peer that came back sets a new time rather than keeping the old one.
+SnapshotStore.save(peers: [
+    PeerSnapshot(deviceId: "p", name: "desktop", platform: "linux",
+                 lastSeen: Date(timeIntervalSince1970: 2000), canWake: true),
+])
+check(SnapshotStore.load()?.peers.first?.lastSeen == Date(timeIntervalSince1970: 2000),
+      "and a peer seen again moves it forward")
+
 await alpha.stop(); await bravo.stop(); await mallory.stop()
 
 print(failures == 0 ? "\nall passed" : "\n\(failures) FAILED")

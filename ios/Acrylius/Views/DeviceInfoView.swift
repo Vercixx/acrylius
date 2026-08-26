@@ -46,6 +46,24 @@ struct DeviceInfoView: View {
                         + "a phone has no desktop session to lock, and runs nothing on request."
                 )
             }
+            Section {
+                LabeledContent("Widget data") {
+                    Text(SharedContainer.isShared ? "Shared" : "Not shared")
+                        .foregroundStyle(SharedContainer.isShared ? .secondary : .red)
+                }
+            } header: {
+                Text("Widget")
+            } footer: {
+                // Nothing in the app reports this failing, because nothing in
+                // the app fails: it falls back to its own container and works.
+                // Only the widget notices, and a widget cannot tell anyone.
+                Text(
+                    SharedContainer.isShared
+                        ? "The widget can see this app's data."
+                        : "This build has no App Group, so the widget will stay empty. "
+                            + "A free Apple account may not be able to register one."
+                )
+            }
         }
         .navigationTitle("This device")
         .navigationBarTitleDisplayMode(.inline)

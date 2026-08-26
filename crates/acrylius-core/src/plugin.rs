@@ -87,6 +87,8 @@ pub struct Cx {
     /// Bulk transfers this plugin asked to start, filled in with a key by the
     /// core once it knows which session they belong to.
     pub(crate) bulk: Vec<BulkRequest>,
+    /// What this host can carry out. See [`Cx::serves`].
+    serves: crate::vocab::EffectSet,
 }
 
 /// A plugin asking for a side channel.
@@ -114,7 +116,7 @@ pub enum BulkRequest {
 }
 
 impl Cx {
-    pub(crate) fn new(now_ms: u64, next_token: u64) -> Self {
+    pub(crate) fn new(now_ms: u64, next_token: u64, serves: crate::vocab::EffectSet) -> Self {
         Self {
             now_ms,
             next_token,
@@ -123,7 +125,20 @@ impl Cx {
             ui: Vec::new(),
             wake_at: None,
             bulk: Vec::new(),
+            serves,
         }
+    }
+
+    /// Whether this host can carry out an effect, as opposed to only ask
+    /// another device for it.
+    ///
+    /// A plugin registers on every device — that is what makes the plugin set
+    /// platform-independent — so this is how one tells "I am on a machine that
+    /// cannot do this" from "nobody has asked yet". A request that can never be
+    /// served should be refused while the far end is still listening.
+    #[must_use]
+    pub fn serves(&self, kind: crate::vocab::EffectKind) -> bool {
+        self.serves.contains(kind)
     }
 
     /// Milliseconds on the host's monotonic clock, handed in rather than read.
@@ -349,8 +364,20 @@ pub(crate) mod harness {
     }
 
     /// Run one plugin interaction and collect everything it asked for.
+    ///
+    /// On a host that serves everything. Use [`run_on`] for a plugin whose
+    /// behaviour depends on what the machine under it can do.
     pub fn run(next_token: u64, f: impl FnOnce(&mut Cx)) -> Ran {
-        let mut cx = Cx::new(1_000, next_token);
+        run_on(next_token, crate::vocab::EffectSet::all(), f)
+    }
+
+    /// The same, on a host that can carry out only the effects named.
+    pub fn run_on(
+        next_token: u64,
+        serves: crate::vocab::EffectSet,
+        f: impl FnOnce(&mut Cx),
+    ) -> Ran {
+        let mut cx = Cx::new(1_000, next_token, serves);
         f(&mut cx);
         Ran {
             sends: cx.sends,

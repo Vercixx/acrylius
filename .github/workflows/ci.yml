@@ -57,6 +57,14 @@ jobs:
       - name: Swift host runtime tests
         run: ./scripts/swift-test.sh
 
+      # XcodeGen is a Swift package with no Darwin dependencies, so the Xcode
+      # project can be generated and inspected here. Two targets, which file
+      # each one compiles, and whether the App Group is spelled the same in all
+      # three places it appears. Every one of those is otherwise a fifteen-
+      # minute macOS run, or worse, a phone.
+      - name: The iOS project manifest
+        run: ./scripts/xcodegen-check.sh
+
   daemon:
     runs-on: ubuntu-latest
     steps:

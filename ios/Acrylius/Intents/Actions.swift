@@ -103,25 +103,24 @@ struct WakePCIntent: AppIntent {
 
     @Parameter(title: "PC") var pc: PCEntity
 
+    init() {}
+
+    /// A widget button knows which machine it is for, so it says so rather than
+    /// going through the entity query — which in a widget process would mean
+    /// reading a snapshot to find what the widget had already read.
+    init(pc: PCEntity) {
+        self.pc = pc
+    }
+
     func perform() async throws -> some IntentResult & ProvidesDialog {
-        // Waking needs no session and no reachable peer, which is the point: the
-        // machine is asleep. It needs only what that machine told us while it
-        // was awake, which is on disk.
-        let store = try KeychainStore()
-        guard let key = store.identityKey() else {
-            let dialog: IntentDialog = "Acrylius is not set up yet."
-            return .result(dialog: dialog)
-        }
-        let core = try AcryliusCore(
-            config: defaultConfig(name: "Acrylius", platform: "ios"),
-            identityKey: key,
-            peers: store.loadPeers(),
-            effects: []
-        )
-        guard core.peers().contains(where: { $0.deviceId == pc.id }) else {
-            let dialog: IntentDialog = "\(pc.name) is not paired."
-            return .result(dialog: dialog)
-        }
+        // Waking needs no session, no reachable peer, and no identity, which is
+        // the point: the machine is asleep. It needs only what that machine told
+        // us while it was awake, which is on disk.
+        //
+        // Nor does it build a core to check the peer is paired. A saved wake
+        // target already is that check — the daemon only sends one over an open
+        // session — and standing up a core would need the Keychain, which the
+        // widget process this also runs in cannot read.
         guard let config = WakeTargets.load(for: pc.id),
               let mac = config.macs.first,
               let packet = try? magicPacket(mac: mac)
@@ -160,23 +159,6 @@ struct RunCommandIntent: AppIntent {
         }
         let dialog: IntentDialog = ok == true ? "Ran \(command)." : "Could not reach \(pc.name)."
         return .result(dialog: dialog)
-    }
-}
-
-struct AcryliusShortcuts: AppShortcutsProvider {
-    static var appShortcuts: [AppShortcut] {
-        AppShortcut(intent: WakePCIntent(), phrases: [
-            "Wake my PC with \(.applicationName)",
-            "Wake up my computer with \(.applicationName)",
-        ], shortTitle: "Wake PC", systemImageName: "power")
-
-        AppShortcut(intent: LockPCIntent(), phrases: [
-            "Lock my PC with \(.applicationName)",
-        ], shortTitle: "Lock PC", systemImageName: "lock")
-
-        AppShortcut(intent: UnlockPCIntent(), phrases: [
-            "Unlock my PC with \(.applicationName)",
-        ], shortTitle: "Unlock PC", systemImageName: "lock.open")
     }
 }
 

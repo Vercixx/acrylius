@@ -3,6 +3,9 @@
 import Foundation
 import Observation
 import SwiftUI
+#if canImport(WidgetKit)
+import WidgetKit
+#endif
 
 /// What the views watch.
 ///
@@ -242,10 +245,47 @@ final class AppModel {
     private func refresh() async {
         guard let runtime else { return }
         peers = await runtime.peers()
+        publishSnapshot()
+    }
+
+    /// Leave the widget something to draw.
+    ///
+    /// Called wherever the peer list or what a peer told us changes. The widget
+    /// runs in a process that can open no session and reach no computer, so
+    /// this is the only way anything ever gets there.
+    func publishSnapshot() {
+        let wakeable = WakeTargets.known()
+        SnapshotStore.save(peers: peers.map { peer in
+            let features = catalog[peer.deviceId]
+            return PeerSnapshot(
+                deviceId: peer.deviceId,
+                name: peer.name,
+                platform: peer.platform,
+                // Only ever set while it is true. Nothing writes a "no longer
+                // reachable" time, because the reading is taken continuously
+                // and the last true one is the answer.
+                lastSeen: peer.reachable ? Date() : nil,
+                locked: features.session?.locked,
+                canWake: wakeable.contains(peer.deviceId),
+                nowPlaying: features.activePlayer.flatMap { player in
+                    guard !player.title.isEmpty else { return nil }
+                    return player.artist.isEmpty
+                        ? player.title
+                        : "\(player.artist) — \(player.title)"
+                }
+            )
+        })
+        #if canImport(WidgetKit)
+        WidgetCenter.shared.reloadAllTimelines()
+        #endif
     }
 
     private func on(_ event: FfiUiEvent) {
-        catalog.ingest(event)
+        // A peer announcing its session, its players or how to wake it is
+        // exactly what the widget draws, so anything the catalog accepted is
+        // worth writing down. The daemon already withholds a media state that
+        // changed only its position, so this is not once a second.
+        if catalog.ingest(event) { publishSnapshot() }
         switch event {
         case let .pairingWindowOpen(code, _):
             pairingCode = code
