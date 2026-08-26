@@ -93,6 +93,13 @@ trait LeAdvertisingManager {
     ) -> zbus::Result<()>;
 
     fn unregister_advertisement(&self, advertisement: &ObjectPath<'_>) -> zbus::Result<()>;
+
+    /// How many advertising instances bluetoothd holds, across every client on
+    /// the bus. Zero, while this transport believes it is on the air, means the
+    /// advertisement went away without `Release` ever reaching us — which is
+    /// the one thing that presents to a user as "the desktop vanished".
+    #[zbus(property)]
+    fn active_instances(&self) -> zbus::Result<u8>;
 }
 
 #[zbus::proxy(interface = "org.bluez.GattManager1", default_service = "org.bluez")]
@@ -153,6 +160,15 @@ struct Shared {
     /// Those two come apart, which is the whole reason this exists — see
     /// [`readvertise`].
     advertising: std::sync::atomic::AtomicBool,
+    /// The last central bluetoothd named to us, whether or not it ever got as
+    /// far as holding a link.
+    ///
+    /// A connection takes the advertisement off the air the moment it is made,
+    /// well before the phone has written anything. So a central that connects,
+    /// reads `identity`, and is then force-quit leaves nothing behind for the
+    /// link record to catch — and the desktop stays silently off the air. This
+    /// is how [`supervise`] finds that case.
+    last_central: Mutex<Option<String>>,
 }
 
 impl Shared {
@@ -228,21 +244,21 @@ async fn device_is_connected(conn: &zbus::Connection, path: &str) -> bool {
 /// legacy `Set Advertising` setting, not the instances the D-Bus API adds — it
 /// reads the same whether this works or not. So this is cheap insurance, not a
 /// diagnosis: registering again when nothing was lost costs two D-Bus calls.
-async fn readvertise(conn: &zbus::Connection, shared: &Shared) {
+async fn readvertise(conn: &zbus::Connection, shared: &Shared) -> bool {
     if !shared
         .advertising
         .load(std::sync::atomic::Ordering::Relaxed)
     {
-        return;
+        return false;
     }
     let Ok(builder) = LeAdvertisingManagerProxy::builder(conn).path(ADAPTER) else {
-        return;
+        return false;
     };
     let Ok(ads) = builder.build().await else {
-        return;
+        return false;
     };
     let Ok(adv) = ObjectPath::try_from(ADV_PATH) else {
-        return;
+        return false;
     };
     // Let bluetoothd finish tearing the connection down first; registering
     // into the middle of that is how the "Failed to register advertisement"
@@ -250,8 +266,14 @@ async fn readvertise(conn: &zbus::Connection, shared: &Shared) {
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     let _ = ads.unregister_advertisement(&adv).await;
     match ads.register_advertisement(&adv, HashMap::new()).await {
-        Ok(()) => tracing::info!("back on the air after a connection"),
-        Err(e) => tracing::warn!(error = %e, "could not start advertising again"),
+        Ok(()) => {
+            tracing::info!("back on the air");
+            true
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "could not start advertising again");
+            false
+        }
     }
 }
 
@@ -273,18 +295,172 @@ async fn drop_link_for(shared: &Shared, path: &str, why: &'static str) {
     });
 }
 
+/// How often to check on what the departure signals were supposed to tell us.
+///
+/// This is a recovery time as much as a poll interval: it is how long a phone
+/// spends unable to see the desktop after the app is force-quit and reopened.
+/// The person doing that is watching the screen and waiting, so the number has
+/// to be small enough to read as "a moment" rather than as "broken".
+///
+/// What it costs is two D-Bus round trips to a daemon on the same machine,
+/// which is nothing. What it risks is retiring a link on a transient wrong
+/// answer — and there is no such answer here: `device_is_connected` is asked of
+/// bluetoothd without the cache, and bluetoothd does not drop a device object
+/// in the middle of a live connection.
+const SUPERVISE_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Reconcile what this transport believes with what bluetoothd reports.
+///
+/// The two signal watchers below are edge-triggered, and the edges get lost. On
+/// this hardware, across a day of testing, the transport logged **nine links up
+/// and one link down**: eight departures that bluetoothd never announced on the
+/// bus in any shape either watcher recognised. Everything downstream follows
+/// from that one gap, and each piece of it was reported separately as its own
+/// bug:
+///
+/// * the core keeps routing to a link whose central is gone, so reopening the
+///   app appears to do nothing until a second force-quit — the link is only
+///   displaced once something else happens to retire it;
+/// * [`readvertise`] is never reached, because it hangs off the same departure
+///   path, so the advertisement stays off the air and the phone reports that
+///   nothing is advertising the service — until the daemon is restarted, which
+///   is the only other thing that registers an advertisement.
+///
+/// Neither is visible from inside this process. Both are one question away from
+/// bluetoothd, which is the only party here that actually knows. So the signals
+/// stay as the fast path, and this is the truth that backs them.
+async fn supervise(conn: &zbus::Connection, shared: &Shared) {
+    let held = shared.link.lock().await.as_ref().map(|l| l.device.clone());
+    // The link's device if there is one, because that is the one whose
+    // departure the core needs told about; otherwise the last central we heard
+    // from at all, which catches a phone that connected, read `identity` and
+    // was force-quit before it ever wrote.
+    let watching = match &held {
+        Some(device) => Some(device.clone()),
+        None => shared.last_central.lock().await.clone(),
+    };
+    let central = match &watching {
+        Some(device) => Some(device_is_connected(conn, device).await),
+        None => None,
+    };
+    let want = shared
+        .advertising
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let instances = active_instances(conn).await;
+
+    let decision = reconcile(central, want, instances);
+    // Every input and the answer, at debug. A wrong answer here is silent by
+    // construction — `active_instances` reports 1 for an adapter it cannot ask,
+    // so a proxy that reads the wrong property would simply never recover
+    // anything and never say why.
+    tracing::debug!(
+        ?central,
+        want,
+        instances,
+        ?decision,
+        "supervising the radio"
+    );
+
+    match decision {
+        Reconcile::Nothing => {}
+        Reconcile::CentralGone => {
+            if let Some(device) = held {
+                drop_link_for(shared, &device, "the central went away unannounced").await;
+            }
+            // Forgotten only once it has actually worked. Otherwise a failed
+            // registration would look, on the next tick, exactly like a desktop
+            // that never had a central at all — and nothing would try again.
+            if readvertise(conn, shared).await {
+                *shared.last_central.lock().await = None;
+            }
+        }
+        Reconcile::Readvertise => {
+            // Covers both "it was registered and went away" and "it never
+            // registered in the first place", which are the same thing from
+            // here and want the same answer.
+            tracing::warn!("not on the air though it should be; registering again");
+            readvertise(conn, shared).await;
+        }
+    }
+}
+
+/// How many advertising instances bluetoothd holds right now.
+///
+/// Asked without the property cache, because a stale "yes, still advertising"
+/// is the one answer that would make [`supervise`] pointless. An adapter that
+/// cannot be asked answers 1, so an unreachable bus is never mistaken for an
+/// advertisement that needs replacing.
+async fn active_instances(conn: &zbus::Connection) -> u8 {
+    let Ok(builder) = LeAdvertisingManagerProxy::builder(conn).path(ADAPTER) else {
+        return 1;
+    };
+    let Ok(ads) = builder
+        .cache_properties(zbus::proxy::CacheProperties::No)
+        .build()
+        .await
+    else {
+        return 1;
+    };
+    ads.active_instances().await.unwrap_or(1)
+}
+
+/// What [`supervise`] does about what bluetoothd answered.
+///
+/// Split out and made pure because the expensive mistake here is not failing to
+/// recover — it is recovering over a link that was working, and dropping a
+/// phone mid-session to fix a problem it did not have. That case is a test
+/// rather than a careful reading.
+#[derive(Debug, PartialEq, Eq)]
+enum Reconcile {
+    /// Either a central is connected — in which case being off the air is
+    /// correct and not a fault — or there is nothing to put right.
+    Nothing,
+    /// A central we were talking to has gone. Retire any link it held, and put
+    /// the advertisement its connection took down back on the air.
+    CentralGone,
+    /// No central in the picture, and nothing on the air that we asked to be
+    /// there.
+    Readvertise,
+}
+
+/// `central` is whether the central we last heard from is still connected, or
+/// `None` when we have not heard from one since the last time this was settled.
+fn reconcile(central: Option<bool>, want_advertising: bool, instances: u8) -> Reconcile {
+    match central {
+        Some(true) => Reconcile::Nothing,
+        Some(false) => Reconcile::CentralGone,
+        None if want_advertising && instances == 0 => Reconcile::Readvertise,
+        None => Reconcile::Nothing,
+    }
+}
+
 // ------------------------------------------------------------- the advertisement
 
 struct Advertisement {
     name: String,
+    shared: Arc<Shared>,
 }
 
 #[zbus::interface(name = "org.bluez.LEAdvertisement1")]
 impl Advertisement {
     /// Called when bluetoothd drops the advertisement. There is no need to
     /// unregister in response: by the time this arrives it already has.
-    fn release(&self) {
-        tracing::debug!("bluetoothd released the advertisement");
+    ///
+    /// There *is* a need to register again, and not doing so was a bug. This is
+    /// the single moment the desktop is told it has gone off the air, and it
+    /// answered by writing one line at `debug` — below the `info` the daemon
+    /// actually runs at, so the report was invisible as well as inert. That
+    /// left restarting the daemon as the only thing in the system that put the
+    /// advertisement back, which is exactly the shape the symptom had.
+    ///
+    /// Registering happens on a task rather than here: bluetoothd is still
+    /// unwinding the client that owns this call, and [`readvertise`] waits for
+    /// it to finish before asking again.
+    async fn release(&self, #[zbus(connection)] conn: &zbus::Connection) {
+        tracing::warn!("bluetoothd dropped the advertisement; going back on the air");
+        let conn = conn.clone();
+        let shared = self.shared.clone();
+        tokio::spawn(async move { readvertise(&conn, &shared).await });
     }
 
     /// `"peripheral"`, which is what makes it connectable. `src/advertising.c`
@@ -396,12 +572,15 @@ impl IdentityChr {
         // and without it a connection that got everything right and a connection
         // that stopped one call short look identical from here.
         let (device, mtu) = device_and_mtu(&options);
-        tracing::debug!(
+        tracing::info!(
             device = device.as_deref().unwrap_or("unknown"),
             mtu,
             bytes = identity.len(),
             "identity read"
         );
+        if let Some(d) = device {
+            *self.shared.last_central.lock().await = Some(d);
+        }
         identity
     }
 }
@@ -446,6 +625,7 @@ impl RxChr {
             tracing::warn!("a write with no device; ignoring");
             return;
         };
+        *self.shared.last_central.lock().await = Some(device.clone());
 
         let mut guard = self.shared.link.lock().await;
 
@@ -570,7 +750,11 @@ impl TxChr {
     /// nothing worked until a second force-quit outlasted the device timeout.
     async fn start_notify(&mut self) {
         self.notifying = true;
-        tracing::debug!("a central subscribed to notifications");
+        // At `info`, not `debug`. This transport is reached over a radio, by an
+        // app installed through CI and a sideload, and every question about it
+        // has had to be answered from this journal. A once-per-connection line
+        // is not chatter; it is the only record that a phone got this far.
+        tracing::info!("a central subscribed to notifications");
         // Read and released before retiring, so the lock is never held twice.
         let held = self
             .shared
@@ -586,7 +770,7 @@ impl TxChr {
 
     fn stop_notify(&mut self) {
         self.notifying = false;
-        tracing::debug!("a central unsubscribed");
+        tracing::info!("a central unsubscribed");
     }
 }
 
@@ -672,6 +856,7 @@ impl Transport for BleTransport {
             link: Mutex::new(None),
             identity: Mutex::new(Vec::new()),
             advertising: std::sync::atomic::AtomicBool::new(false),
+            last_central: Mutex::new(None),
         });
 
         // The whole tree first, then the ObjectManager over it, then register.
@@ -724,6 +909,7 @@ impl Transport for BleTransport {
                 ADV_PATH,
                 Advertisement {
                     name: self.name.clone(),
+                    shared: shared.clone(),
                 },
             )
             .await?;
@@ -824,22 +1010,52 @@ impl Transport for BleTransport {
             });
         }
 
+        // And the backstop under both of them, for the eight departures in nine
+        // that neither one saw. See [`supervise`].
+        {
+            let shared = shared.clone();
+            let conn = conn.clone();
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(SUPERVISE_EVERY);
+                // The first tick of a tokio interval completes immediately, and
+                // there is nothing to reconcile before anything has happened.
+                tick.tick().await;
+                loop {
+                    tick.tick().await;
+                    supervise(&conn, &shared).await;
+                }
+            });
+        }
+
         while let Some(cmd) = cmds.recv().await {
             match cmd {
                 TransportCmd::Advertise { enable, txt } => {
                     *shared.identity.lock().await = encode_identity(&txt);
                     if enable && !advertising {
+                        // Intent, recorded *before* the attempt and kept
+                        // whether or not it succeeds. What the watchers and
+                        // `supervise` read to decide whether being on the air
+                        // is wanted.
+                        //
+                        // It used to be set only on success, which made a
+                        // failure permanent: this is the one place that ever
+                        // registers, the runtime asks exactly once at startup,
+                        // and the commonest reason to fail is a race that
+                        // passes in a second — bluetoothd still tearing down
+                        // the advertisement of the daemon this one replaced. So
+                        // a restart that lost the race left the desktop off the
+                        // air until the next restart, which is precisely the
+                        // "restarting makes it appear, then it disappears
+                        // again" report. `supervise` is what retries now.
+                        advertising = true;
+                        shared
+                            .advertising
+                            .store(true, std::sync::atomic::Ordering::Relaxed);
                         match ads.register_advertisement(&adv, HashMap::new()).await {
-                            Ok(()) => {
-                                advertising = true;
-                                // What the watchers read to decide whether
-                                // putting us back on the air is wanted.
-                                shared
-                                    .advertising
-                                    .store(true, std::sync::atomic::Ordering::Relaxed);
-                                tracing::info!(name = %self.name, "advertising over BLE");
+                            Ok(()) => tracing::info!(name = %self.name, "advertising over BLE"),
+                            Err(e) => {
+                                tracing::warn!(error = %e, "could not advertise over BLE yet");
                             }
-                            Err(e) => tracing::warn!(error = %e, "could not advertise over BLE"),
                         }
                     } else if !enable && advertising {
                         // Cleared first: a disconnect arriving mid-teardown
@@ -949,6 +1165,15 @@ mod tests {
         // `ActiveInstances` still reporting 1.
         let adv = Advertisement {
             name: "test".to_string(),
+            shared: Arc::new(Shared {
+                id: TransportId(2),
+                sink: tokio::sync::mpsc::unbounded_channel().0,
+                next_link: AtomicU64::new(1),
+                link: Mutex::new(None),
+                identity: Mutex::new(Vec::new()),
+                advertising: std::sync::atomic::AtomicBool::new(false),
+                last_central: Mutex::new(None),
+            }),
         };
         assert!(adv.discoverable(), "or no Flags element is emitted at all");
         assert_eq!(
@@ -956,6 +1181,46 @@ mod tests {
             0,
             "a desktop is not discoverable for three minutes; it is discoverable"
         );
+    }
+
+    #[test]
+    fn a_working_link_is_never_disturbed_to_fix_a_problem_it_does_not_have() {
+        // The expensive mistake. A central is connected, so the radio is off
+        // the air by design, and re-registering would drop a phone mid-session
+        // to cure a symptom that is not present.
+        assert_eq!(reconcile(Some(true), true, 0), Reconcile::Nothing);
+        assert_eq!(reconcile(Some(true), true, 1), Reconcile::Nothing);
+    }
+
+    #[test]
+    fn a_central_that_is_gone_is_noticed_whether_or_not_anyone_said_so() {
+        // Eight departures in nine reached neither signal watcher. This is the
+        // path that catches them, and it does not care which shape was missed.
+        assert_eq!(reconcile(Some(false), true, 0), Reconcile::CentralGone);
+        // Including when bluetoothd still counts an instance it is not
+        // broadcasting — which is the ordinary case, and the reason a count of
+        // instances cannot be the only thing this looks at.
+        assert_eq!(reconcile(Some(false), true, 1), Reconcile::CentralGone);
+    }
+
+    #[test]
+    fn an_advertisement_that_is_not_on_the_air_is_put_back() {
+        // Two histories, one state. Either bluetoothd dropped it, or the
+        // registration at startup lost the race against the previous daemon's
+        // advertisement being torn down and there has never been one at all.
+        // From here they are indistinguishable and want the same answer, which
+        // is why the retry lives here rather than beside the first attempt.
+        assert_eq!(reconcile(None, true, 0), Reconcile::Readvertise);
+    }
+
+    #[test]
+    fn nothing_is_registered_behind_the_owners_back() {
+        // `ble.enabled = false`, or the transport was told to stop advertising.
+        // Recovering an advertisement nobody asked for would override the one
+        // setting whose entire purpose is to keep this radio quiet.
+        assert_eq!(reconcile(None, false, 0), Reconcile::Nothing);
+        // And an adapter that is already advertising needs no help.
+        assert_eq!(reconcile(None, true, 1), Reconcile::Nothing);
     }
 
     #[test]
@@ -971,6 +1236,7 @@ mod tests {
                 link: Mutex::new(None),
                 identity: Mutex::new(Vec::new()),
                 advertising: std::sync::atomic::AtomicBool::new(false),
+                last_central: Mutex::new(None),
             })
         };
         let flags = [
@@ -1011,6 +1277,7 @@ mod tests {
             link: Mutex::new(None),
             identity: Mutex::new(Vec::new()),
             advertising: std::sync::atomic::AtomicBool::new(false),
+            last_central: Mutex::new(None),
         });
         let link = shared.next_link();
         *shared.link.try_lock().unwrap() = Some(Link {
@@ -1084,6 +1351,7 @@ mod tests {
             link: Mutex::new(None),
             identity: Mutex::new(Vec::new()),
             advertising: std::sync::atomic::AtomicBool::new(false),
+            last_central: Mutex::new(None),
         });
         let mut tx = TxChr {
             value: Vec::new(),
@@ -1115,6 +1383,7 @@ mod tests {
             link: Mutex::new(None),
             identity: Mutex::new(Vec::new()),
             advertising: std::sync::atomic::AtomicBool::new(false),
+            last_central: Mutex::new(None),
         };
         let first = s.next_link();
         assert_eq!(first.transport(), TransportId(2));
