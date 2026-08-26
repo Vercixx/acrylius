@@ -10,6 +10,8 @@ use std::path::PathBuf;
 use anyhow::Context;
 use clap::{Parser, Subcommand};
 use serde::{Deserialize, Serialize};
+use std::io::{IsTerminal, Write};
+
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
@@ -31,11 +33,15 @@ enum Cmd {
     // and is pinned by a test below.
     /// Daemon identity, port and negotiated capabilities.
     Status,
-    /// Open a pairing window and wait. Prints a code to read out or scan.
+    /// Open a pairing window and wait. Prints a code to read out or scan,
+    /// then asks you to confirm the device that turns up.
     Pair {
         /// Use a specific code instead of a fresh random one.
         #[arg(long)]
         code: Option<String>,
+        /// Accept without asking. For scripts; a human should compare the codes.
+        #[arg(long)]
+        yes: bool,
     },
     /// Accept the device currently waiting, after checking the codes match.
     Approve,
@@ -54,6 +60,9 @@ enum Cmd {
         addr: String,
         /// The code shown by the other end.
         code: String,
+        /// Accept without asking. For scripts; a human should compare the codes.
+        #[arg(long)]
+        yes: bool,
     },
     /// Open a session to a paired device.
     Connect {
@@ -153,9 +162,20 @@ enum Request {
 enum Response {
     Ok,
     Status(Status),
-    Devices { devices: Vec<Device> },
-    Event { text: String },
-    Error { message: String },
+    Devices {
+        devices: Vec<Device>,
+    },
+    Event {
+        text: String,
+    },
+    Confirm {
+        name: String,
+        fingerprint: String,
+        sas: String,
+    },
+    Error {
+        message: String,
+    },
 }
 
 #[derive(Deserialize, Debug)]
@@ -182,6 +202,14 @@ struct Device {
 
 /// Mirrors the daemon's rule: an explicitly named state directory keeps its
 /// socket beside it, so two instances on one machine do not collide.
+/// `println!` panics when its pipe closes, because Rust ignores SIGPIPE. A
+/// tool that dies noisily when piped into `head` is not behaving like a Unix
+/// tool; dropping the write error ends output quietly instead.
+macro_rules! outln {
+    () => {{ let _ = writeln!(std::io::stdout()); }};
+    ($($arg:tt)*) => {{ let _ = writeln!(std::io::stdout(), $($arg)*); }};
+}
+
 fn socket_path(state: Option<PathBuf>) -> PathBuf {
     if let Some(s) = state {
         return s.join("acrylius.sock");
@@ -202,14 +230,21 @@ async fn main() -> anyhow::Result<()> {
     let (rd, mut wr) = stream.into_split();
     let mut lines = BufReader::new(rd).lines();
 
+    let mut assume_yes = false;
     let (req, streaming) = match args.cmd {
         Cmd::Status => (Request::Status, false),
-        Cmd::Pair { code } => (Request::Pair { code }, true),
+        Cmd::Pair { code, yes } => {
+            assume_yes = yes;
+            (Request::Pair { code }, true)
+        }
         Cmd::Approve => (Request::Approve, false),
         Cmd::Deny => (Request::Deny, false),
         Cmd::Devices => (Request::Devices, false),
         Cmd::Revoke { device } => (Request::Revoke { device }, false),
-        Cmd::PairWith { addr, code } => (Request::PairWith { addr, code }, true),
+        Cmd::PairWith { addr, code, yes } => {
+            assume_yes = yes;
+            (Request::PairWith { addr, code }, true)
+        }
         Cmd::Connect { device, addr } => (Request::Connect { device, addr }, false),
         Cmd::Ping { device } => (Request::Ping { device }, false),
         Cmd::Session { device, action } => (Request::Session { device, action }, false),
@@ -226,21 +261,21 @@ async fn main() -> anyhow::Result<()> {
     let mut failed = false;
     while let Some(l) = lines.next_line().await? {
         match serde_json::from_str::<Response>(&l)? {
-            Response::Ok => println!("ok"),
+            Response::Ok => outln!("ok"),
             Response::Status(s) => {
-                println!("{}  {}", s.name, s.device_id);
-                println!("  fingerprint  {}", s.fingerprint);
-                println!("  port         {}", s.port);
-                println!("  peers        {}", s.peers);
-                println!("  accepts      {}", join(&s.caps_in));
-                println!("  sends        {}", join(&s.caps_out));
+                outln!("{}  {}", s.name, s.device_id);
+                outln!("  fingerprint  {}", s.fingerprint);
+                outln!("  port         {}", s.port);
+                outln!("  peers        {}", s.peers);
+                outln!("  accepts      {}", join(&s.caps_in));
+                outln!("  sends        {}", join(&s.caps_out));
             }
             Response::Devices { devices } if devices.is_empty() => {
-                println!("no paired devices");
+                outln!("no paired devices");
             }
             Response::Devices { devices } => {
                 for x in devices {
-                    println!(
+                    outln!(
                         "{}  {} ({})  {}",
                         x.device_id,
                         x.name,
@@ -251,10 +286,41 @@ async fn main() -> anyhow::Result<()> {
                             "unreachable"
                         }
                     );
-                    println!("  fingerprint {}", x.fingerprint);
+                    outln!("  fingerprint {}", x.fingerprint);
                 }
             }
-            Response::Event { text } => println!("{text}"),
+            Response::Event { text } => outln!("{text}"),
+            Response::Confirm {
+                name,
+                fingerprint,
+                sas,
+            } => {
+                outln!();
+                outln!("{name} wants to pair.");
+                outln!("  fingerprint  {fingerprint}");
+                outln!();
+                outln!("  It should be showing:  {sas}");
+                outln!();
+                let accept = if assume_yes {
+                    outln!("  accepting (--yes)");
+                    true
+                } else if std::io::stdin().is_terminal() {
+                    prompt("  Do the codes match? [Y/n] ").await?
+                } else {
+                    // Piped or backgrounded: there is nobody to ask. Say what to
+                    // run rather than blocking forever on a read that will never
+                    // return, which is what made this a two-terminal job.
+                    outln!("  Not a terminal, so nothing to ask.");
+                    outln!("  Run `acryliusctl approve` (or `deny`) to answer.");
+                    continue;
+                };
+                // A second connection, because this one is busy streaming the
+                // pairing. The daemon holds the window open until answered.
+                answer(&path, accept).await?;
+                if !accept {
+                    failed = true;
+                }
+            }
             Response::Error { message } => {
                 eprintln!("error: {message}");
                 failed = true;
@@ -267,6 +333,39 @@ async fn main() -> anyhow::Result<()> {
     if failed {
         std::process::exit(1);
     }
+    Ok(())
+}
+
+/// Ask a yes/no question. Anything but an explicit "n" is a yes, because the
+/// operator has already been shown both codes and the default is the case they
+/// are in when the codes match.
+async fn prompt(question: &str) -> anyhow::Result<bool> {
+    use tokio::io::AsyncBufReadExt;
+    let mut stdout = std::io::stdout();
+    let _ = write!(stdout, "{question}");
+    let _ = stdout.flush();
+    let mut line = String::new();
+    let mut reader = tokio::io::BufReader::new(tokio::io::stdin());
+    reader.read_line(&mut line).await?;
+    let answer = line.trim().to_ascii_lowercase();
+    Ok(!(answer.starts_with('n')))
+}
+
+/// Send the answer over a fresh connection.
+async fn answer(path: &std::path::Path, accept: bool) -> anyhow::Result<()> {
+    let stream = UnixStream::connect(path).await?;
+    let (rd, mut wr) = stream.into_split();
+    let req = if accept {
+        Request::Approve
+    } else {
+        Request::Deny
+    };
+    let mut line = serde_json::to_string(&req)?;
+    line.push('\n');
+    wr.write_all(line.as_bytes()).await?;
+    // Read the acknowledgement so the daemon is not writing into a closed pipe.
+    let mut lines = BufReader::new(rd).lines();
+    let _ = lines.next_line().await?;
     Ok(())
 }
 

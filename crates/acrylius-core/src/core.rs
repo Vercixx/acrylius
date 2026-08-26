@@ -37,6 +37,12 @@ struct HandshakingLink {
     /// Retained so an `IKpsk2` responder can replay message 1 into the real
     /// handshake once it has chosen a PSK.
     pairing_flow: bool,
+    /// Where we dialled, when we are the one who dialled.
+    ///
+    /// A pairing that succeeds has just proved an address reachable, and
+    /// throwing that away was the reason a freshly paired device reported
+    /// itself unreachable until discovery happened to run again.
+    via: Option<(TransportId, String)>,
 }
 
 struct UpLink {
@@ -59,6 +65,8 @@ struct AwaitingConfirm {
     link: LinkId,
     record: PeerRecord,
     sas: String,
+    /// The address we dialled to reach them, if we dialled.
+    via: Option<(TransportId, String)>,
 }
 
 struct PairingWindow {
@@ -76,9 +84,17 @@ pub struct Core {
     /// Last address discovery offered for a peer. Untrusted, and only ever used
     /// to decide where to dial, never to decide who answered.
     addrs: BTreeMap<DeviceId, (TransportId, String)>,
+    /// Every address discovery has ever shown us, keyed by advertised
+    /// fingerprint and kept regardless of whether that device is paired.
+    ///
+    /// Discovery resolves a service once and then stays quiet until something
+    /// about it changes, so an announcement that arrives before pairing is the
+    /// only one there will be. Dropping it because the sender was not yet a
+    /// peer meant the address was gone for good.
+    seen: BTreeMap<Fingerprint, (TransportId, String)>,
     pairing: Option<PairingWindow>,
     /// Dials we started for pairing, and the PSK to use when they land.
-    pending_pair_dials: BTreeMap<DialToken, [u8; 32]>,
+    pending_pair_dials: BTreeMap<DialToken, ([u8; 32], (TransportId, String))>,
     /// Dials we started to reach a known peer.
     pending_peer_dials: BTreeMap<DialToken, DeviceId>,
     plugins: Vec<Box<dyn Plugin>>,
@@ -169,14 +185,21 @@ impl Core {
                 }
             }
             Event::Discovered { transport, peer } => {
-                if let Some(fp) = &peer.fingerprint
-                    && let Some(rec) = self
+                if let Some(fp) = peer.fingerprint {
+                    // Cached unconditionally. Whether the sender is paired is
+                    // not knowable from an advertisement, and pairing usually
+                    // happens after the single resolution discovery will emit —
+                    // so dropping this as "not a peer yet" threw away the only
+                    // chance to learn where that device lives.
+                    self.seen.insert(fp.clone(), (transport, peer.addr.clone()));
+                    if let Some(rec) = self
                         .peers
                         .values()
-                        .find(|r| r.fingerprint().as_ref() == Some(fp))
-                    && let Some(id) = rec.id()
-                {
-                    self.addrs.insert(id, (transport, peer.addr));
+                        .find(|r| r.fingerprint().as_ref() == Some(&fp))
+                        && let Some(id) = rec.id()
+                    {
+                        self.addrs.insert(id, (transport, peer.addr));
+                    }
                 }
             }
             Event::Tick => self.on_tick(now_ms, &mut out),
@@ -233,7 +256,7 @@ impl Core {
 
         // A link we dialled to pair: we speak first, with XXpsk3.
         if let Some(d) = dial
-            && let Some(psk) = self.pending_pair_dials.remove(&d)
+            && let Some((psk, via)) = self.pending_pair_dials.remove(&d)
         {
             match Handshake::pair_initiator(&self.identity, &psk) {
                 Ok(mut hs) => {
@@ -252,6 +275,7 @@ impl Core {
                                     deadline,
                                     expect: None,
                                     pairing_flow: true,
+                                    via: Some(via),
                                 })),
                             );
                         }
@@ -312,6 +336,7 @@ impl Core {
                                 deadline,
                                 expect: Some(peer),
                                 pairing_flow: false,
+                                via: None,
                             })),
                         );
                     }
@@ -379,6 +404,7 @@ impl Core {
                                         deadline: p.deadline,
                                         expect: None,
                                         pairing_flow: true,
+                                        via: None,
                                     })),
                                 );
                             }
@@ -647,14 +673,24 @@ impl Core {
             sas: sas.clone(),
         });
         if let Some(w) = &mut self.pairing {
-            w.awaiting = Some(AwaitingConfirm { link, record, sas });
+            w.awaiting = Some(AwaitingConfirm {
+                link,
+                record,
+                sas,
+                via: h.via,
+            });
         } else {
             // We initiated; there is no window, so keep the same state inline.
             self.pairing = Some(PairingWindow {
                 psk: [0u8; 32],
                 deadline: h.deadline,
                 attempts: 0,
-                awaiting: Some(AwaitingConfirm { link, record, sas }),
+                awaiting: Some(AwaitingConfirm {
+                    link,
+                    record,
+                    sas,
+                    via: h.via,
+                }),
             });
         }
     }
@@ -677,6 +713,19 @@ impl Core {
             return;
         }
         let Some(id) = a.record.id() else { return };
+        // A pairing that just completed has proved an address reachable. Keep
+        // it: discovery may not speak again for a long time, and until this was
+        // recorded a device reported itself unreachable the moment after it
+        // finished pairing.
+        if let Some(via) = a.via {
+            self.addrs.insert(id.clone(), via);
+        } else if let Some(fp) = a.record.fingerprint()
+            && let Some(via) = self.seen.get(&fp).cloned()
+        {
+            // They dialled us, so we have no address of theirs from the
+            // handshake. Discovery may still have shown us one.
+            self.addrs.insert(id.clone(), via);
+        }
         let (key, value) = Self::peer_blob(&a.record);
         out.push(Action::Persist {
             key,
@@ -928,7 +977,8 @@ impl Core {
                 Ok(norm) => {
                     self.next_dial += 1;
                     let d = DialToken(self.next_dial);
-                    self.pending_pair_dials.insert(d, pairing::psk(&norm));
+                    self.pending_pair_dials
+                        .insert(d, (pairing::psk(&norm), (transport, addr.clone())));
                     out.push(Action::Dial {
                         transport,
                         addr,
@@ -969,7 +1019,25 @@ impl Core {
                 if self.peer_state(&peer) != PeerState::Unreachable {
                     return;
                 }
-                let Some((transport, addr)) = self.addrs.get(&peer).cloned() else {
+                // Three places an address can come from, in order of how much
+                // they are worth: one we recorded when the peer last worked,
+                // one discovery has shown us, or nothing.
+                let known = self.addrs.get(&peer).cloned().or_else(|| {
+                    let fp = self.peers.get(&peer)?.fingerprint()?;
+                    self.seen.get(&fp).cloned()
+                });
+                let Some((transport, addr)) = known else {
+                    // "Unreachable" would be true but useless. Not knowing where
+                    // a device is differs from failing to reach it, and only one
+                    // of those the user can do something about.
+                    out.ui(UiEvent::Error {
+                        code: ErrorCode::NotAllowed,
+                        detail: format!(
+                            "no address known for {peer}. It has not been seen on this \
+                             network, and a device that only ever dials out — a phone, \
+                             for instance — never will be. Pass one with --addr."
+                        ),
+                    });
                     out.ui(UiEvent::PeerUnreachable { peer });
                     return;
                 };
@@ -1252,6 +1320,7 @@ impl CoreBuilder {
             peers,
             links: BTreeMap::new(),
             addrs: BTreeMap::new(),
+            seen: BTreeMap::new(),
             pairing: None,
             pending_pair_dials: BTreeMap::new(),
             pending_peer_dials: BTreeMap::new(),

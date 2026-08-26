@@ -232,9 +232,11 @@ impl Transport for TcpTransport {
                         ) {
                             Ok(info) => {
                                 let info = info.enable_addr_auto();
-                                advertised = Some(info.get_fullname().to_string());
-                                if let Err(e) = mdns.register(info) {
-                                    tracing::warn!(error = %e, "could not advertise");
+                                let full = info.get_fullname().to_string();
+                                advertised = Some(full.clone());
+                                match mdns.register(info) {
+                                    Ok(()) => tracing::info!(service = %full, "advertising"),
+                                    Err(e) => tracing::warn!(error = %e, "could not advertise"),
                                 }
                             }
                             Err(e) => tracing::warn!(error = %e, "could not build service info"),
@@ -245,6 +247,7 @@ impl Transport for TcpTransport {
                     if enable && !browsing {
                         browsing = true;
                         let rx = mdns.browse(&format!("{SERVICE_TYPE}.local."))?;
+                        tracing::info!(service = %SERVICE_TYPE, "browsing");
                         let sink = sink.clone();
                         let id = self.id;
                         let mine = self.fingerprint.clone();

@@ -42,8 +42,8 @@ sleep 1.5
 echo "--- what bravo shows ---"; cat $D/b.pair
 echo "--- what alpha shows ---"; cat $D/a.pair
 
-SAS_A=$(grep -o 'both screens: [0-9 ]*' $D/a.pair | head -1)
-SAS_B=$(grep -o 'both screens: [0-9 ]*' $D/b.pair | head -1)
+SAS_A=$(grep -o 'It should be showing:  *[0-9 ]*' $D/a.pair | head -1)
+SAS_B=$(grep -o 'It should be showing:  *[0-9 ]*' $D/b.pair | head -1)
 echo
 if [ -n "$SAS_A" ] && [ "$SAS_A" = "$SAS_B" ]; then
   echo "### 3. PASS: both ends show the same code -> $SAS_A"
@@ -65,7 +65,10 @@ echo "### 5. paired devices"
 
 echo
 echo "### 6. alpha opens a session to bravo and pings"
-"$BIN/acryliusctl" --state $D/a connect "$B_ID" --addr 127.0.0.1:1972
+# Deliberately no --addr. Passing one used to hide the fact that nothing
+# recorded the address a successful pairing had just proved, so a freshly
+# paired device reported itself unreachable.
+"$BIN/acryliusctl" --state $D/a connect "$B_ID"
 "$BIN/acryliusctl" --state $D/a ping "$B_ID"
 RC=$?
 

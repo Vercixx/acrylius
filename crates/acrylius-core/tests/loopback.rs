@@ -445,3 +445,88 @@ fn capabilities_are_negotiated_not_assumed() {
     let full = core("full");
     assert_eq!(full.caps_in(), [ping::CAP.to_string()]);
 }
+
+#[test]
+fn pairing_records_the_address_it_proved() {
+    // A pairing that completed has just demonstrated an address works. Nothing
+    // recorded it, so a device that had finished pairing a second earlier
+    // reported itself unreachable, and stayed that way until discovery
+    // happened to speak again.
+    let (mut net, _a_id, b_id) = paired();
+
+    // Deliberately no discovery: the address from the pairing dial is the only
+    // one in play.
+    net.local(Side::A, LocalCommand::Connect { peer: b_id.clone() });
+    assert_eq!(net.a.peer_state(&b_id), PeerState::Reachable);
+}
+
+#[test]
+fn an_address_seen_before_pairing_is_not_lost() {
+    // Discovery resolves a service once and then goes quiet until something
+    // about it changes. An announcement that lands before pairing is very
+    // often the only one there will be, so discarding it as "not a peer yet"
+    // threw away the single chance to learn where that device lives.
+    let (a, b) = (core("phone"), core("pc"));
+    let a_id = a.device_id();
+    let mut net = Net::new(a, b);
+
+    // Bravo hears about alpha while alpha is still a stranger.
+    discover(&mut net, Side::B, Side::A);
+
+    net.local(
+        Side::B,
+        LocalCommand::OpenPairingWindow {
+            code: CODE.to_string(),
+        },
+    );
+    net.local(
+        Side::A,
+        LocalCommand::RequestPairing {
+            transport: TRANSPORT,
+            addr: Side::B.addr().to_string(),
+            code: CODE.to_string(),
+        },
+    );
+    net.local(Side::A, LocalCommand::ConfirmPairing { accept: true });
+    net.local(Side::B, LocalCommand::ConfirmPairing { accept: true });
+
+    // Bravo was dialled, so the handshake taught it nothing about where alpha
+    // is. The earlier announcement has to carry it.
+    net.local(Side::B, LocalCommand::Connect { peer: a_id.clone() });
+    assert_eq!(net.b.peer_state(&a_id), PeerState::Reachable);
+}
+
+#[test]
+fn a_peer_with_no_address_explains_itself() {
+    // Not knowing where a device is differs from failing to reach it, and only
+    // one of those the user can act on. A phone never announces itself and
+    // never listens, so this is the permanent state of every phone.
+    let (a, b) = (core("phone"), core("pc"));
+    let a_id = a.device_id();
+    let mut net = Net::new(a, b);
+    net.local(
+        Side::B,
+        LocalCommand::OpenPairingWindow {
+            code: CODE.to_string(),
+        },
+    );
+    net.local(
+        Side::A,
+        LocalCommand::RequestPairing {
+            transport: TRANSPORT,
+            addr: Side::B.addr().to_string(),
+            code: CODE.to_string(),
+        },
+    );
+    net.local(Side::A, LocalCommand::ConfirmPairing { accept: true });
+    net.local(Side::B, LocalCommand::ConfirmPairing { accept: true });
+
+    // No discovery ever ran, and bravo did not dial.
+    net.local(Side::B, LocalCommand::Connect { peer: a_id.clone() });
+    assert_eq!(net.b.peer_state(&a_id), PeerState::Unreachable);
+    assert!(
+        net.saw(Side::B, |e| matches!(e, UiEvent::Error { detail, .. }
+            if detail.contains("no address known"))),
+        "it should say it does not know where the device is, not merely that it is unreachable"
+    );
+}

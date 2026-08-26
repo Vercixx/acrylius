@@ -22,7 +22,7 @@ desktop  UnOfEh0ZNHHuzLPviAR2fA
 | | |
 |---|---|
 | **Protocol** | [`docs/PROTOCOL.md`](docs/PROTOCOL.md), normative, with vectors the tests assert |
-| **Pairing** | `acryliusctl pair` on the computer, then scan or type the code. Both ends show six digits to compare. |
+| **Pairing** | `acryliusctl pair` on the computer, then scan or type the code. Both ends show six digits to compare, and each asks you to confirm them. |
 | **Session** | `acryliusctl session <device> lock` / `unlock` / `query` |
 | **Clipboard** | `acryliusctl clipboard <device>` to read, `--push` to send |
 | **Commands** | `acryliusctl commands <device>`, then `run <device> <id>` |

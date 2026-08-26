@@ -109,6 +109,15 @@ pub enum Response {
     Event {
         text: String,
     },
+    /// A device is waiting on a human. Sent instead of `Event` for the short
+    /// authentication string, because it is the one event that needs an answer
+    /// — the client can then put up its own prompt rather than print prose and
+    /// leave the operator to work out what to run next.
+    Confirm {
+        name: String,
+        fingerprint: String,
+        sas: String,
+    },
     Error {
         message: String,
     },
@@ -297,18 +306,7 @@ async fn handle_conn(stream: UnixStream, h: Handles) -> anyhow::Result<()> {
                 let mut rx = h.ui.subscribe();
                 h.events
                     .send(Event::Local(LocalCommand::OpenPairingWindow { code }))?;
-                // Stream events until the window resolves, so the operator can
-                // compare fingerprints before approving.
-                while let Ok(e) = rx.recv().await {
-                    let done = matches!(
-                        e,
-                        UiEvent::PairingComplete { .. } | UiEvent::PairingFailed { .. }
-                    );
-                    write(&mut wr, &Response::Event { text: render(&e) }).await?;
-                    if done {
-                        break;
-                    }
-                }
+                stream_pairing(&mut wr, &mut rx).await?;
             }
             Request::Approve => {
                 h.events
@@ -343,16 +341,7 @@ async fn handle_conn(stream: UnixStream, h: Handles) -> anyhow::Result<()> {
                     addr,
                     code,
                 }))?;
-                while let Ok(e) = rx.recv().await {
-                    let done = matches!(
-                        e,
-                        UiEvent::PairingComplete { .. } | UiEvent::PairingFailed { .. }
-                    );
-                    write(&mut wr, &Response::Event { text: render(&e) }).await?;
-                    if done {
-                        break;
-                    }
-                }
+                stream_pairing(&mut wr, &mut rx).await?;
             }
             Request::Connect { device, addr } => match DeviceId::parse(&device) {
                 Ok(id) => {
@@ -676,6 +665,44 @@ fn describe(cap: &str, ty: &str, body: &[u8]) -> String {
         }
     }
     format!("{ty} ({} bytes)", body.len())
+}
+
+/// Relay pairing events until the window resolves one way or the other.
+///
+/// The short authentication string goes out as `Confirm` rather than as prose,
+/// because it is the one event that needs an answer.
+async fn stream_pairing(
+    wr: &mut tokio::net::unix::OwnedWriteHalf,
+    rx: &mut broadcast::Receiver<UiEvent>,
+) -> anyhow::Result<()> {
+    while let Ok(e) = rx.recv().await {
+        let done = matches!(
+            e,
+            UiEvent::PairingComplete { .. } | UiEvent::PairingFailed { .. }
+        );
+        match &e {
+            UiEvent::PairingSas {
+                name,
+                fingerprint,
+                sas,
+            } => {
+                write(
+                    wr,
+                    &Response::Confirm {
+                        name: name.clone(),
+                        fingerprint: fingerprint.to_string(),
+                        sas: sas.clone(),
+                    },
+                )
+                .await?;
+            }
+            _ => write(wr, &Response::Event { text: render(&e) }).await?,
+        }
+        if done {
+            break;
+        }
+    }
+    Ok(())
 }
 
 async fn write(wr: &mut tokio::net::unix::OwnedWriteHalf, r: &Response) -> anyhow::Result<()> {
