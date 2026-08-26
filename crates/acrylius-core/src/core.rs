@@ -7,7 +7,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::config::CoreConfig;
-use crate::link::{BulkSupport, LinkAttrs, LinkDownReason, LinkId, Routes, TransportId};
+use crate::link::{
+    BulkSupport, LinkAttrs, LinkDownReason, LinkId, Routes, TransportId, TransportKind,
+};
 use crate::noise::{Handshake, Identity, Session};
 use crate::peer::{PeerRecord, PeerState};
 use crate::plugin::{BulkRequest, Cx, PendingSend, Plugin};
@@ -59,6 +61,13 @@ struct UpLink {
     /// went unenforced until a second transport existed to notice.
     bulk: BulkSupport,
     max_message: u32,
+    /// What is carrying this session, for a person to see.
+    ///
+    /// Not used to decide anything — the core routes by `LinkId` and asks
+    /// `LinkAttrs` about capability. It is here because "the phone is on
+    /// Bluetooth now" is invisible otherwise, and a transport that silently
+    /// changes under you is one nobody can tell is working.
+    kind: TransportKind,
     /// Our `caps_out` ∩ their `caps_in`, which is what we may send.
     can_send: Vec<String>,
     /// Their `caps_out` ∩ our `caps_in`, which is what we will accept.
@@ -68,7 +77,10 @@ struct UpLink {
 enum LinkState {
     Pending(PendingLink),
     Handshaking(Box<HandshakingLink>),
-    Up(UpLink),
+    /// Boxed for the same reason its sibling is: a live session is by far the
+    /// largest thing a link can be, and every pending or handshaking link would
+    /// otherwise pay for it.
+    Up(Box<UpLink>),
 }
 
 /// A pairing handshake that finished and is waiting on a human.
@@ -675,15 +687,16 @@ impl Core {
 
         self.links.insert(
             link,
-            LinkState::Up(UpLink {
+            LinkState::Up(Box::new(UpLink {
                 session,
                 peer: peer.clone(),
                 handshake_hash,
                 bulk: attrs.bulk,
                 max_message: attrs.max_message,
+                kind: attrs.kind,
                 can_send,
                 can_recv,
-            }),
+            })),
         );
         out.ui(UiEvent::PeerReachable {
             peer: peer.clone(),
@@ -857,7 +870,11 @@ impl Core {
         &mut self,
         now_ms: u64,
         link: LinkId,
-        mut u: UpLink,
+        // Taken and returned as the box it is stored in: the link is removed
+        // from the table for the duration of the call and put back afterwards,
+        // and moving a session's worth of bytes twice per frame to do it would
+        // be a poor trade for the borrow it avoids.
+        mut u: Box<UpLink>,
         kind: FrameKind,
         body: &[u8],
         out: &mut Outcome,
@@ -915,7 +932,8 @@ impl Core {
             return;
         };
 
-        let mut cx = Cx::new(now_ms, self.next_token, self.serves);
+        let mut cx = Cx::new(now_ms, self.next_token, self.serves)
+            .for_peer_link(self.bulk_support_for(&peer));
         let result = self.plugins[idx].on_message(&mut cx, &peer, &env);
         self.next_token = cx.next_token;
         self.remember_owner(&cx, idx);
@@ -1067,6 +1085,17 @@ impl Core {
     fn bulk_support_for(&self, peer: &DeviceId) -> Option<BulkSupport> {
         self.links.values().find_map(|st| match st {
             LinkState::Up(u) if &u.peer == peer => Some(u.bulk),
+            _ => None,
+        })
+    }
+
+    /// What a peer is currently reached over, if anything.
+    ///
+    /// `None` means no session is up — not that the transport is unknown.
+    #[must_use]
+    pub fn transport_for(&self, peer: &DeviceId) -> Option<TransportKind> {
+        self.links.values().find_map(|st| match st {
+            LinkState::Up(u) if &u.peer == peer => Some(u.kind.clone()),
             _ => None,
         })
     }
@@ -1286,7 +1315,8 @@ impl Core {
                     return;
                 };
                 tracing::debug!(%peer, %cap, %ty, "local plugin command");
-                let mut cx = Cx::new(now_ms, self.next_token, self.serves);
+                let mut cx = Cx::new(now_ms, self.next_token, self.serves)
+                    .for_peer_link(self.bulk_support_for(&peer));
                 let r = self.plugins[idx].on_local(&mut cx, &peer, &ty, &body);
                 self.next_token = cx.next_token;
                 self.remember_owner(&cx, idx);

@@ -950,18 +950,55 @@ fn a_link_that_cannot_carry_files_refuses_instead_of_listening() {
     // a phone with Wi-Fi off can never reach — which looks, from the phone,
     // like a transfer that simply stopped.
     let (mut net, b_id) = ble_sharing_pair();
-    let a_id = net.a.device_id();
 
     plugin(&mut net, Side::A, &b_id, "offer", offer_body(1, 4096));
-    plugin(&mut net, Side::B, &a_id, "accept", answer_body(1));
 
+    // On the sender, and before anything leaves. Refusing on the receiver was
+    // the original bug wearing the shape of a fix: the far end declines when a
+    // person there accepts, that refusal is local to it, and the phone that
+    // asked sits on "offered" until the session ends. An error nobody who acted
+    // can see is not a refusal.
+    assert!(
+        net.saw(Side::A, |e| matches!(
+            e,
+            UiEvent::Error { code, .. }
+                if *code == acrylius_core::proto::envelope::ErrorCode::NotAllowed
+        )),
+        "the side that asked is told why, rather than left waiting"
+    );
+    assert!(
+        !net.saw(Side::B, |e| matches!(
+            e,
+            UiEvent::Plugin { ty, .. } if ty == "offer"
+        )),
+        "and an offer that cannot be completed is never made"
+    );
     assert!(
         net.bulk_keys.is_empty(),
         "nothing may be listened for on a link that cannot carry it"
     );
+}
+
+#[test]
+fn a_link_that_can_carry_files_is_left_alone() {
+    // The negative of the above: the check must key on what the link said, not
+    // on there being a check at all. A TCP pair offers and listens as before.
+    let (mut net, b_id) = sharing_pair();
+    let a_id = net.a.device_id();
+
+    plugin(&mut net, Side::A, &b_id, "offer", offer_body(1, 4096));
     assert!(
-        net.saw(Side::B, |e| matches!(e, UiEvent::Error { .. })),
-        "and the side that tried is told why, rather than left waiting"
+        net.saw(Side::B, |e| matches!(
+            e,
+            UiEvent::Plugin { ty, .. } if ty == "offer"
+        )),
+        "an ordinary link still carries an offer"
+    );
+
+    plugin(&mut net, Side::B, &a_id, "accept", answer_body(1));
+    assert!(
+        !net.bulk_keys.is_empty(),
+        "and still opens a side channel for it"
     );
 }
 

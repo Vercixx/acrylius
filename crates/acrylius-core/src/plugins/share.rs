@@ -28,7 +28,7 @@
 use std::collections::BTreeMap;
 
 use crate::plugin::{Cx, Plugin, PluginError, PluginManifest};
-use crate::proto::envelope::Envelope;
+use crate::proto::envelope::{Envelope, ErrorCode};
 use crate::proto::ids::DeviceId;
 use crate::vocab::{EffectKind, TransferId, UiEvent};
 
@@ -226,6 +226,23 @@ impl Plugin for SharePlugin {
                 let offer: Offer = minicbor::decode(body).map_err(|_| PluginError::BadBody)?;
                 if offer.size > MAX_BYTES {
                     return Err(PluginError::TooLarge);
+                }
+                // Refused here, before the offer goes out, because here is the
+                // only place a person will ever see it. A file moves over a
+                // side channel, not over the session, so a link that carries
+                // no bulk — Bluetooth — cannot finish this however willing
+                // both ends are. The far end discovers that only when someone
+                // there accepts, and its refusal is local to it: the sender
+                // would sit on "offered" until the session ended.
+                if !cx.peer_can_carry_bulk() {
+                    cx.ui(UiEvent::Error {
+                        code: ErrorCode::NotAllowed,
+                        detail: format!(
+                            "the link to {peer} cannot carry files. Reach it over the \
+                             network for that."
+                        ),
+                    });
+                    return Ok(());
                 }
                 self.sending.insert(
                     TransferId(offer.transfer),

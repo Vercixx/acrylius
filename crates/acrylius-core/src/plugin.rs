@@ -89,6 +89,9 @@ pub struct Cx {
     pub(crate) bulk: Vec<BulkRequest>,
     /// What this host can carry out. See [`Cx::serves`].
     serves: crate::vocab::EffectSet,
+    /// What the link to the peer this dispatch concerns can carry, when there
+    /// is one and the core knows. See [`Cx::peer_can_carry_bulk`].
+    peer_bulk: Option<crate::link::BulkSupport>,
 }
 
 /// A plugin asking for a side channel.
@@ -126,7 +129,32 @@ impl Cx {
             wake_at: None,
             bulk: Vec::new(),
             serves,
+            peer_bulk: None,
         }
+    }
+
+    /// Tell this context what the link to the peer being dispatched for can
+    /// carry. Set only where a dispatch concerns one peer.
+    pub(crate) fn for_peer_link(mut self, bulk: Option<crate::link::BulkSupport>) -> Self {
+        self.peer_bulk = bulk;
+        self
+    }
+
+    /// Whether a side channel to this peer could carry bytes at all.
+    ///
+    /// The companion to [`Cx::serves`], and needed for the same reason: that
+    /// one answers "can this machine do it", this one answers "can the link
+    /// get there". A plugin that offers a file over a link which cannot carry
+    /// one leaves the far end waiting on a transfer that will never start,
+    /// because the refusal would otherwise happen on the *receiving* side —
+    /// when a person there accepts — and never travels back to the sender.
+    ///
+    /// Unknown counts as yes. Nothing should be blocked because the core has
+    /// not learned an answer yet; only a link that has positively said it
+    /// carries nothing is refused.
+    #[must_use]
+    pub fn peer_can_carry_bulk(&self) -> bool {
+        self.peer_bulk != Some(crate::link::BulkSupport::None)
     }
 
     /// Whether this host can carry out an effect, as opposed to only ask
