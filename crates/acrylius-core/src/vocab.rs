@@ -162,6 +162,14 @@ pub enum Effect {
     RunCommand {
         id: String,
     },
+    /// What is playing, everywhere on this machine.
+    MediaQuery,
+    /// Act on a player. An empty `player` means whichever is active — the
+    /// host decides what that means, because only it can see them.
+    MediaControl {
+        player: String,
+        action: MediaAction,
+    },
     SendMagicPacket {
         macs: Vec<String>,
         dests: Vec<String>,
@@ -178,6 +186,37 @@ pub enum Effect {
     },
 }
 
+/// What to do to a player.
+///
+/// Milliseconds and a whole percent, not seconds and a fraction. Nothing here
+/// needs sub-millisecond precision, and integers keep this comparable — which
+/// matters because `Effect` is compared in tests and a float would quietly make
+/// that impossible.
+///
+/// Ranges are checked by the plugin before they get here, so a host may pass
+/// them on without checking again.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MediaAction {
+    Play,
+    Pause,
+    PlayPause,
+    Next,
+    Previous,
+    Stop,
+    /// Relative, and may be negative. A skip button means "thirty seconds on
+    /// from wherever it is", which needs no agreement about where that is.
+    Seek {
+        offset_ms: i64,
+    },
+    SetPosition {
+        ms: u64,
+    },
+    /// 0 to 100.
+    SetVolume {
+        percent: u8,
+    },
+}
+
 /// Coarse classes of effect, declared by a host at construction.
 ///
 /// A plugin lists what it requires; a host that cannot provide it has that
@@ -190,6 +229,7 @@ pub enum EffectKind {
     Clipboard,
     Command,
     Wol,
+    Media,
     Custom,
 }
 
@@ -201,6 +241,7 @@ impl Effect {
             Self::ClipboardRead | Self::ClipboardWrite { .. } => EffectKind::Clipboard,
             Self::ListCommands | Self::RunCommand { .. } => EffectKind::Command,
             Self::SendMagicPacket { .. } => EffectKind::Wol,
+            Self::MediaQuery | Self::MediaControl { .. } => EffectKind::Media,
             Self::Custom { .. } => EffectKind::Custom,
         }
     }

@@ -301,6 +301,7 @@ pub enum FfiEffectKind {
     Clipboard,
     Command,
     Wol,
+    Media,
     Custom,
 }
 
@@ -311,6 +312,7 @@ impl From<FfiEffectKind> for cv::EffectKind {
             FfiEffectKind::Clipboard => Self::Clipboard,
             FfiEffectKind::Command => Self::Command,
             FfiEffectKind::Wol => Self::Wol,
+            FfiEffectKind::Media => Self::Media,
             FfiEffectKind::Custom => Self::Custom,
         }
     }
@@ -329,6 +331,15 @@ pub enum FfiEffect {
     ListCommands,
     RunCommand {
         id: String,
+    },
+    MediaQuery,
+    /// An empty `player` means whichever is active. `value` is milliseconds for
+    /// a seek or a position and a whole percent for a volume, already
+    /// range-checked by the plugin.
+    MediaControl {
+        player: String,
+        verb: String,
+        value: i64,
     },
     SendMagicPacket {
         macs: Vec<String>,
@@ -352,6 +363,30 @@ impl From<cv::Effect> for FfiEffect {
             cv::Effect::ClipboardWrite { mime, data } => Self::ClipboardWrite { mime, data },
             cv::Effect::ListCommands => Self::ListCommands,
             cv::Effect::RunCommand { id } => Self::RunCommand { id },
+            // Flattened to a verb and one number rather than mirroring the
+            // nested enum. A host acting on this switches on a string either
+            // way, and a second enum across the boundary would be a second
+            // thing to keep in step for no gain.
+            cv::Effect::MediaQuery => Self::MediaQuery,
+            cv::Effect::MediaControl { player, action } => {
+                use cv::MediaAction as A;
+                let (verb, value) = match action {
+                    A::Play => ("play", 0),
+                    A::Pause => ("pause", 0),
+                    A::PlayPause => ("playpause", 0),
+                    A::Next => ("next", 0),
+                    A::Previous => ("previous", 0),
+                    A::Stop => ("stop", 0),
+                    A::Seek { offset_ms } => ("seek", offset_ms),
+                    A::SetPosition { ms } => ("position", i64::try_from(ms).unwrap_or(i64::MAX)),
+                    A::SetVolume { percent } => ("volume", i64::from(percent)),
+                };
+                Self::MediaControl {
+                    player,
+                    verb: verb.to_string(),
+                    value,
+                }
+            }
             cv::Effect::SendMagicPacket { macs, dests, port } => {
                 Self::SendMagicPacket { macs, dests, port }
             }

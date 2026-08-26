@@ -55,6 +55,12 @@ pub enum Request {
         device: String,
         push: Option<String>,
     },
+    Media {
+        device: String,
+        action: String,
+        player: Option<String>,
+        value: Option<i64>,
+    },
     /// What a peer is willing to run.
     Commands {
         device: String,
@@ -401,9 +407,31 @@ async fn handle_conn(stream: UnixStream, h: Handles) -> anyhow::Result<()> {
                 )
                 .await?;
             }
+            Request::Media {
+                device,
+                action,
+                player,
+                value,
+            } => {
+                let body = minicbor::to_vec(acrylius_core::plugins::media::MediaCommand {
+                    player: player.unwrap_or_default(),
+                    value: value.unwrap_or(0),
+                })
+                .unwrap_or_default();
+                plugin_request(
+                    &mut wr,
+                    &h,
+                    &device,
+                    acrylius_core::plugins::media::CAP,
+                    &action,
+                    body,
+                    &["state", "err"],
+                )
+                .await?;
+            }
             Request::Clipboard { device, push } => {
                 let (ty, body) = match &push {
-                    Some(text) => ("changed", text.as_bytes().to_vec()),
+                    Some(text) => ("push", text.as_bytes().to_vec()),
                     None => ("get", Vec::new()),
                 };
                 let expect: &[&str] = if push.is_some() { &[] } else { &["set", "err"] };
@@ -521,6 +549,12 @@ async fn handle_conn(stream: UnixStream, h: Handles) -> anyhow::Result<()> {
 /// `expect` names the reply verbs worth waiting for. An empty list means the
 /// verb is fire-and-forget, which is the case for pushing a clipboard value: it
 /// is a broadcast to every peer, and there is nothing to answer it.
+/// What came back: the peer's reply, or a refusal from our own core.
+enum Answer {
+    Reply(String, Vec<u8>),
+    Refused(String),
+}
+
 async fn plugin_request(
     wr: &mut tokio::net::unix::OwnedWriteHalf,
     h: &Handles,
@@ -563,7 +597,15 @@ async fn plugin_request(
                     body,
                     ..
                 }) if c == cap && expect.contains(&t.as_str()) => {
-                    return Some((t, body));
+                    return Some(Answer::Reply(t, body));
+                }
+                // A request the core refused before it left this machine — a
+                // value out of range, a capability not negotiated. Nothing will
+                // ever come back from the peer, so waiting for one turns an
+                // immediate, well-explained refusal into a fifteen-second
+                // timeout reported as if the peer were at fault.
+                Ok(UiEvent::Error { code, detail }) => {
+                    return Some(Answer::Refused(format!("{detail} ({})", code.as_str())));
                 }
                 Ok(UiEvent::PeerUnreachable { .. }) | Err(_) => return None,
                 Ok(_) => {}
@@ -573,7 +615,7 @@ async fn plugin_request(
     .await;
 
     match waited {
-        Ok(Some((ty, body))) => {
+        Ok(Some(Answer::Reply(ty, body))) => {
             write(
                 wr,
                 &Response::Event {
@@ -582,6 +624,7 @@ async fn plugin_request(
             )
             .await
         }
+        Ok(Some(Answer::Refused(message))) => write(wr, &Response::Error { message }).await,
         Ok(None) => {
             write(
                 wr,
@@ -608,7 +651,7 @@ async fn plugin_request(
 /// The core keeps bodies opaque, which is the right call for routing and the
 /// wrong one for a terminal, so decoding happens here at the edge.
 fn describe(cap: &str, ty: &str, body: &[u8]) -> String {
-    use acrylius_core::plugins::{clipboard, command, session};
+    use acrylius_core::plugins::{clipboard, command, media, session};
     use acrylius_core::proto::envelope::ErrorBody;
 
     if ty == "err" {
@@ -639,6 +682,41 @@ fn describe(cap: &str, ty: &str, body: &[u8]) -> String {
         && let Ok(c) = minicbor::decode::<clipboard::ClipboardSet>(body)
     {
         return String::from_utf8_lossy(&c.data).into_owned();
+    }
+    if cap == media::CAP
+        && let Ok(s) = minicbor::decode::<media::MediaState>(body)
+    {
+        if s.players.is_empty() {
+            return "nothing is playing".to_string();
+        }
+        return s
+            .players
+            .iter()
+            .map(|p| {
+                // The active one is marked, because a command with no player
+                // named goes there and a person should be able to see which.
+                let mark = if p.id == s.active { "*" } else { " " };
+                let mut line = format!("{mark} {:<12} {:<8} {}", p.id, p.status, p.title);
+                if !p.artist.is_empty() {
+                    line.push_str(&format!(" — {}", p.artist));
+                }
+                if p.length_ms > 0 {
+                    line.push_str(&format!(
+                        "  [{}/{}]",
+                        clock(p.position_ms),
+                        clock(p.length_ms)
+                    ));
+                }
+                if let Some(v) = p.volume_percent {
+                    line.push_str(&format!("  vol {v}%"));
+                }
+                if !p.can_control {
+                    line.push_str("  (reports only)");
+                }
+                line
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
     }
     if cap == command::CAP {
         if let Ok(l) = minicbor::decode::<command::CommandList>(body) {
@@ -713,6 +791,13 @@ async fn write(wr: &mut tokio::net::unix::OwnedWriteHalf, r: &Response) -> anyho
 }
 
 /// A fresh pairing code from the Crockford-minus-`ILOU` alphabet.
+#[must_use]
+/// Milliseconds as m:ss, for a line a person reads.
+fn clock(ms: u64) -> String {
+    let secs = ms / 1000;
+    format!("{}:{:02}", secs / 60, secs % 60)
+}
+
 #[must_use]
 pub fn random_code() -> String {
     use rand::Rng;

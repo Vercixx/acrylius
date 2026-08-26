@@ -130,6 +130,36 @@ final class AppModel {
         return false
     }
 
+    // MARK: - media
+
+    /// Send a transport command and wait for the peer to say what happened.
+    ///
+    /// Every one of these is answered with the state afterwards rather than an
+    /// acknowledgement, because a player may ignore a command, clamp a seek, or
+    /// stop of its own accord — and only reading it back says which.
+    @discardableResult
+    func media(_ peer: FfiPeer, _ verb: String, player: String = "", value: Int64 = 0) async -> Bool {
+        let before = catalog[peer.deviceId].media
+        await send(
+            peer,
+            cap: capMedia(),
+            ty: verb,
+            body: encodeMediaCommand(player: player, value: value)
+        )
+        // The answer replaces the state, so waiting for it to differ is waiting
+        // for the command to have landed.
+        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        while ContinuousClock.now < deadline {
+            if catalog[peer.deviceId].media != before { return true }
+            try? await Task.sleep(for: .milliseconds(120))
+        }
+        return false
+    }
+
+    func refreshMedia(_ peer: FfiPeer) async {
+        await send(peer, cap: capMedia(), ty: "query", body: Data())
+    }
+
     func refreshSession(_ peer: FfiPeer) async {
         await send(peer, cap: capSession(), ty: "query", body: Data())
     }

@@ -11,7 +11,7 @@ use acrylius_core::vocab::{Effect, EffectKind, EffectResult};
 use acrylius_rt::effector::Effector;
 
 use crate::command::CommandCatalog;
-use crate::{clipboard, command, session, wol};
+use crate::{clipboard, command, media, session, wol};
 
 /// Where this machine's wake targets live.
 #[derive(Clone, Debug, Default)]
@@ -23,6 +23,7 @@ pub struct WolSettings {
 
 pub struct LinuxEffector {
     session: Option<session::SessionEffector>,
+    media: Option<media::MediaEffector>,
     catalog: CommandCatalog,
     wol: WolSettings,
     has_wayland: bool,
@@ -45,12 +46,23 @@ impl LinuxEffector {
                 None
             }
         };
+        // The session bus, not the system one. Players are per-login, and a
+        // machine with no session bus has nothing to control — which is a
+        // normal way for a headless install to be, not a failure.
+        let media = match media::MediaEffector::new().await {
+            Ok(m) => Some(m),
+            Err(e) => {
+                tracing::debug!(error = %e, "no session bus; media control is off");
+                None
+            }
+        };
         let has_wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
         if !has_wayland {
             tracing::debug!("no WAYLAND_DISPLAY; clipboard is off");
         }
         Self {
             session,
+            media,
             catalog,
             wol,
             has_wayland,
@@ -91,6 +103,12 @@ impl Effector for LinuxEffector {
         // that cannot work.
         if !self.catalog.is_empty() {
             kinds.push(EffectKind::Command);
+        }
+        // Offered whenever there is a session bus, not only when something is
+        // playing. Players come and go, and a capability that appeared and
+        // disappeared with them would have a phone renegotiating all day.
+        if self.media.is_some() {
+            kinds.push(EffectKind::Media);
         }
         kinds
     }
@@ -172,6 +190,28 @@ impl Effector for LinuxEffector {
                     Err(e) => EffectResult::Failed(e.to_string()),
                 }
             }
+
+            Effect::MediaQuery => match &self.media {
+                Some(m) => Self::encode(&m.state().await),
+                None => EffectResult::Unsupported,
+            },
+
+            Effect::MediaControl { player, action } => match &self.media {
+                Some(m) => match m.control(&player, action).await {
+                    // Answered with the state afterwards, not with a bare
+                    // acknowledgement: a player may ignore a command, clamp a
+                    // seek, or stop of its own accord, and only reading it back
+                    // says which. A small pause first, because MPRIS calls
+                    // return before the player has acted on them and reading
+                    // immediately would report the state we started from.
+                    Ok(()) => {
+                        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+                        Self::encode(&m.state().await)
+                    }
+                    Err(e) => EffectResult::Failed(e.to_string()),
+                },
+                None => EffectResult::Unsupported,
+            },
 
             // A namespace this host has never heard of. Answering `Unsupported`
             // rather than failing is what lets the core drop the plugin and

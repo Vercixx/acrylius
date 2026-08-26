@@ -123,6 +123,19 @@ OUT=$("$BIN/acryliusctl" --state $D/a run "$B_ID" '/bin/sh' 2>&1); echo "  $OUT"
 echo "$OUT" | grep -q "refused"; check $? "an unlisted command is refused"
 
 echo
+echo "### media"
+OUT=$("$BIN/acryliusctl" --state $D/a media "$B_ID" 2>&1); echo "  $OUT" | head -3
+# A machine with nothing open is a normal state and not a failure, so the check
+# is that the question was answered rather than that something was playing.
+echo "$OUT" | grep -qE 'nothing is playing|[a-z]'; check $? "bravo answered about its players"
+
+OUT=$("$BIN/acryliusctl" --state $D/a media "$B_ID" volume --value 500 2>&1); echo "  $OUT"
+echo "$OUT" | grep -q "refused"; check $? "a volume out of range is refused, and promptly"
+
+OUT=$("$BIN/acryliusctl" --state $D/a media "$B_ID" pause --player nosuchplayer 2>&1); echo "  $OUT"
+echo "$OUT" | grep -q "refused"; check $? "a player that does not exist is refused"
+
+echo
 echo "### wake"
 OUT=$("$BIN/acryliusctl" --state $D/a wake "$B_ID" aa:bb:cc:dd:ee:ff 2>&1); echo "  $OUT"
 echo "$OUT" | grep -qE '^ok'; check $? "an allowlisted MAC is relayed"

@@ -28,7 +28,7 @@ use acrylius_core::config::CoreConfig;
 use acrylius_core::core::{Core, CoreBuilder};
 use acrylius_core::noise::Identity;
 use acrylius_core::peer::{PeerRecord, PeerState};
-use acrylius_core::plugins::{clipboard, command, ping, session, wol};
+use acrylius_core::plugins::{clipboard, command, media, ping, session, wol};
 
 pub use bodies::*;
 pub use types::*;
@@ -174,6 +174,9 @@ impl AcryliusCore {
         // Runs nothing on request. It can still list and run what a computer
         // offers.
         .plugin(command::CommandPlugin::new(Vec::new()))
+        // A phone plays its own audio through its own controls. It registers
+        // this to drive a computer's players, not to offer its own.
+        .plugin(media::MediaPlugin::default())
         .restore(records)
         .build();
         Ok(Self {

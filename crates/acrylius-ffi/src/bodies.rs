@@ -9,7 +9,7 @@
 //! up with five implementations of its protocol because each surface parsed the
 //! wire for itself. A view that wants a command list gets a `[FfiCommand]`.
 
-use acrylius_core::plugins::{clipboard, command, session, wol};
+use acrylius_core::plugins::{clipboard, command, media, session, wol};
 
 use crate::FfiError;
 
@@ -141,6 +141,75 @@ pub fn decode_wol_config(body: Vec<u8>) -> Result<FfiWolConfig, FfiError> {
         port: c.port,
         last_ipv4: c.last_ipv4,
     })
+}
+
+/// One player, for a screen to show.
+#[derive(uniffi::Record, Clone, Debug)]
+pub struct FfiMediaPlayer {
+    pub id: String,
+    pub name: String,
+    pub status: String,
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub length_ms: u64,
+    pub position_ms: u64,
+    pub volume_percent: Option<u8>,
+    pub can_go_next: bool,
+    pub can_go_previous: bool,
+    pub can_seek: bool,
+    pub can_control: bool,
+}
+
+#[derive(uniffi::Record, Clone, Debug)]
+pub struct FfiMediaState {
+    pub players: Vec<FfiMediaPlayer>,
+    /// Which one a command with no player named goes to.
+    pub active: String,
+}
+
+#[uniffi::export]
+pub fn decode_media_state(body: Vec<u8>) -> Result<FfiMediaState, FfiError> {
+    let s: media::MediaState = minicbor::decode(&body).map_err(|_| bad("media state"))?;
+    Ok(FfiMediaState {
+        players: s
+            .players
+            .into_iter()
+            .map(|p| FfiMediaPlayer {
+                id: p.id,
+                name: p.name,
+                status: p.status,
+                title: p.title,
+                artist: p.artist,
+                album: p.album,
+                length_ms: p.length_ms,
+                position_ms: p.position_ms,
+                volume_percent: p.volume_percent,
+                can_go_next: p.can_go_next,
+                can_go_previous: p.can_go_previous,
+                can_seek: p.can_seek,
+                can_control: p.can_control,
+            })
+            .collect(),
+        active: s.active,
+    })
+}
+
+/// The body of a media command.
+///
+/// `player` empty means whichever is active; `value` is milliseconds for a seek
+/// or position and a whole percent for a volume. Encoded here so a screen never
+/// has to know the wire shape.
+#[uniffi::export]
+#[must_use]
+pub fn encode_media_command(player: String, value: i64) -> Vec<u8> {
+    minicbor::to_vec(media::MediaCommand { player, value }).unwrap_or_default()
+}
+
+#[uniffi::export]
+#[must_use]
+pub fn cap_media() -> String {
+    media::CAP.to_string()
 }
 
 /// The bytes a host sends to wake a machine.

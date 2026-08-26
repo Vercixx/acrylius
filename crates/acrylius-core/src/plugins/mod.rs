@@ -7,6 +7,7 @@
 
 pub mod clipboard;
 pub mod command;
+pub mod media;
 pub mod ping;
 pub mod session;
 pub mod wol;

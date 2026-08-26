@@ -40,6 +40,8 @@ struct DeviceView: View {
                 }
             }
 
+            MediaSection(peer: peer)
+
             if features.canWake, !peer.reachable {
                 Section {
                     TaskButton("Wake up") {
@@ -101,7 +103,11 @@ struct DeviceView: View {
             }
         }
         .navigationTitle(peer.name)
-        .task { if peer.reachable { await model.refreshSession(peer) } }
+        .task {
+            guard peer.reachable else { return }
+            await model.refreshSession(peer)
+            await model.refreshMedia(peer)
+        }
         .confirmationDialog(
             "Forget \(peer.name)?",
             isPresented: $confirmingForget,

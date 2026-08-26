@@ -1,7 +1,8 @@
 # acrylius
 
 Link an iPhone and a Linux computer over a local network. Lock and unlock the
-desktop, wake it, share the clipboard, and run commands it has offered.
+desktop, wake it, share the clipboard, control what is playing, and run commands
+it has offered.
 
 Everything on the wire is defined once, in Rust, and compiled into both ends.
 The daemon uses that crate directly; the iOS app uses the same crate through
@@ -16,7 +17,8 @@ desktop  UnOfEh0ZNHHuzLPviAR2fA
   fingerprint  JZrTp_5-8vWbrAf5NRFJKiS2znkhlXjLk9OGoLFtb5A
   port         1971
   accepts      org.acrylius.clipboard/1, org.acrylius.command/1,
-               org.acrylius.ping/1, org.acrylius.session/1, org.acrylius.wol/1
+               org.acrylius.media/1, org.acrylius.ping/1,
+               org.acrylius.session/1, org.acrylius.wol/1
 ```
 
 | | |
@@ -26,6 +28,7 @@ desktop  UnOfEh0ZNHHuzLPviAR2fA
 | **Session** | `acryliusctl session <device> lock` / `unlock` / `query` |
 | **Clipboard** | `acryliusctl clipboard <device>` to read, `--push` to send |
 | **Commands** | `acryliusctl commands <device>`, then `run <device> <id>` |
+| **Media** | `acryliusctl media <device>` to see, then `playpause`, `next`, `volume --value 40` |
 | **Wake** | The phone sends the packet. A sleeping machine runs no daemon. |
 
 ## Installing it

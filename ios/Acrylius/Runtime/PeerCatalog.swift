@@ -23,6 +23,9 @@ public struct PeerFeatures: Equatable, Sendable {
     public var wake: FfiWolConfig?
     /// The last clipboard value this peer handed over.
     public var clipboard: String?
+    /// What is playing there. Present once the peer has described its players,
+    /// which it does on connect and after every command.
+    public var media: FfiMediaState?
     /// The most recent refusal, for showing why a button did nothing.
     public var lastError: String?
 
@@ -31,6 +34,20 @@ public struct PeerFeatures: Equatable, Sendable {
     public var canLock: Bool { session != nil }
     public var canWake: Bool { wake?.macs.isEmpty == false }
     public var canRunCommands: Bool { !commands.isEmpty }
+
+    /// Something worth showing a transport control for.
+    ///
+    /// Not merely "the peer has media": a machine with no players open sends an
+    /// empty list, and a remote with nothing to control is a remote that looks
+    /// broken.
+    public var canControlMedia: Bool { activePlayer != nil }
+
+    /// The player a command with no name goes to, as the peer named it.
+    public var activePlayer: FfiMediaPlayer? {
+        guard let media else { return nil }
+        return media.players.first { $0.id == media.active }
+            ?? media.players.first
+    }
 }
 
 /// Folds the core's UI events into a per-peer view.
@@ -100,6 +117,11 @@ public struct PeerCatalog: Equatable, Sendable {
         } else if cap == capClipboard() {
             if ty == "set", let value = try? decodeClipboard(body: body) {
                 features.clipboard = value.text
+                changed = true
+            }
+        } else if cap == capMedia() {
+            if ty == "state", let state = try? decodeMediaState(body: body) {
+                features.media = state
                 changed = true
             }
         }

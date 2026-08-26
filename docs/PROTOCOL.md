@@ -335,9 +335,17 @@ Conflating the two would let a peer receive a capability it only declared it
 could send. A message arriving for a capability outside the negotiated set is
 answered with `cap_not_negotiated` and is not delivered.
 
-A device omits a capability it cannot actually serve. On iOS there is no session
-to lock, so `org.acrylius.session/1` is absent from `caps_in` and a PC never
-sends one.
+A device advertises every capability it knows about, including ones it cannot
+serve. Being unable to *serve* a capability says nothing about being able to
+*use* one: a phone has no desktop session of its own and still wants to lock a
+computer's, and an answer arrives under the same capability as the request, so
+withdrawing it would break replies as well. A request a device cannot carry out
+is answered `not_allowed`.
+
+What a device can actually do is discovered instead from what it announces on
+connect — a session state, a catalogue of commands, wake targets, a list of
+players. A machine with no commands configured sends no catalogue and a remote
+shows no button.
 
 ## 11. The version 1 capabilities
 
@@ -449,6 +457,50 @@ prompt, and only a `PasteButton`, the paste menu, or the keyboard shortcut are
 exempt. `UIPasteboard.changeCount` can be polled without a prompt, so an iOS
 implementation can notice a change and offer a button, but it cannot sync
 phone to computer silently. Computer to phone is unaffected.
+
+### org.acrylius.media/1
+
+Control whatever is playing. Which players a machine has, and what "the active
+one" means there, is the host's business; on Linux it is MPRIS.
+
+| direction | ty | body |
+|---|---|---|
+| →peer | `query` | empty |
+| →peer | `play`, `pause`, `playpause`, `next`, `previous`, `stop` | `MediaCommand`, or empty |
+| →peer | `seek` | `MediaCommand`, `value` = milliseconds, may be negative |
+| →peer | `position` | `MediaCommand`, `value` = milliseconds from the start |
+| →peer | `volume` | `MediaCommand`, `value` = 0 to 100 |
+| ←peer | `state` | `MediaState` |
+
+```
+MediaCommand { 0: player, 1: value }
+MediaState   { 0: [MediaPlayer], 1: active }
+MediaPlayer  { 0: id, 1: name, 2: status, 3: title, 4: artist, 5: album,
+               6: length_ms, 7: position_ms, 8: volume_percent,
+               9: can_go_next, 10: can_go_previous, 11: can_seek,
+               12: can_control }
+```
+
+An empty `player` means whichever the peer reports as `active`. A remote whose
+buttons stop working because a second player appeared is worse than one that
+occasionally guesses, and the guess is visible.
+
+Every command is answered with `state`, never an acknowledgement. A player may
+ignore a command, clamp a seek, or stop of its own accord, and reading it back
+is the only honest answer.
+
+`position_ms` is reported and must never be counted forward by a receiver: it
+would drift, and it would keep advancing after the media stopped somewhere the
+receiver cannot see. A `state` is not broadcast for a position change alone,
+because a playing track would otherwise announce itself once a second forever;
+it is broadcast for a track change, a pause, a volume move, or a player
+appearing or leaving.
+
+`volume` is the player's own, not the machine's. Values outside 0 to 100 are
+refused before they reach a player, so a host need not range-check again.
+
+Album art is not carried. MPRIS supplies a URL, usually to a file the peer
+cannot read, and an image is far past what an envelope should hold.
 
 ### org.acrylius.command/1
 

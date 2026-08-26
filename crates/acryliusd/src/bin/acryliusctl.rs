@@ -93,6 +93,25 @@ enum Cmd {
         #[arg(long)]
         push: Option<String>,
     },
+    /// Control what is playing on a peer.
+    ///
+    /// With no action, reports what it has. A command with no --player goes to
+    /// whichever player is active, which `media <device>` marks with a `*`.
+    Media {
+        #[arg(allow_hyphen_values = true)]
+        device: String,
+        /// query, play, pause, playpause, next, previous, stop, seek,
+        /// position, volume.
+        #[arg(default_value = "query")]
+        action: String,
+        /// Which player, by the id shown in `media <device>`.
+        #[arg(long)]
+        player: Option<String>,
+        /// Milliseconds for seek (may be negative) and position; 0-100 for
+        /// volume.
+        #[arg(long, allow_hyphen_values = true)]
+        value: Option<i64>,
+    },
     /// List what a peer is willing to run.
     Commands {
         #[arg(allow_hyphen_values = true)]
@@ -143,6 +162,12 @@ enum Request {
     Clipboard {
         device: String,
         push: Option<String>,
+    },
+    Media {
+        device: String,
+        action: String,
+        player: Option<String>,
+        value: Option<i64>,
     },
     Commands {
         device: String,
@@ -249,6 +274,20 @@ async fn main() -> anyhow::Result<()> {
         Cmd::Ping { device } => (Request::Ping { device }, false),
         Cmd::Session { device, action } => (Request::Session { device, action }, false),
         Cmd::Clipboard { device, push } => (Request::Clipboard { device, push }, false),
+        Cmd::Media {
+            device,
+            action,
+            player,
+            value,
+        } => (
+            Request::Media {
+                device,
+                action,
+                player,
+                value,
+            },
+            false,
+        ),
         Cmd::Commands { device } => (Request::Commands { device }, false),
         Cmd::Run { device, id } => (Request::Run { device, id }, false),
         Cmd::Wake { device, mac } => (Request::Wake { device, mac }, false),
