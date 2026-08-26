@@ -22,7 +22,7 @@ struct DeviceView: View {
             Section {
                 LabeledContent("Status", value: peer.reachable ? "Connected" : "Not connected")
                 if !peer.reachable {
-                    TaskButton("Connect") { await model.connect(peer) }
+                    TaskButton("Connect") { await model.connect(peer); return true }
                 }
             }
 
@@ -47,6 +47,7 @@ struct DeviceView: View {
                         if !sent {
                             model.lastError = "Could not send a wake packet."
                         }
+                        return sent
                     }
                 } header: {
                     Text("Power")
@@ -59,13 +60,13 @@ struct DeviceView: View {
             if features.canRunCommands {
                 Section("Commands") {
                     ForEach(features.commands, id: \.id) { command in
-                        TaskButton(command.name) { await model.run(command, on: peer) }
+                        TaskButton(command.name) { await model.run(command, on: peer); return true }
                     }
                 }
             }
 
             Section("Clipboard") {
-                TaskButton("Get from \(peer.name)") { await model.fetchClipboard(peer) }
+                TaskButton("Get from \(peer.name)") { await model.fetchClipboard(peer); return true }
                 if let value = features.clipboard {
                     Text(value)
                         .font(.callout)

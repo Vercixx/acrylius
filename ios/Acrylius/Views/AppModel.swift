@@ -90,8 +90,10 @@ final class AppModel {
         await send(peer, cap: capPing(), ty: "ping", body: Data("hello".utf8))
     }
 
-    func lock(_ peer: FfiPeer) async {
+    @discardableResult
+    func lock(_ peer: FfiPeer) async -> Bool {
         await send(peer, cap: capSession(), ty: "lock", body: Data())
+        return await awaitScreen(peer, locked: true)
     }
 
     /// Unlocking hands over a running session, so it asks for Face ID first.
@@ -99,9 +101,33 @@ final class AppModel {
     /// Locking deliberately does not, and that asymmetry is not an oversight:
     /// locking costs whoever is at the machine a password, while unlocking
     /// gives a session away. Do not "fix" this by making them consistent.
-    func unlock(_ peer: FfiPeer) async {
-        guard await confirmIdentity(reason: "Unlock \(peer.name)") else { return }
+    @discardableResult
+    func unlock(_ peer: FfiPeer) async -> Bool {
+        guard await confirmIdentity(reason: "Unlock \(peer.name)") else { return false }
         await send(peer, cap: capSession(), ty: "unlock", body: Data())
+        let ok = await awaitScreen(peer, locked: false)
+        if !ok {
+            // logind only emits a signal; acting on it is the screen locker's
+            // choice, and several do not. Saying "unlocked" because the request
+            // was delivered would be a lie the user cannot check from here.
+            lastError = "\(peer.name) did not unlock. Its screen locker has to "
+                + "act on logind's unlock signal, and not all of them do — "
+                + "set session.unlock_command on that machine."
+        }
+        return ok
+    }
+
+    /// Wait for the peer to report the screen in the state we asked for.
+    ///
+    /// The answer comes from what the machine reports after re-reading its own
+    /// state, never from the request having been delivered.
+    private func awaitScreen(_ peer: FfiPeer, locked: Bool) async -> Bool {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(8))
+        while ContinuousClock.now < deadline {
+            if catalog[peer.deviceId].session?.locked == locked { return true }
+            try? await Task.sleep(for: .milliseconds(150))
+        }
+        return false
     }
 
     func refreshSession(_ peer: FfiPeer) async {
@@ -129,8 +155,15 @@ final class AppModel {
     /// content that came from another app raises a system prompt. `changeCount`
     /// can be polled without one, so the app can notice a change and offer a
     /// button, but it cannot sync silently.
-    func pushClipboard(_ text: String, to peer: FfiPeer) async {
-        await send(peer, cap: capClipboard(), ty: "changed", body: Data(text.utf8))
+    @discardableResult
+    func pushClipboard(_ text: String, to peer: FfiPeer) async -> Bool {
+        // "push", not "changed". The latter is the host reporting a change it
+        // noticed by itself, and is gated on a switch this phone keeps off,
+        // because reading the pasteboard here raises a system alert. A person
+        // pressing Paste is not that, and was silently discarded by it.
+        await send(peer, cap: capClipboard(), ty: "push", body: Data(text.utf8))
+        status = "Sent to \(peer.name)"
+        return true
     }
 
     /// Wake a sleeping machine.
@@ -205,8 +238,20 @@ final class AppModel {
         case .peerUnreachable:
             status = "not connected"
             Task { await refresh() }
-        case let .plugin(_, _, ty, _):
+        case let .plugin(_, cap, ty, body):
             if ty == "pong" { status = "pong" }
+            // A clipboard value that came back from a peer goes onto this
+            // phone's pasteboard. Asking for a computer's clipboard and only
+            // being shown it is not much use on a device whose whole point is
+            // that you then paste it somewhere. Writing is always allowed; it
+            // is reading that raises a prompt.
+            if cap == capClipboard(), ty == "set",
+               let value = try? decodeClipboard(body: body), !value.text.isEmpty {
+                #if canImport(UIKit)
+                UIPasteboard.general.string = value.text
+                #endif
+                status = "Copied to this phone"
+            }
         case let .error(code, detail):
             // Local Network permission is the failure users actually hit, and
             // it is silent: iOS offers no API to query it. Say what to do.

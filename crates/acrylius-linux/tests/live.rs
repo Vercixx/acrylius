@@ -20,7 +20,8 @@ async fn compositor_probe_against_whatever_is_running() {
 
 #[tokio::test]
 async fn logind_reports_this_session() {
-    let Ok(effector) = acrylius_linux::session::SessionEffector::new().await else {
+    let Ok(effector) = acrylius_linux::session::SessionEffector::new(Default::default()).await
+    else {
         println!("no system bus (headless runner?)");
         return;
     };

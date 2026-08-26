@@ -30,11 +30,15 @@ pub struct LinuxEffector {
 }
 
 impl LinuxEffector {
-    pub async fn new(catalog: CommandCatalog, wol: WolSettings) -> Self {
+    pub async fn new(
+        catalog: CommandCatalog,
+        wol: WolSettings,
+        session_commands: session::Commands,
+    ) -> Self {
         // A machine with no system bus, or no graphical session on it, simply
         // does not offer to lock one. That is a normal configuration, not an
         // error, so it is logged at debug and reported by omission.
-        let session = match session::SessionEffector::new().await {
+        let session = match session::SessionEffector::new(session_commands).await {
             Ok(s) => Some(s),
             Err(e) => {
                 tracing::debug!(error = %e, "no logind; session control is off");
@@ -187,7 +191,12 @@ mod tests {
 
     #[tokio::test]
     async fn a_machine_with_no_commands_does_not_offer_the_capability() {
-        let e = LinuxEffector::new(CommandCatalog::default(), WolSettings::default()).await;
+        let e = LinuxEffector::new(
+            CommandCatalog::default(),
+            WolSettings::default(),
+            session::Commands::default(),
+        )
+        .await;
         assert!(
             !e.supported().contains(&EffectKind::Command),
             "an empty catalog means the capability is absent, not empty"
@@ -205,7 +214,12 @@ mod tests {
     async fn waking_is_always_offered() {
         // Sending a UDP packet needs nothing from the desktop, so even a
         // headless machine can relay a wake.
-        let e = LinuxEffector::new(CommandCatalog::default(), WolSettings::default()).await;
+        let e = LinuxEffector::new(
+            CommandCatalog::default(),
+            WolSettings::default(),
+            session::Commands::default(),
+        )
+        .await;
         assert!(e.supported().contains(&EffectKind::Wol));
     }
 
@@ -222,7 +236,12 @@ mod tests {
                 timeout_secs: None,
             },
         );
-        let e = LinuxEffector::new(CommandCatalog::new(entries), WolSettings::default()).await;
+        let e = LinuxEffector::new(
+            CommandCatalog::new(entries),
+            WolSettings::default(),
+            session::Commands::default(),
+        )
+        .await;
         assert!(e.supported().contains(&EffectKind::Command));
         assert!(matches!(
             e.run(Effect::RunCommand {

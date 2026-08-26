@@ -19,6 +19,7 @@ pub struct Config {
     pub port: u16,
     pub wol: WolConfig,
     pub clipboard: ClipboardConfig,
+    pub session: SessionConfig,
     /// Commands a paired device may run, keyed by the id that travels.
     pub commands: BTreeMap<String, CommandSpec>,
 }
@@ -40,6 +41,28 @@ pub struct WolConfig {
     pub allowlist: Vec<String>,
 }
 
+/// How this machine locks and unlocks, when logind's signal is not enough.
+///
+/// `loginctl unlock-session` only emits a signal, and acting on it is the
+/// screen locker's choice. A lock implemented inside a Wayland shell may offer
+/// no way in from outside at all, in which case unlocking remotely is
+/// impossible until you say how it is done here. Each is an argv vector, run
+/// with no shell.
+///
+/// Quickshell, for example, needs a handler adding to its own config before
+/// there is anything to call:
+///
+/// ```toml
+/// [session]
+/// unlock_command = ["qs", "-c", "ii", "ipc", "call", "lock", "deactivate"]
+/// ```
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SessionConfig {
+    pub lock_command: Vec<String>,
+    pub unlock_command: Vec<String>,
+}
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ClipboardConfig {
@@ -56,6 +79,7 @@ impl Default for Config {
             port: acrylius_proto::DEFAULT_PORT,
             wol: WolConfig::default(),
             clipboard: ClipboardConfig::default(),
+            session: SessionConfig::default(),
             commands: BTreeMap::new(),
         }
     }

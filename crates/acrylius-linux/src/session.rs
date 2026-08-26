@@ -109,17 +109,63 @@ pub async fn resolve_locked(hint: bool, kind: &str, active: bool) -> bool {
     compositor::locked().await.unwrap_or(false)
 }
 
+/// How to lock and unlock, when logind's signal is not enough.
+///
+/// `loginctl unlock-session` only emits a signal; whether anything acts on it
+/// is the screen locker's choice, and plenty do not. A lock implemented inside
+/// a Wayland shell, for instance, may offer no way in at all from outside. When
+/// that is the case the answer is not to pretend the unlock worked, it is to
+/// let the person who runs the machine say how it is done.
+///
+/// Each is an argv vector, run directly with no shell.
+#[derive(Clone, Debug, Default)]
+pub struct Commands {
+    pub lock: Vec<String>,
+    pub unlock: Vec<String>,
+}
+
 pub struct SessionEffector {
     connection: zbus::Connection,
     uid: u32,
+    commands: Commands,
 }
 
 impl SessionEffector {
-    pub async fn new() -> anyhow::Result<Self> {
+    pub async fn new(commands: Commands) -> anyhow::Result<Self> {
         Ok(Self {
             connection: zbus::Connection::system().await?,
             uid: crate::uid(),
+            commands,
         })
+    }
+
+    /// Run a configured command, if there is one for this direction.
+    ///
+    /// Returns whether one ran, not whether it worked: what a command claims is
+    /// no more trustworthy than what logind claims, and the answer comes from
+    /// re-reading the session either way.
+    async fn run_command(&self, want_locked: bool) -> bool {
+        let argv = if want_locked {
+            &self.commands.lock
+        } else {
+            &self.commands.unlock
+        };
+        let Some((program, args)) = argv.split_first() else {
+            return false;
+        };
+        match tokio::process::Command::new(program)
+            .args(args)
+            .status()
+            .await
+        {
+            Ok(status) => {
+                tracing::debug!(%status, want_locked, "ran the configured session command");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, program, "could not run the configured session command");
+            }
+        }
+        true
     }
 
     /// Sessions owned by this user that a person could actually be sitting at.
@@ -221,11 +267,16 @@ impl SessionEffector {
             });
         }
 
-        let proxy = self.proxy_for(&chosen.id).await?;
-        if want_locked {
-            proxy.lock().await?;
-        } else {
-            proxy.unlock().await?;
+        // A configured command replaces the logind call rather than joining it.
+        // Someone who has told us how this machine locks knows better than a
+        // signal that the locker has already been observed to ignore.
+        if !self.run_command(want_locked).await {
+            let proxy = self.proxy_for(&chosen.id).await?;
+            if want_locked {
+                proxy.lock().await?;
+            } else {
+                proxy.unlock().await?;
+            }
         }
 
         // logind only emits a signal. Whether anything acts on it is up to the

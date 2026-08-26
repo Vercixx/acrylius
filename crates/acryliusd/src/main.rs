@@ -144,7 +144,17 @@ async fn main() -> anyhow::Result<()> {
         "starting"
     );
 
-    let effector = Arc::new(LinuxEffector::new(cfg.catalog(), cfg.wol_settings()).await);
+    let effector = Arc::new(
+        LinuxEffector::new(
+            cfg.catalog(),
+            cfg.wol_settings(),
+            acrylius_linux::session::Commands {
+                lock: cfg.session.lock_command.clone(),
+                unlock: cfg.session.unlock_command.clone(),
+            },
+        )
+        .await,
+    );
     let kinds = effector.supported();
     tracing::info!(?kinds, "this machine can");
 

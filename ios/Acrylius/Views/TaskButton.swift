@@ -15,7 +15,7 @@ import SwiftUI
 /// replacing the platform's behaviour is a poor trade for adding to it.
 struct TaskButton<Label: View>: View {
     private let role: ButtonRole?
-    private let action: () async -> Void
+    private let action: () async -> Bool
     private let label: Label
 
     @State private var phase: Phase = .idle
@@ -23,11 +23,16 @@ struct TaskButton<Label: View>: View {
     private enum Phase {
         case idle
         case running
-        case done
+        case ok
+        case failed
     }
 
+    /// `action` returns whether the thing actually happened, not whether the
+    /// request was delivered. A tick for "sent" is a claim the user cannot
+    /// check and will believe — an unlock that the screen locker ignored looked
+    /// exactly like one that worked.
     init(role: ButtonRole? = nil,
-         action: @escaping () async -> Void,
+         action: @escaping () async -> Bool,
          @ViewBuilder label: () -> Label) {
         self.role = role
         self.action = action
@@ -39,11 +44,11 @@ struct TaskButton<Label: View>: View {
             guard phase != .running else { return }
             phase = .running
             Task {
-                await action()
-                phase = .done
+                phase = await action() ? .ok : .failed
                 // Long enough to notice, short enough not to look like state.
-                try? await Task.sleep(for: .milliseconds(1200))
-                if phase == .done { phase = .idle }
+                // A failure lingers, because it is worth reading.
+                try? await Task.sleep(for: .milliseconds(phase == .ok ? 1200 : 2600))
+                if phase != .running { phase = .idle }
             }
         } label: {
             HStack {
@@ -52,9 +57,13 @@ struct TaskButton<Label: View>: View {
                 switch phase {
                 case .running:
                     ProgressView().controlSize(.small)
-                case .done:
+                case .ok:
                     Image(systemName: "checkmark")
                         .foregroundStyle(.secondary)
+                        .transition(.opacity)
+                case .failed:
+                    Image(systemName: "exclamationmark.triangle")
+                        .foregroundStyle(.orange)
                         .transition(.opacity)
                 case .idle:
                     EmptyView()
@@ -69,7 +78,7 @@ struct TaskButton<Label: View>: View {
 }
 
 extension TaskButton where Label == Text {
-    init(_ title: String, role: ButtonRole? = nil, action: @escaping () async -> Void) {
+    init(_ title: String, role: ButtonRole? = nil, action: @escaping () async -> Bool) {
         self.init(role: role, action: action) { Text(title) }
     }
 }

@@ -88,6 +88,36 @@ pub struct ClipboardPlugin {
 }
 
 impl ClipboardPlugin {
+    /// Offer `body` to every connected peer.
+    ///
+    /// `deliberate` is a person having asked, rather than the host noticing a
+    /// change on its own; only the latter is subject to the send switch.
+    fn offer(&mut self, cx: &mut Cx, body: &[u8], deliberate: bool) -> Result<(), PluginError> {
+        if !deliberate && !self.directions.send {
+            return Ok(());
+        }
+        if body.len() > MAX_INLINE {
+            return Err(PluginError::TooLarge);
+        }
+        let h = hash(body);
+        if self.is_echo(&h) {
+            return Ok(());
+        }
+        self.last_local = Some(h.clone());
+        let msg = ClipboardSet {
+            mime: TEXT_PLAIN.to_string(),
+            data: body.to_vec(),
+            hash: h,
+        };
+        let Ok(encoded) = minicbor::to_vec(&msg) else {
+            return Err(PluginError::Internal("encode failed".to_string()));
+        };
+        for p in &self.connected {
+            cx.send(p, CAP, "set", encoded.clone());
+        }
+        Ok(())
+    }
+
     #[must_use]
     pub fn new(directions: Directions) -> Self {
         Self {
@@ -199,32 +229,15 @@ impl Plugin for ClipboardPlugin {
         body: &[u8],
     ) -> Result<(), PluginError> {
         match ty {
-            // The host noticed a local change. The peer argument is ignored.
-            "changed" => {
-                if !self.directions.send {
-                    return Ok(());
-                }
-                if body.len() > MAX_INLINE {
-                    return Err(PluginError::TooLarge);
-                }
-                let h = hash(body);
-                if self.is_echo(&h) {
-                    return Ok(());
-                }
-                self.last_local = Some(h.clone());
-                let msg = ClipboardSet {
-                    mime: TEXT_PLAIN.to_string(),
-                    data: body.to_vec(),
-                    hash: h,
-                };
-                let Ok(encoded) = minicbor::to_vec(&msg) else {
-                    return Err(PluginError::Internal("encode failed".to_string()));
-                };
-                for p in &self.connected {
-                    cx.send(p, CAP, "set", encoded.clone());
-                }
-                Ok(())
-            }
+            // The host noticed a local change by itself. Gated on the send
+            // switch, which exists to stop a device volunteering its clipboard.
+            "changed" => self.offer(cx, body, false),
+            // Somebody pressed a button. Not gated: the switch is there to stop
+            // a device speaking unprompted, and it has no business vetoing a
+            // person who asked. Conflating the two is why a Paste button on a
+            // phone — where automatic sending is off, because reading the
+            // pasteboard raises a system alert — silently did nothing.
+            "push" => self.offer(cx, body, true),
             "get" => {
                 cx.send(peer, CAP, "get", Vec::new());
                 Ok(())
@@ -290,6 +303,32 @@ mod tests {
         let msg: ClipboardSet = minicbor::decode(&sent.body).unwrap();
         assert_eq!(msg.data, b"hello");
         assert_eq!(msg.hash, hash(b"hello"));
+    }
+
+    #[test]
+    fn the_send_switch_does_not_veto_a_person() {
+        // A phone keeps automatic sending off, because reading its pasteboard
+        // raises a system alert — so it must never volunteer a value. That is
+        // not a reason to discard one the user explicitly handed over, and
+        // conflating the two made a Paste button do nothing at all.
+        let mut p = ClipboardPlugin::new(Directions {
+            send: false,
+            receive: true,
+        });
+        run(0, |cx| p.on_peer_connected(cx, &peer()));
+
+        let quiet = run(0, |cx| {
+            p.on_local(cx, &peer(), "changed", b"noticed").unwrap()
+        });
+        assert!(
+            quiet.sent("set").is_none(),
+            "a change it noticed by itself must stay put"
+        );
+
+        let asked = run(0, |cx| p.on_local(cx, &peer(), "push", b"pressed").unwrap());
+        let sent = asked.sent("set").expect("an explicit push must go out");
+        let msg: ClipboardSet = minicbor::decode(&sent.body).unwrap();
+        assert_eq!(msg.data, b"pressed");
     }
 
     #[test]
