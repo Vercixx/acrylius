@@ -299,7 +299,11 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "acryliusd=info,acrylius_rt=info".into()),
+                // `acrylius_linux` is in the default set because a transport lives
+                // there now. Without it the BLE transport registered, advertised,
+                // took links up and down, and said none of it — which is how a
+                // whole transport ran unnoticed for an afternoon.
+                .unwrap_or_else(|_| "acryliusd=info,acrylius_rt=info,acrylius_linux=info".into()),
         )
         .init();
 

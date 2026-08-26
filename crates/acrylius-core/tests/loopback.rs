@@ -66,6 +66,9 @@ struct Net {
     /// Every dial the core asked for, in order, so a test can check which route
     /// was preferred and how far the fallback walked.
     pub dialed: Vec<(TransportId, String)>,
+    /// Give new links BLE's attributes rather than loopback's. The differences
+    /// that matter are `BulkSupport::None` and a 16 KiB `max_message`.
+    pub links_are_ble: bool,
 }
 
 impl Net {
@@ -83,6 +86,7 @@ impl Net {
             ui: Vec::new(),
             persisted: Vec::new(),
             dialed: Vec::new(),
+            links_are_ble: false,
         }
     }
 
@@ -207,7 +211,11 @@ impl Net {
                 self.next_link += 2;
                 self.peer_link.insert((side, mine), theirs);
                 self.peer_link.insert((side.other(), theirs), mine);
-                let attrs = LinkAttrs::loopback(transport);
+                let attrs = if self.links_are_ble {
+                    LinkAttrs::ble(transport)
+                } else {
+                    LinkAttrs::loopback(transport)
+                };
                 self.queue.push_back((
                     side,
                     Event::LinkUp {
@@ -802,6 +810,34 @@ fn sharing_pair() -> (Net, DeviceId) {
     (net, b_id)
 }
 
+/// A paired pair whose links carry BLE's attributes: 16 KiB messages, and no
+/// bulk side channel.
+fn ble_sharing_pair() -> (Net, DeviceId) {
+    let (a, b) = (sharing_core("phone"), sharing_core("pc"));
+    let b_id = b.device_id();
+    let mut net = Net::new(a, b);
+    // Set before anything connects, so every link picks it up.
+    net.links_are_ble = true;
+    net.local(
+        Side::B,
+        LocalCommand::OpenPairingWindow {
+            code: CODE.to_string(),
+        },
+    );
+    net.local(
+        Side::A,
+        LocalCommand::RequestPairing {
+            transport: TRANSPORT,
+            addr: Side::B.addr().to_string(),
+            code: CODE.to_string(),
+        },
+    );
+    net.local(Side::A, LocalCommand::ConfirmPairing { accept: true });
+    net.local(Side::B, LocalCommand::ConfirmPairing { accept: true });
+    net.local(Side::A, LocalCommand::Connect { peer: b_id.clone() });
+    (net, b_id)
+}
+
 fn plugin(net: &mut Net, side: Side, peer: &DeviceId, ty: &str, body: Vec<u8>) {
     net.local(
         side,
@@ -902,6 +938,66 @@ fn rejecting_an_offer_tells_the_sender_and_opens_nothing() {
             |e| matches!(e, UiEvent::Plugin { ty, .. } if ty == "reject")
         ),
         "the sender hears about it rather than waiting"
+    );
+}
+
+#[test]
+fn a_link_that_cannot_carry_files_refuses_instead_of_listening() {
+    // `LinkAttrs::bulk` promises the core "refuses one with a clear error
+    // rather than silently trying to push a gigabyte through 185-byte writes".
+    // It went unenforced until a second transport existed to notice: over BLE
+    // the receiver would accept, listen on a TCP port, and hand back an address
+    // a phone with Wi-Fi off can never reach — which looks, from the phone,
+    // like a transfer that simply stopped.
+    let (mut net, b_id) = ble_sharing_pair();
+    let a_id = net.a.device_id();
+
+    plugin(&mut net, Side::A, &b_id, "offer", offer_body(1, 4096));
+    plugin(&mut net, Side::B, &a_id, "accept", answer_body(1));
+
+    assert!(
+        net.bulk_keys.is_empty(),
+        "nothing may be listened for on a link that cannot carry it"
+    );
+    assert!(
+        net.saw(Side::B, |e| matches!(e, UiEvent::Error { .. })),
+        "and the side that tried is told why, rather than left waiting"
+    );
+}
+
+#[test]
+fn a_body_too_large_for_the_link_is_refused_not_sent() {
+    // The other half of the same promise. A BLE link takes 16 KiB; anything
+    // bigger has to be told so, not handed to a transport that would fragment
+    // it into thousands of notifications and appear to hang.
+    //
+    // Sent over `ping`, which forwards a body verbatim — the share plugin would
+    // reject 32 KiB of zeros as a malformed offer long before the link saw it.
+    let (mut net, b_id) = ble_sharing_pair();
+    net.local(
+        Side::A,
+        LocalCommand::Plugin {
+            peer: b_id.clone(),
+            cap: ping::CAP.to_string(),
+            ty: "ping".to_string(),
+            body: vec![0u8; 32 * 1024],
+        },
+    );
+
+    assert!(
+        net.saw(Side::A, |e| matches!(
+            e,
+            UiEvent::Error { code, .. }
+                if *code == acrylius_core::proto::envelope::ErrorCode::TooLarge
+        )),
+        "the sender is told it does not fit"
+    );
+    assert!(
+        !net.saw(
+            Side::B,
+            |e| matches!(e, UiEvent::Plugin { ty, .. } if ty == "ping")
+        ),
+        "and nothing arrived at the far end"
     );
 }
 

@@ -7,7 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::config::CoreConfig;
-use crate::link::{LinkAttrs, LinkDownReason, LinkId, Routes, TransportId};
+use crate::link::{BulkSupport, LinkAttrs, LinkDownReason, LinkId, Routes, TransportId};
 use crate::noise::{Handshake, Identity, Session};
 use crate::peer::{PeerRecord, PeerState};
 use crate::plugin::{BulkRequest, Cx, PendingSend, Plugin};
@@ -52,6 +52,13 @@ struct UpLink {
     /// session still needs — the cipher has its own state — but it is the one
     /// value both ends share and nobody else knows.
     handshake_hash: Vec<u8>,
+    /// The two promises `LinkAttrs` makes that the core is supposed to keep.
+    ///
+    /// Kept as the fields themselves rather than the whole `LinkAttrs`, which
+    /// would make this variant much larger than its siblings for no gain. Both
+    /// went unenforced until a second transport existed to notice.
+    bulk: BulkSupport,
+    max_message: u32,
     /// Our `caps_out` ∩ their `caps_in`, which is what we may send.
     can_send: Vec<String>,
     /// Their `caps_out` ∩ our `caps_in`, which is what we will accept.
@@ -672,6 +679,8 @@ impl Core {
                 session,
                 peer: peer.clone(),
                 handshake_hash,
+                bulk: attrs.bulk,
+                max_message: attrs.max_message,
                 can_send,
                 can_recv,
             }),
@@ -977,10 +986,24 @@ impl Core {
         };
         let Ok(plaintext) = env.encode() else { return };
         match u.session.encrypt(&plaintext) {
-            Ok(ct) => out.push(Action::LinkSend {
-                link,
-                msg: frame::join(FrameKind::Transport, &ct),
-            }),
+            Ok(ct) => {
+                let msg = frame::join(FrameKind::Transport, &ct);
+                // The other promise `LinkAttrs` makes: "the core will never hand
+                // down a frame larger than this, and enforces it on plugins so
+                // an oversized body is a `TooLarge` error rather than a
+                // mysterious hang". Measured after sealing, because the tag and
+                // the AEAD overhead travel too and a transport has to carry all
+                // of it.
+                if msg.len() > u.max_message as usize {
+                    let (n, cap) = (msg.len(), u.max_message);
+                    out.ui(UiEvent::Error {
+                        code: ErrorCode::TooLarge,
+                        detail: format!("{} bytes does not fit this link, which takes {cap}", n),
+                    });
+                    return;
+                }
+                out.push(Action::LinkSend { link, msg });
+            }
             Err(e) => {
                 out.ui(UiEvent::Error {
                     code: ErrorCode::Internal,
@@ -1040,6 +1063,14 @@ impl Core {
     /// A plugin that could derive one could derive any of them, and a host is
     /// given a single-use key scoped to one transfer rather than anything it
     /// could reuse.
+    /// What the live link to a peer can carry, if there is one.
+    fn bulk_support_for(&self, peer: &DeviceId) -> Option<BulkSupport> {
+        self.links.values().find_map(|st| match st {
+            LinkState::Up(u) if &u.peer == peer => Some(u.bulk),
+            _ => None,
+        })
+    }
+
     fn dispatch_bulk(&mut self, request: BulkRequest, out: &mut Outcome) {
         let (peer, transfer) = match &request {
             BulkRequest::Listen { peer, transfer, .. }
@@ -1051,6 +1082,30 @@ impl Core {
                 return;
             }
         };
+
+        // A link that cannot carry bulk must say so here, not by handing out an
+        // endpoint the far end has no route to.
+        //
+        // `BulkSupport::None` exists for exactly this and went unchecked until
+        // there was a second transport to check it against: over BLE the
+        // desktop would accept an offer, listen on a TCP port, and send an
+        // address a phone with Wi-Fi off can never reach — which looks, from
+        // the phone, like a transfer that simply stopped.
+        if self.bulk_support_for(&peer) == Some(BulkSupport::None) {
+            out.ui(UiEvent::Error {
+                code: ErrorCode::NotAllowed,
+                detail: format!(
+                    "the link to {peer} cannot carry files. Reach it over the \
+                     network for that."
+                ),
+            });
+            // Reported finished-and-failed as well, so whichever plugin asked
+            // unwinds the way it would for any other failure rather than
+            // waiting for an endpoint that is never coming.
+            out.push(Action::BulkCancel { transfer });
+            self.bulk_owner.remove(&transfer);
+            return;
+        }
 
         let Some(hash) = self.handshake_hash_for(&peer) else {
             // No session, no key, and therefore no transfer. Reported as a
