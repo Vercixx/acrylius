@@ -242,6 +242,22 @@ impl Plugin for SharePlugin {
                              network for that."
                         ),
                     });
+                    // And say the transfer is over, in the words a host already
+                    // understands. A refusal here produces no traffic, so the
+                    // "reject" that normally comes back from the far end never
+                    // will — and a host that only learns of an ending from the
+                    // wire would leave this file listed as sending for as long
+                    // as it ran. It is a rejection; it just happens to be ours.
+                    Self::announce(
+                        cx,
+                        peer,
+                        "reject",
+                        &Finished {
+                            transfer: offer.transfer,
+                            ok: false,
+                            detail: "this link cannot carry files".to_string(),
+                        },
+                    );
                     return Ok(());
                 }
                 self.sending.insert(
