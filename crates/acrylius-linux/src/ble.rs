@@ -148,6 +148,11 @@ struct Shared {
     /// record carries, since a 43-character fingerprint cannot fit in a 31-byte
     /// advertisement.
     identity: Mutex<Vec<u8>>,
+    /// Whether we want to be on the air, as opposed to whether we are.
+    ///
+    /// Those two come apart, which is the whole reason this exists — see
+    /// [`readvertise`].
+    advertising: std::sync::atomic::AtomicBool,
 }
 
 impl Shared {
@@ -202,6 +207,51 @@ async fn device_is_connected(conn: &zbus::Connection, path: &str) -> bool {
     {
         Ok(dev) => dev.connected().await.unwrap_or(false),
         Err(_) => false,
+    }
+}
+
+/// Put the advertisement back on the air after a connection has taken it off.
+///
+/// A peripheral stops advertising the moment a central connects — the
+/// controller does that itself, and it is correct. What is supposed to happen
+/// afterwards is that it starts again, and it is not certain it always does.
+///
+/// Belt and braces, and stated as such. The measured cause of the desktop
+/// disappearing was the discoverable timeout — see `discoverable_timeout` — and
+/// that is fixed where it is caused. This covers the other half of the same
+/// symptom, because registering again is what a daemon restart does and a
+/// restart is what was observed to bring the desktop back.
+///
+/// There is no local instrument for "is the radio actually advertising":
+/// `ActiveInstances` reports what bluetoothd was asked for rather than what the
+/// controller is doing, and `btmgmt info`'s `advertising` flag tracks the
+/// legacy `Set Advertising` setting, not the instances the D-Bus API adds — it
+/// reads the same whether this works or not. So this is cheap insurance, not a
+/// diagnosis: registering again when nothing was lost costs two D-Bus calls.
+async fn readvertise(conn: &zbus::Connection, shared: &Shared) {
+    if !shared
+        .advertising
+        .load(std::sync::atomic::Ordering::Relaxed)
+    {
+        return;
+    }
+    let Ok(builder) = LeAdvertisingManagerProxy::builder(conn).path(ADAPTER) else {
+        return;
+    };
+    let Ok(ads) = builder.build().await else {
+        return;
+    };
+    let Ok(adv) = ObjectPath::try_from(ADV_PATH) else {
+        return;
+    };
+    // Let bluetoothd finish tearing the connection down first; registering
+    // into the middle of that is how the "Failed to register advertisement"
+    // this used to log on startup happened.
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let _ = ads.unregister_advertisement(&adv).await;
+    match ads.register_advertisement(&adv, HashMap::new()).await {
+        Ok(()) => tracing::info!("back on the air after a connection"),
+        Err(e) => tracing::warn!(error = %e, "could not start advertising again"),
     }
 }
 
@@ -265,6 +315,25 @@ impl Advertisement {
     #[zbus(property)]
     fn discoverable(&self) -> bool {
         true
+    }
+
+    /// Zero, which `man 5 org.bluez.LEAdvertisement` defines as "the timeout is
+    /// disabled and it will stay in discoverable/limited mode forever".
+    ///
+    /// Not a detail. Left unset, the discoverable window inherits the adapter's
+    /// `DiscoverableTimeout`, which is **180 seconds** on a default install —
+    /// so three minutes after registering, the Flags element stops saying
+    /// discoverable and the advertisement goes to `flags = 0x00`, which is
+    /// exactly the shape iOS will not surface.
+    ///
+    /// Nothing announces this. `ActiveInstances` still reports 1, `Release` is
+    /// never called, no call fails: from inside the daemon everything looks
+    /// correct while the phone sees nothing. The symptom is a desktop that
+    /// appears when the daemon is restarted and vanishes a few minutes later,
+    /// which reads like a crash and is a timer.
+    #[zbus(property, name = "DiscoverableTimeout")]
+    fn discoverable_timeout(&self) -> u16 {
+        0
     }
 
     /// Truncated by bluetoothd if it does not fit, which it might: flags take 3
@@ -602,6 +671,7 @@ impl Transport for BleTransport {
             next_link: AtomicU64::new(1),
             link: Mutex::new(None),
             identity: Mutex::new(Vec::new()),
+            advertising: std::sync::atomic::AtomicBool::new(false),
         });
 
         // The whole tree first, then the ObjectManager over it, then register.
@@ -682,6 +752,8 @@ impl Transport for BleTransport {
         // is the part the tests pin.
         {
             let shared = shared.clone();
+            // Cheap: a zbus connection is a handle, not a socket of its own.
+            let conn = conn.clone();
             let rule = zbus::MatchRule::builder()
                 .msg_type(zbus::message::Type::Signal)
                 .sender("org.bluez")?
@@ -710,6 +782,11 @@ impl Transport for BleTransport {
                         continue;
                     }
                     drop_link_for(&shared, &path, "the central disconnected").await;
+                    // Whether or not that device held our link. A connection
+                    // that failed before it ever got one still took the
+                    // advertisement down with it, which is precisely the case
+                    // that left the desktop invisible.
+                    readvertise(&conn, &shared).await;
                 }
             });
         }
@@ -720,6 +797,7 @@ impl Transport for BleTransport {
         // else happens to notice.
         {
             let shared = shared.clone();
+            let conn = conn.clone();
             let rule = zbus::MatchRule::builder()
                 .msg_type(zbus::message::Type::Signal)
                 .sender("org.bluez")?
@@ -741,6 +819,7 @@ impl Transport for BleTransport {
                         continue;
                     }
                     drop_link_for(&shared, path.as_str(), "bluetoothd forgot the device").await;
+                    readvertise(&conn, &shared).await;
                 }
             });
         }
@@ -753,11 +832,21 @@ impl Transport for BleTransport {
                         match ads.register_advertisement(&adv, HashMap::new()).await {
                             Ok(()) => {
                                 advertising = true;
+                                // What the watchers read to decide whether
+                                // putting us back on the air is wanted.
+                                shared
+                                    .advertising
+                                    .store(true, std::sync::atomic::Ordering::Relaxed);
                                 tracing::info!(name = %self.name, "advertising over BLE");
                             }
                             Err(e) => tracing::warn!(error = %e, "could not advertise over BLE"),
                         }
                     } else if !enable && advertising {
+                        // Cleared first: a disconnect arriving mid-teardown
+                        // must not put back what is being taken down.
+                        shared
+                            .advertising
+                            .store(false, std::sync::atomic::Ordering::Relaxed);
                         let _ = ads.unregister_advertisement(&adv).await;
                         advertising = false;
                     }
@@ -853,6 +942,23 @@ mod tests {
     }
 
     #[test]
+    fn the_advertisement_never_stops_being_discoverable() {
+        // Zero means no timeout. Anything else, including inheriting the
+        // adapter's 180 seconds by not saying, makes the desktop vanish a few
+        // minutes after it appears — with no error, nothing released, and
+        // `ActiveInstances` still reporting 1.
+        let adv = Advertisement {
+            name: "test".to_string(),
+        };
+        assert!(adv.discoverable(), "or no Flags element is emitted at all");
+        assert_eq!(
+            adv.discoverable_timeout(),
+            0,
+            "a desktop is not discoverable for three minutes; it is discoverable"
+        );
+    }
+
+    #[test]
     fn no_characteristic_asks_for_encryption() {
         // An `encrypt-*` or `secure-*` flag is what raises an iOS pairing
         // dialog, and every recurring iOS/BlueZ GATT failure in the wild is a
@@ -864,6 +970,7 @@ mod tests {
                 next_link: AtomicU64::new(1),
                 link: Mutex::new(None),
                 identity: Mutex::new(Vec::new()),
+                advertising: std::sync::atomic::AtomicBool::new(false),
             })
         };
         let flags = [
@@ -903,6 +1010,7 @@ mod tests {
             next_link: AtomicU64::new(1),
             link: Mutex::new(None),
             identity: Mutex::new(Vec::new()),
+            advertising: std::sync::atomic::AtomicBool::new(false),
         });
         let link = shared.next_link();
         *shared.link.try_lock().unwrap() = Some(Link {
@@ -975,6 +1083,7 @@ mod tests {
             next_link: AtomicU64::new(1),
             link: Mutex::new(None),
             identity: Mutex::new(Vec::new()),
+            advertising: std::sync::atomic::AtomicBool::new(false),
         });
         let mut tx = TxChr {
             value: Vec::new(),
@@ -1005,6 +1114,7 @@ mod tests {
             next_link: AtomicU64::new(1),
             link: Mutex::new(None),
             identity: Mutex::new(Vec::new()),
+            advertising: std::sync::atomic::AtomicBool::new(false),
         };
         let first = s.next_link();
         assert_eq!(first.transport(), TransportId(2));
