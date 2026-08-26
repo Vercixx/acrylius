@@ -459,6 +459,7 @@ impl RxChr {
 struct TxChr {
     value: Vec<u8>,
     notifying: bool,
+    shared: Arc<Shared>,
 }
 
 #[zbus::interface(name = "org.bluez.GattCharacteristic1")]
@@ -487,9 +488,31 @@ impl TxChr {
 
     /// Carries no arguments at all — not even which device subscribed. See the
     /// module docs; this is why a link is established by a write.
-    fn start_notify(&mut self) {
+    ///
+    /// It does say one thing exactly, though, and it is the thing that was
+    /// missing: *a central is starting from the beginning*. iOS subscribes once
+    /// per connection, during characteristic discovery, so anything still held
+    /// when this arrives belongs to a session that is over.
+    ///
+    /// Without this, a phone whose app was force-quit and reopened reconnected
+    /// on the same address before bluetoothd retired the old device, matched
+    /// the link record still sitting here, and carried on writing into a link
+    /// the core had already torn down — so no `LinkUp` was ever raised and
+    /// nothing worked until a second force-quit outlasted the device timeout.
+    async fn start_notify(&mut self) {
         self.notifying = true;
         tracing::debug!("a central subscribed to notifications");
+        // Read and released before retiring, so the lock is never held twice.
+        let held = self
+            .shared
+            .link
+            .lock()
+            .await
+            .as_ref()
+            .map(|l| l.device.clone());
+        if let Some(device) = held {
+            drop_link_for(&self.shared, &device, "a central subscribed afresh").await;
+        }
     }
 
     fn stop_notify(&mut self) {
@@ -612,6 +635,7 @@ impl Transport for BleTransport {
                 TxChr {
                     value: Vec::new(),
                     notifying: false,
+                    shared: shared.clone(),
                 },
             )
             .await?;
@@ -848,6 +872,7 @@ mod tests {
             TxChr {
                 value: Vec::new(),
                 notifying: false,
+                shared: shared(),
             }
             .flags(),
         ];
@@ -910,6 +935,57 @@ mod tests {
         // must not be told a link died twice.
         drop_link_for(&shared, "/org/bluez/hci0/dev_75_C3_D4_C8_ED_AB", "gone").await;
         assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn a_central_subscribing_again_retires_the_link_it_had() {
+        // The force-quit case, and the one the address rotation hides. A phone
+        // that reopens usually comes back on a *new* random address, and that
+        // path was already covered — but when it comes back on the same one,
+        // before bluetoothd has retired the device, the old link record matched
+        // and was reused. The core had already torn that link down, so nothing
+        // raised a new one and the phone stayed dark until a second force-quit
+        // outlasted the device timeout.
+        let device = "/org/bluez/hci0/dev_75_C3_D4_C8_ED_AB";
+        let (shared, mut rx) = holding(device);
+        let mut tx = TxChr {
+            value: Vec::new(),
+            notifying: false,
+            shared: shared.clone(),
+        };
+
+        tx.start_notify().await;
+
+        assert!(
+            shared.link.lock().await.is_none(),
+            "a subscription is the start of a session, so the old one is over"
+        );
+        assert!(
+            matches!(rx.try_recv(), Ok(Event::LinkDown { .. })),
+            "and the core is told, rather than left holding a link nobody is on"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_first_subscription_has_nothing_to_retire() {
+        let (tx_sink, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let shared = Arc::new(Shared {
+            id: TransportId(2),
+            sink: tx_sink,
+            next_link: AtomicU64::new(1),
+            link: Mutex::new(None),
+            identity: Mutex::new(Vec::new()),
+        });
+        let mut tx = TxChr {
+            value: Vec::new(),
+            notifying: false,
+            shared: shared.clone(),
+        };
+
+        tx.start_notify().await;
+
+        assert!(tx.notifying);
+        assert!(rx.try_recv().is_err(), "nothing to report on a fresh link");
     }
 
     #[tokio::test]
