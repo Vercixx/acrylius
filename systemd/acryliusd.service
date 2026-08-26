@@ -1,0 +1,71 @@
+[Unit]
+Description=acrylius daemon
+Documentation=https://github.com/Vercixx/acrylius
+
+# Tied to the graphical session, not to login. Locking a screen, reading a
+# clipboard and asking the compositor whether it is locked all need a session to
+# be talking about, and WAYLAND_DISPLAY has to have reached the user manager
+# before this starts. Most compositors do that with
+# `dbus-update-activation-environment --systemd`; if yours does not, the
+# clipboard will report itself unsupported and nothing else will break.
+PartOf=graphical-session.target
+After=graphical-session.target
+
+# Under [Unit], deliberately. systemd ignores these under [Service] without
+# saying so, which makes a restart loop look like it is being rate limited when
+# it is not.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/acryliusd
+Restart=on-failure
+RestartSec=2
+UMask=0077
+
+# Nothing here needs privilege, and that is the point rather than an accident.
+# logind passes the session owner's uid to polkit as `good_user`, which
+# short-circuits the check when the caller's uid matches — so locking and
+# unlocking your own session needs no sudo, no setuid binary and no polkit rule.
+# That is what lets the rest of this be locked down hard.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectClock=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallErrorNumber=EPERM
+
+# State, and the runtime directory.
+#
+# %t has to be writable or binding the control socket dies with EROFS under
+# ProtectSystem=strict — and the compositor sockets we read live there too.
+ReadWritePaths=%h/.local/share/acrylius
+ReadWritePaths=%t
+
+# AF_NETLINK is not decoration: enumerating interfaces for mDNS needs it, and
+# without it discovery silently finds nothing.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+
+# NOTE: IPAddressDeny= and IPAddressAllow= are absent on purpose. They install a
+# BPF cgroup filter, which needs root, so systemd ignores them in a --user unit
+# without a word. Listing them would claim a kernel guarantee that is not in
+# force. LAN-only is enforced in userspace instead.
+
+[Install]
+WantedBy=graphical-session.target

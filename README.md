@@ -28,16 +28,41 @@ desktop  UnOfEh0ZNHHuzLPviAR2fA
 | **Commands** | `acryliusctl commands <device>`, then `run <device> <id>` |
 | **Wake** | The phone sends the packet. A sleeping machine runs no daemon. |
 
-## Running it
+## Installing it
 
 ```bash
-cargo build --release
-./target/release/acryliusd
+./scripts/install.sh
 ```
+
+Builds, puts `acryliusd` and `acryliusctl` in `~/.local/bin`, writes a commented
+config if there is none, and starts a `systemd --user` service tied to your
+graphical session. It needs no root and never asks for any: locking your own
+session works because logind passes the session owner's uid to polkit as
+`good_user`, so nothing here requires privilege — which is what lets the unit be
+locked down hard.
+
+Run it again after pulling. It notices an existing installation, replaces the
+binaries, adds settings a newer version introduced, and restarts the service.
+Your config is not overwritten: a value you set is never reset and your comments
+survive, because the only thing an update does to that file is add what is
+missing.
+
+```
+$ ./scripts/install.sh
+Updating an existing installation
+  acryliusd 0.1.0
+...
+Config
+  added to /home/you/.config/acrylius/config.toml:
+    [session]  lock_command, unlock_command
+```
+
+To run it in the foreground instead — for a second instance, or to watch it —
+`cargo build --release && ./target/release/acryliusd`.
 
 Configuration lives at `~/.config/acrylius/config.toml` and is where every
 decision about what this machine offers is made. Nothing in it can be changed
-from the network.
+from the network. `acryliusd config check` parses it without starting anything.
 
 ```toml
 name = "desktop"

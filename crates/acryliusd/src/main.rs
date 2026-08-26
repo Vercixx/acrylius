@@ -8,6 +8,7 @@
 
 mod config;
 mod control;
+mod reconcile;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -29,7 +30,7 @@ use tokio::sync::{Mutex, broadcast};
 const TCP: TransportId = TransportId(1);
 
 #[derive(Parser, Debug)]
-#[command(name = "acryliusd", about = "The acrylius daemon")]
+#[command(name = "acryliusd", version, about = "The acrylius daemon")]
 struct Args {
     /// TCP port to listen on. Override to run a second instance on one machine.
     #[arg(long, default_value_t = acrylius_proto::DEFAULT_PORT)]
@@ -43,6 +44,32 @@ struct Args {
     /// Where the config lives.
     #[arg(long)]
     config: Option<PathBuf>,
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+/// Things the installer needs, kept in the binary because that is where the
+/// schema is. A shell script that knew which settings exist would be a second
+/// copy of the config format to keep in step.
+#[derive(clap::Subcommand, Debug)]
+enum Command {
+    /// Config file maintenance.
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum ConfigAction {
+    /// Print where the config file lives.
+    Path,
+    /// Write a commented config, if there is none. Never overwrites.
+    Init,
+    /// Add settings a newer version introduced, leaving everything else alone.
+    Update,
+    /// Parse it and report anything wrong, without starting.
+    Check,
 }
 
 fn state_dir(arg: Option<PathBuf>) -> PathBuf {
@@ -105,6 +132,81 @@ fn snapshot_devices(core: &acrylius_core::core::Core) -> Vec<control::Device> {
         .collect()
 }
 
+/// Config maintenance, and then exit. Nothing here starts a daemon or touches
+/// the network.
+fn run_config_action(action: &ConfigAction, path: &std::path::Path) -> anyhow::Result<()> {
+    let reference = reconcile::reference_text(&config::Config::default())?;
+
+    match action {
+        ConfigAction::Path => println!("{}", path.display()),
+
+        ConfigAction::Init => {
+            if path.exists() {
+                println!("{} exists; left alone", path.display());
+                return Ok(());
+            }
+            if let Some(dir) = path.parent() {
+                std::fs::create_dir_all(dir)?;
+            }
+            std::fs::write(path, reconcile::commented_default(&reference))?;
+            println!("wrote {}", path.display());
+        }
+
+        ConfigAction::Update => {
+            if !path.exists() {
+                println!("no config at {}; nothing to update", path.display());
+                return Ok(());
+            }
+            let added = reconcile::update_file(path, &reference)?;
+            if added.is_empty() {
+                println!("{} is up to date", path.display());
+            } else {
+                println!("added to {}:", path.display());
+                for (table, keys) in reconcile::describe(&added) {
+                    let where_ = if table.is_empty() {
+                        "(top level)".to_string()
+                    } else {
+                        format!("[{table}]")
+                    };
+                    println!("  {where_}  {}", keys.join(", "));
+                }
+            }
+            // Reported, never removed: a typo and a setting from a version
+            // newer than this binary look identical from here.
+            let text = std::fs::read_to_string(path)?;
+            let unknown = reconcile::unknown_keys(&text, &reference);
+            if !unknown.is_empty() {
+                println!("settings this version does not know about, left in place:");
+                for key in unknown {
+                    println!("  {key}");
+                }
+            }
+        }
+
+        ConfigAction::Check => {
+            let cfg = config::Config::load(path)?;
+            println!("{} parses", path.display());
+            println!("  port       {}", cfg.port);
+            println!("  commands   {}", cfg.commands.len());
+            println!(
+                "  clipboard  send {}, receive {}",
+                cfg.clipboard.send, cfg.clipboard.receive
+            );
+            let session_override =
+                !cfg.session.lock_command.is_empty() || !cfg.session.unlock_command.is_empty();
+            println!(
+                "  session    {}",
+                if session_override {
+                    "using configured commands"
+                } else {
+                    "using logind"
+                }
+            );
+        }
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -115,11 +217,19 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let args = Args::parse();
+    let config_path = args
+        .config
+        .clone()
+        .unwrap_or_else(config::Config::default_path);
+
+    if let Some(Command::Config { action }) = &args.command {
+        return run_config_action(action, &config_path);
+    }
+
     let explicit_state = args.state.is_some();
     let state = state_dir(args.state);
     std::fs::create_dir_all(&state)?;
 
-    let config_path = args.config.unwrap_or_else(config::Config::default_path);
     let cfg = config::Config::load(&config_path)?;
     let port = if args.port == acrylius_proto::DEFAULT_PORT {
         cfg.port

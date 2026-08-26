@@ -11,12 +11,27 @@
 # State lives under /tmp because a Unix socket path has a hard ~108 byte limit.
 set -u
 D=/tmp/acr-m1; BIN="$PWD/target/debug"
+
+# Not the default port. A developer running this has an installed daemon on
+# 1971, and the failure it caused — one instance quietly refusing to bind, then
+# a pairing that never completes — looks nothing like a port conflict.
+PORT_A=19711
+PORT_B=19721
+
 # Wait for a previous run's daemons to actually be gone. pkill returns as
 # soon as the signal is sent, and a daemon that still holds the listening
 # port, or the Wayland selection, makes the next run fail in a way that looks
 # like a flake.
-pkill -f 'target/debug/acryliusd' 2>/dev/null
-for i in $(seq 1 50); do pgrep -f 'target/debug/acryliusd' >/dev/null || break; sleep 0.1; done
+#
+# The pattern matches this run's state directory rather than the binary: one
+# naming the binary also matches the shell running this script, which then kills
+# itself, and it would take an installed daemon with it.
+mine() { pgrep -f "acryliusd --state $D/" 2>/dev/null; }
+cleanup() { mine | xargs -r kill 2>/dev/null || true; }
+trap cleanup EXIT
+
+cleanup
+for i in $(seq 1 50); do mine >/dev/null || break; sleep 0.1; done
 rm -rf $D; mkdir -p $D/a $D/b
 export RUST_LOG=acryliusd=warn,acrylius_rt=warn,acrylius_linux=warn
 
@@ -51,8 +66,8 @@ send = false
 receive = false
 ACFG
 
-"$BIN/acryliusd" --state $D/a --port 1981 --config $D/a/config.toml > $D/a.log 2>&1 &
-"$BIN/acryliusd" --state $D/b --port 1982 --config $D/b/config.toml > $D/b.log 2>&1 &
+"$BIN/acryliusd" --state $D/a --port $PORT_A --config $D/a/config.toml > $D/a.log 2>&1 &
+"$BIN/acryliusd" --state $D/b --port $PORT_B --config $D/b/config.toml > $D/b.log 2>&1 &
 ready() { for i in $(seq 1 100); do "$BIN/acryliusctl" --state "$1" status >/dev/null 2>&1 && return 0; sleep 0.1; done; return 1; }
 ready $D/a || { echo "alpha never came up"; cat $D/a.log; exit 1; }
 ready $D/b || { echo "bravo never came up"; cat $D/b.log; exit 1; }
@@ -69,16 +84,16 @@ echo
 echo "### pair"
 "$BIN/acryliusctl" --state $D/b pair --code ACRYLIUS > $D/b.pair 2>&1 &
 sleep 0.5
-"$BIN/acryliusctl" --state $D/a pair-with 127.0.0.1:1982 ACRYLIUS > $D/a.pair 2>&1 &
+"$BIN/acryliusctl" --state $D/a pair-with 127.0.0.1:$PORT_B ACRYLIUS > $D/a.pair 2>&1 &
 sleep 1.5
-SAS_A=$(grep -o 'both screens: [0-9 ]*' $D/a.pair | head -1)
-SAS_B=$(grep -o 'both screens: [0-9 ]*' $D/b.pair | head -1)
+SAS_A=$(grep -o 'It should be showing:  *[0-9 ]*' $D/a.pair | head -1)
+SAS_B=$(grep -o 'It should be showing:  *[0-9 ]*' $D/b.pair | head -1)
 [ -n "$SAS_A" ] && [ "$SAS_A" = "$SAS_B" ]; check $? "the same code on both ends ($SAS_A)"
 "$BIN/acryliusctl" --state $D/a approve >/dev/null
 "$BIN/acryliusctl" --state $D/b approve >/dev/null
 sleep 1
 
-"$BIN/acryliusctl" --state $D/a connect "$B_ID" --addr 127.0.0.1:1982 >/dev/null
+"$BIN/acryliusctl" --state $D/a connect "$B_ID" --addr 127.0.0.1:$PORT_B >/dev/null
 sleep 0.5
 
 echo
@@ -115,7 +130,6 @@ echo "$OUT" | grep -qE '^ok'; check $? "an allowlisted MAC is relayed"
 OUT=$("$BIN/acryliusctl" --state $D/a wake "$B_ID" 99:99:99:99:99:99 2>&1); echo "  $OUT"
 echo "$OUT" | grep -q "refused"; check $? "a MAC that is not allowlisted is refused"
 
-pkill -f 'target/debug/acryliusd' 2>/dev/null
 echo
 [ $fail = 0 ] && echo "M1 acceptance passed" || echo "M1 acceptance FAILED"
 exit $fail
