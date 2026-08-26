@@ -1186,9 +1186,13 @@ impl Core {
                 out.ui(UiEvent::Error {
                     code: ErrorCode::NotAllowed,
                     detail: format!(
-                        "no address known for {peer}. It has not been seen on this \
-                         network, and a device that only ever dials out — a phone, \
-                         for instance — never will be. Pass one with --addr."
+                        // No mention of a command-line flag: this reaches a
+                        // phone screen as often as a terminal, and advice about
+                        // `--addr` there is advice about a thing that is not on
+                        // the device reading it.
+                        "no address known for {peer}. Nothing has found it yet — it may \
+                         be switched off, on another network, or a device that only ever \
+                         dials out, which is never discovered at all."
                     ),
                 });
                 out.ui(UiEvent::PeerUnreachable { peer });
