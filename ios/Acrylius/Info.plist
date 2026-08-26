@@ -97,5 +97,18 @@
          governs URLSession and CFNetwork; no ATS exception is needed. -->
     <key>ITSAppUsesNonExemptEncryption</key>
     <false/>
+
+    <!-- Received files land in Documents, and these two are what let anything
+         else reach them. Without the first, the Files app never shows this app
+         at all and a file that arrived is a file only this app can open; the
+         second lets other apps open one in place rather than take a copy.
+
+         This is the difference between receiving a build and being able to
+         install it: a sideloader picks the .ipa through the document picker,
+         which can only see what these expose. -->
+    <key>UIFileSharingEnabled</key>
+    <true/>
+    <key>LSSupportsOpeningDocumentsInPlace</key>
+    <true/>
 </dict>
 </plist>

@@ -40,6 +40,23 @@ final class AppModel {
     /// what is in flight rather than going quiet between the tap and the reply.
     var sending: [UInt64: String] = [:]
 
+    /// A file a computer has offered this phone, waiting on a person.
+    struct IncomingOffer: Identifiable, Sendable, Equatable {
+        var id: UInt64 { transfer }
+        let transfer: UInt64
+        let peer: String
+        let name: String
+        let size: UInt64
+    }
+
+    /// Offers nobody has answered yet.
+    ///
+    /// Deliberately not answered automatically. A paired computer can put a
+    /// file on this phone only because someone here said so, each time — the
+    /// same rule the desktop follows, and worth keeping on the device that
+    /// travels.
+    var incoming: [IncomingOffer] = []
+
     /// What Bluetooth is doing. A projection like everything else here, filled
     /// in by the probe; the model decides nothing about the radio itself.
     let ble = BLEDiagnostics()
@@ -280,6 +297,30 @@ final class AppModel {
         status = "Offered \(offer.name)"
     }
 
+    /// Say yes to a file. This is what makes the phone bind a port and wait.
+    func accept(_ offer: IncomingOffer) async {
+        // Left in the list until the transfer actually ends, so the row does
+        // not vanish the instant it is tapped and leave nothing to look at
+        // while the bytes move.
+        await answer(offer, ty: "accept")
+        status = "Receiving \(offer.name)"
+    }
+
+    func decline(_ offer: IncomingOffer) async {
+        incoming.removeAll { $0.transfer == offer.transfer }
+        await answer(offer, ty: "reject")
+        status = "Declined \(offer.name)"
+    }
+
+    /// An answer to an offer is the transfer's id and nothing more; the plugin
+    /// looks the rest up from what it already holds.
+    private func answer(_ offer: IncomingOffer, ty: String) async {
+        let body = encodeShareEnd(
+            end: FfiTransferEnd(transfer: offer.transfer, ok: true, detail: ""))
+        await runtime?.submit(
+            .pluginCommand(peer: offer.peer, cap: capShare(), ty: ty, body: body))
+    }
+
     private func send(_ peer: FfiPeer, cap: String, ty: String, body: Data) async {
         await runtime?.submit(.pluginCommand(peer: peer.deviceId, cap: cap, ty: ty, body: body))
     }
@@ -372,13 +413,35 @@ final class AppModel {
         case .peerUnreachable:
             status = "not connected"
             Task { await refresh() }
-        case let .plugin(_, cap, ty, body):
+        // The peer is bound now: answering an offer means naming who made it,
+        // and until this phone could receive a file there was nothing here that
+        // needed to know.
+        case let .plugin(peer, cap, ty, body):
             if ty == "pong" { status = "pong" }
+            // A computer wants to send this phone something. Recorded in two
+            // places at once: the inbox settles where it would land, so a name
+            // collision is resolved before anyone agrees to anything, and the
+            // list here is what a person is actually shown.
+            if cap == capShare(), ty == "offer",
+               let offer = try? decodeShareOffer(body: body) {
+                let from = peer
+                Task { [weak self] in
+                    await self?.runtime?.inbox.remember(
+                        transfer: offer.transfer, peer: from,
+                        name: offer.name, size: offer.size)
+                }
+                incoming.removeAll { $0.transfer == offer.transfer }
+                incoming.append(IncomingOffer(
+                    transfer: offer.transfer, peer: peer,
+                    name: bulkSafeName(offered: offer.name), size: offer.size))
+                status = "\(offer.name) offered"
+            }
             // Both ends report a transfer, because each knows only its own
             // half: this phone knows it finished writing, and only the computer
             // knows whether it kept the file.
             if cap == capShare(), ty == "finished" || ty == "reject",
                let end = try? decodeShareFinished(body: body) {
+                incoming.removeAll { $0.transfer == end.transfer }
                 let name = sending.removeValue(forKey: end.transfer) ?? "the file"
                 if ty == "reject" {
                     status = "\(name) was refused"

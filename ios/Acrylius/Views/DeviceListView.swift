@@ -15,6 +15,20 @@ struct DeviceListView: View {
     var body: some View {
         NavigationStack(path: $path) {
             List {
+                // First, because it is the only thing here waiting on you. A
+                // transfer holds the sending computer open until it is answered.
+                if !model.incoming.isEmpty {
+                    Section {
+                        ForEach(model.incoming) { offer in
+                            IncomingOfferRow(offer: offer)
+                        }
+                    } header: {
+                        Text("Offered to this \(UIDevice.current.model)")
+                    } footer: {
+                        Text("Accepted files go to Acrylius in the Files app.")
+                    }
+                }
+
                 Section {
                     if model.peers.isEmpty {
                         ContentUnavailableView(
@@ -71,6 +85,28 @@ struct DeviceListView: View {
             guard !deviceId.isEmpty else { return }
             path = [deviceId]
         }
+    }
+}
+
+/// One file a computer wants to send, and the two answers to it.
+private struct IncomingOfferRow: View {
+    @Environment(AppModel.self) private var model
+    let offer: AppModel.IncomingOffer
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(offer.name).font(.body)
+            Text(ByteCountFormatter.string(fromByteCount: Int64(offer.size), countStyle: .file))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            HStack {
+                TaskButton("Accept") { await model.accept(offer); return true }
+                    .buttonStyle(.borderedProminent)
+                TaskButton("Decline") { await model.decline(offer); return true }
+                    .buttonStyle(.bordered)
+            }
+        }
+        .padding(.vertical, 4)
     }
 }
 
