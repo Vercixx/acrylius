@@ -47,12 +47,6 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends \
             curl ca-certificates git build-essential
-          # XcodeGen asks the OS who is running it, to name the xcuserdata
-          # directory. A container started with a uid that has no passwd entry
-          # has no answer, and it exits with "Couldn't find current username" —
-          # which sounds like a manifest problem and is not one.
-          getent passwd "$(id -u)" >/dev/null || \
-            echo "builder:x:$(id -u):$(id -g):builder:/tmp:/bin/sh" >> /etc/passwd
 
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

@@ -10,6 +10,13 @@
 # First run clones and builds XcodeGen (~90s); afterwards it is cached.
 set -euo pipefail
 
+# XcodeGen names the xcuserdata directory after whoever is running it and asks
+# the environment who that is. A container image often sets neither variable,
+# and it stops with "Couldn't find current username" — which reads like a
+# problem with the manifest and is nothing of the sort.
+export LOGNAME="${LOGNAME:-${USER:-builder}}"
+export USER="${USER:-$LOGNAME}"
+
 VERSION=${XCODEGEN_VERSION:-2.44.1}
 CACHE=${XCODEGEN_CACHE:-target/xcodegen}
 BIN="$CACHE/.build/release/xcodegen"
