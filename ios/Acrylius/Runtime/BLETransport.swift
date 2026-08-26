@@ -286,6 +286,41 @@ extension BLETransport: CBCentralManagerDelegate {
         )
         push(.scanning(true))
         push(.note("scanning for the acrylius service"))
+        adoptConnected(c)
+    }
+
+    /// Pick up desktops iOS is already connected to, which a scan will never
+    /// show us.
+    ///
+    /// A peripheral stops advertising while something is connected to it, and a
+    /// scan only ever reports advertisements. So when this app is killed and
+    /// relaunched, the desktop is still on the other end of an ACL link that
+    /// nobody told it to drop — and until it times out, a scan finds nothing at
+    /// all. No amount of waiting inside this launch helps, which is why the
+    /// symptom is "it connected, then after a restart it never would again, and
+    /// restarting once more fixed it".
+    ///
+    /// Apple's answer is this method, and its own discussion is explicit that
+    /// what comes back is not usable as-is: "The list of connected peripherals
+    /// can include those that other apps have connected. You need to connect
+    /// these peripherals locally using the connect(_:options:) method before
+    /// using them." So every one of them gets a local connect, including any
+    /// already reported as connected — that call is what makes this app a party
+    /// to the connection and starts the delegate callbacks.
+    private func adoptConnected(_ c: CBCentralManager) {
+        let already = c.retrieveConnectedPeripherals(withServices: [serviceUUID])
+        guard !already.isEmpty else {
+            push(.note("nothing already connected to iOS"))
+            return
+        }
+        push(.note("\(already.count) already connected to iOS; reconnecting"))
+        for peripheral in already {
+            // Retained here, before the connect, for the reason in the trap
+            // list: a `CBPeripheral` that is released is implicitly cancelled.
+            let p = remember(peripheral)
+            if let name = peripheral.name { p.name = name }
+            c.connect(peripheral, options: nil)
+        }
     }
 
     public func centralManager(
