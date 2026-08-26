@@ -134,6 +134,11 @@ public final class BLETransport: NSObject, Transport, @unchecked Sendable {
     /// automatically afterwards, with no separate setting to keep in step.
     public static var permitted: Bool { CBManager.authorization == .allowedAlways }
 
+    /// The one spelling of a BLE address. Written by `didUpdateValueFor` when
+    /// identity is read, parsed by `dial`; naming it once is what keeps those
+    /// two from drifting.
+    static let addrPrefix = "ble:"
+
     // MARK: - Transport
 
     public func start(events: @escaping @Sendable (FfiEvent) -> Void) async {
@@ -145,8 +150,7 @@ public final class BLETransport: NSObject, Transport, @unchecked Sendable {
 
     public func discover(enable: Bool) async {
         guard enable else {
-            lock.lock(); let c = central; lock.unlock()
-            c?.stopScan()
+            manager()?.stopScan()
             push(.scanning(false))
             push(.note("scanning stopped"))
             return
@@ -179,7 +183,9 @@ public final class BLETransport: NSObject, Transport, @unchecked Sendable {
     /// rotates. By the time the core dials we are normally already connected,
     /// because connecting is how we learned the fingerprint it is dialling.
     public func dial(addr: String, token: UInt64) async {
-        guard let raw = addr.stripPrefix("ble:"), let uuid = UUID(uuidString: raw) else {
+        guard addr.hasPrefix(Self.addrPrefix),
+            let uuid = UUID(uuidString: String(addr.dropFirst(Self.addrPrefix.count)))
+        else {
             fire(.dialFailed(dial: token, reason: "not a Bluetooth address: \(addr)"))
             return
         }
@@ -417,7 +423,7 @@ extension BLETransport: CBPeripheralDelegate {
                     peer: FfiDiscoveredPeer(
                         fingerprint: fp,
                         name: name,
-                        addr: "ble:\(peripheral.identifier.uuidString)",
+                        addr: "\(Self.addrPrefix)\(peripheral.identifier.uuidString)",
                         pairing: fields["pair"] == "1"
                     )))
             return
