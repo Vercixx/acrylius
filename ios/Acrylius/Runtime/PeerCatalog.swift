@@ -132,7 +132,16 @@ public struct PeerCatalog: Equatable, Sendable {
         if ty == "err" {
             features.lastError = (try? decodeError(body: body)) ?? "refused"
             changed = true
-        } else if cap == capSession() {
+        } else if features.lastError != nil {
+            // Anything else arriving from this peer means it is answering again,
+            // and whatever went wrong before is over. Nothing ever cleared this,
+            // so one refusal — a file declined, a player that would not take a
+            // command — stayed on that device's screen for the life of the app,
+            // outliving the thing it described by hours.
+            features.lastError = nil
+            changed = true
+        }
+        if cap == capSession() {
             switch ty {
             case "state":
                 features.session = try? decodeSessionState(body: body)

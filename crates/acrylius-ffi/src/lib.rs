@@ -77,12 +77,17 @@ pub fn default_config(name: String, platform: String) -> FfiConfig {
 /// the phone is locked, which would break every short-lived extension.
 /// Biometrics belong on the action, as a `LAContext` check before sending an
 /// unlock, not on the key. The old project learned that one the hard way.
+/// Fallible, because the empty vector it used to return on failure was stored
+/// as the identity. A caller reads "first run", writes what it is given, and a
+/// key that is not a key is then on disk for good — every launch after it loads
+/// the same empty bytes and fails the same way, with no path back but reinstall.
 #[uniffi::export]
-#[must_use]
-pub fn generate_identity() -> Vec<u8> {
+pub fn generate_identity() -> Result<Vec<u8>, FfiError> {
     Identity::generate()
         .map(|i| i.private().to_vec())
-        .unwrap_or_default()
+        .map_err(|e| FfiError::Effect {
+            detail: e.to_string(),
+        })
 }
 
 /// A device's public fingerprint, from its private key. Lets a host show its own

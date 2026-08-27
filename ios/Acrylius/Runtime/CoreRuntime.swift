@@ -56,7 +56,7 @@ public actor CoreRuntime {
         if let existing = try store.identityKey() {
             key = existing
         } else {
-            key = generateIdentity()
+            key = try generateIdentity()
             try store.setIdentityKey(key)
         }
         let core = try AcryliusCore(
