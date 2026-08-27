@@ -255,10 +255,23 @@ fn worth_announcing(before: Option<&MediaState>, now: &MediaState) -> bool {
 
 impl MediaPlugin {
     fn broadcast(&mut self, cx: &mut Cx, state: &MediaState) {
+        self.broadcast_except(cx, state, None);
+    }
+
+    /// Tell everyone except `already_told`, who is getting it as a reply.
+    fn broadcast_except(
+        &mut self,
+        cx: &mut Cx,
+        state: &MediaState,
+        already_told: Option<&DeviceId>,
+    ) {
         let Ok(body) = minicbor::to_vec(state) else {
             return;
         };
         for peer in &self.connected {
+            if Some(peer) == already_told {
+                continue;
+            }
             cx.send(peer, CAP, "state", body.clone());
         }
     }
@@ -439,6 +452,13 @@ impl Plugin for MediaPlugin {
                         self.broadcast(cx, &state);
                     }
                     return;
+                }
+                // A reply is not a broadcast, but it is a fresh reading, and it
+                // has already updated the dedupe cache above — so the next poll
+                // would find nothing changed and tell nobody. One phone pressing
+                // pause left every other device still showing it playing.
+                if changed {
+                    self.broadcast_except(cx, &state, Some(&p.peer));
                 }
                 match minicbor::to_vec(&state) {
                     Ok(body) => cx.send_reply(&p.peer, CAP, "state", body, p.request),

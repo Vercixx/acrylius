@@ -111,10 +111,23 @@ pub struct SessionPlugin {
 
 impl SessionPlugin {
     fn broadcast_state(&mut self, cx: &mut Cx, state: &SessionState) {
+        self.broadcast_state_except(cx, state, None);
+    }
+
+    /// Tell everyone except `already_told`, who is getting it as a reply.
+    fn broadcast_state_except(
+        &mut self,
+        cx: &mut Cx,
+        state: &SessionState,
+        already_told: Option<&DeviceId>,
+    ) {
         let Ok(body) = minicbor::to_vec(state) else {
             return;
         };
         for peer in &self.connected {
+            if Some(peer) == already_told {
+                continue;
+            }
             cx.send(peer, CAP, "state", body.clone());
         }
     }
@@ -226,8 +239,15 @@ impl Plugin for SessionPlugin {
                 }
                 if p.reply == "state"
                     && let Ok(state) = minicbor::decode::<SessionState>(bytes)
+                    && self.last.as_ref() != Some(&state)
                 {
-                    self.last = Some(state);
+                    // A reply is not a broadcast, but it *is* a fresh reading,
+                    // and letting it quietly update the dedupe cache meant the
+                    // next poll found nothing changed and told nobody. One
+                    // device asking made every other device's view stale, until
+                    // something happened to move the state again.
+                    self.last = Some(state.clone());
+                    self.broadcast_state_except(cx, &state, Some(&p.peer));
                 }
                 cx.send_reply(&p.peer, CAP, p.reply, bytes.clone(), p.request);
             }
@@ -338,6 +358,51 @@ mod tests {
         assert!(
             r.effects.is_empty(),
             "an unknown verb must not reach the host"
+        );
+    }
+
+    #[test]
+    fn one_device_asking_does_not_make_every_other_view_stale() {
+        // The dedupe cache is for broadcasts. A `query` answered only the device
+        // that asked, but updated the cache anyway — so the next poll compared
+        // the new state against itself, found nothing to say, and left every
+        // other paired device showing what it had before.
+        let mut p = SessionPlugin::default();
+        let asker = peer();
+        let other = DeviceId::of(&[4u8; 32]);
+        run(0, |cx| p.on_peer_connected(cx, &asker));
+        run(0, |cx| p.on_peer_connected(cx, &other));
+
+        let state = SessionState {
+            locked: true,
+            session_id: "1".to_string(),
+            kind: "wayland".to_string(),
+            active: true,
+        };
+        let env = envelope(3, CAP, "query", b"");
+        let r = run(0, |cx| p.on_message(cx, &asker, &env).unwrap());
+        let r2 = run(r.next_token, |cx| {
+            p.on_effect_result(
+                cx,
+                r.token(),
+                &EffectResult::Ok(minicbor::to_vec(&state).unwrap()),
+            );
+        });
+
+        let told: Vec<&DeviceId> = r2
+            .sends
+            .iter()
+            .filter(|s| s.ty == "state")
+            .map(|s| &s.peer)
+            .collect();
+        assert!(
+            told.contains(&&other),
+            "the device that did not ask still has to be told"
+        );
+        assert_eq!(
+            told.iter().filter(|d| ***d == asker).count(),
+            1,
+            "and the one that asked hears it once, as its reply"
         );
     }
 
