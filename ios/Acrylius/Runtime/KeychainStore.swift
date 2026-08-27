@@ -41,7 +41,17 @@ public final class KeychainStore: Store, @unchecked Sendable {
 
     // MARK: - identity
 
-    public func identityKey() -> Data? {
+    /// The stored identity, or `nil` if this device has never had one.
+    ///
+    /// `nil` means absent and nothing else. Every other failure throws, and the
+    /// difference is not pedantry: the item is stored
+    /// `WhenUnlockedThisDeviceOnly`, so reading it on a locked phone returns
+    /// `errSecInteractionNotAllowed` — and App Intents, Shortcuts and the widget
+    /// are all *designed* to run from the lock screen. Folding that into `nil`
+    /// told `bootstrap` this was a first run, which generated a new identity and
+    /// deleted the real one on the way in. Every paired computer became a
+    /// stranger, from tapping a widget button with the phone in a pocket.
+    public func identityKey() throws -> Data? {
         let q: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -50,7 +60,9 @@ public final class KeychainStore: Store, @unchecked Sendable {
             kSecMatchLimit as String: kSecMatchLimitOne,
         ]
         var out: CFTypeRef?
-        guard SecItemCopyMatching(q as CFDictionary, &out) == errSecSuccess else { return nil }
+        let status = SecItemCopyMatching(q as CFDictionary, &out)
+        if status == errSecItemNotFound { return nil }
+        guard status == errSecSuccess else { throw StoreError.keychain(status) }
         return out as? Data
     }
 

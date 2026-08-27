@@ -48,8 +48,12 @@ public actor CoreRuntime {
         effector: Effector = NullEffector(),
         effects: [FfiEffectKind] = []
     ) throws -> CoreRuntime {
+        // `try`, deliberately. A store that cannot read the identity right now
+        // must stop this bootstrap, not fall through to the generate branch:
+        // that branch overwrites, and on a locked phone the read fails for a
+        // reason that has nothing to do with whether an identity exists.
         let key: Data
-        if let existing = store.identityKey() {
+        if let existing = try store.identityKey() {
             key = existing
         } else {
             key = generateIdentity()
