@@ -1,14 +1,1 @@
-crates/acrylius-core/src/core.rs:215:37: replace match guard &u.peer == peer with true in Core::peer_state
-crates/acrylius-core/src/core.rs:215:37: replace match guard &u.peer == peer with false in Core::peer_state
-crates/acrylius-core/src/core.rs:215:45: replace == with != in Core::peer_state
-crates/acrylius-core/src/core.rs:661:9: replace Core::accept_hello -> bool with true
-crates/acrylius-core/src/core.rs:661:9: replace Core::accept_hello -> bool with false
-crates/acrylius-core/src/core.rs:881:9: replace Core::pairing_attempt_failed with ()
-crates/acrylius-core/src/core.rs:882:24: replace += with -= in Core::pairing_attempt_failed
-crates/acrylius-core/src/core.rs:882:24: replace += with *= in Core::pairing_attempt_failed
-crates/acrylius-core/src/core.rs:883:24: replace >= with < in Core::pairing_attempt_failed
-crates/acrylius-core/src/core.rs:1243:9: replace Core::best_link -> Option<(LinkId, &UpLink)> with None
-crates/acrylius-core/src/core.rs:1246:37: replace match guard &u.peer == peer with true in Core::best_link
-crates/acrylius-core/src/core.rs:1246:37: replace match guard &u.peer == peer with false in Core::best_link
-crates/acrylius-core/src/core.rs:1246:45: replace == with != in Core::best_link
-crates/acrylius-core/src/core.rs:1253:9: replace Core::best_link_transport -> Option<TransportId> with None
+crates/acrylius-core/src/core.rs:1568:9: replace Core::on_link_down with ()

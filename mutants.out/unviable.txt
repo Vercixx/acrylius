@@ -1,3 +1,0 @@
-crates/acrylius-core/src/core.rs:213:9: replace Core::peer_state -> PeerState with Default::default()
-crates/acrylius-core/src/core.rs:1243:9: replace Core::best_link -> Option<(LinkId, &UpLink)> with Some((Default::default(), Box::leak(Box::new(Default::default()))))
-crates/acrylius-core/src/core.rs:1253:9: replace Core::best_link_transport -> Option<TransportId> with Some(Default::default())

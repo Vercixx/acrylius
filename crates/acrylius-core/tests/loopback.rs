@@ -522,6 +522,62 @@ fn a_worse_transport_takes_over_when_the_better_one_dies() {
 }
 
 #[test]
+fn losing_one_of_two_routes_does_not_report_the_device_as_gone() {
+    // The sting in the previous test's tail, and what it did not check: the
+    // core stayed right about where to send, and told the user the opposite.
+    // Every link's death was announced as the peer's.
+    //
+    // That is not cosmetic. `PeerUnreachable` is what a host uses to discard
+    // what a peer told it — the phone drops its session state on exactly this
+    // event — and `on_peer_disconnected` is what stops a plugin broadcasting to
+    // a peer. So switching from Wi-Fi to Bluetooth emptied the session controls
+    // and stopped the desktop announcing its lock state to a device it was
+    // still talking to, and nothing restored either: both repairs wait for the
+    // peer to become reachable again, which never happens to a peer that never
+    // left.
+    let (mut net, _a_id, b_id) = paired();
+    net.ble_transport = Some(SLOWER);
+
+    discover_via(&mut net, Side::A, Side::B, TRANSPORT, "not-listening");
+    discover_via(&mut net, Side::A, Side::B, SLOWER, "B");
+    net.wall += 1_000;
+    discover_via(&mut net, Side::A, Side::B, TRANSPORT, "B");
+
+    net.ui.clear();
+    lose_link(&mut net, TRANSPORT);
+
+    assert!(
+        !net.saw(Side::A, |e| matches!(e, UiEvent::PeerUnreachable { .. })),
+        "a device still connected over the other transport was reported gone"
+    );
+    // And the change is announced rather than left silent: a screen showing
+    // which transport is carrying has no other way to learn it changed.
+    assert!(
+        net.saw(Side::A, |e| matches!(e, UiEvent::PeerReachable { .. })),
+        "nothing told the host the route had changed"
+    );
+    assert_eq!(net.a.peer_state(&b_id), PeerState::Reachable);
+}
+
+#[test]
+fn losing_the_last_route_does_report_the_device_as_gone() {
+    // The other half, kept honest: the case above must not be bought by never
+    // reporting a departure at all.
+    let (mut net, _a_id, b_id) = paired();
+    discover(&mut net, Side::A, Side::B);
+    assert_eq!(net.a.peer_state(&b_id), PeerState::Reachable);
+
+    net.ui.clear();
+    lose_link(&mut net, TRANSPORT);
+
+    assert!(
+        net.saw(Side::A, |e| matches!(e, UiEvent::PeerUnreachable { .. })),
+        "the last route died and nobody was told"
+    );
+    assert_eq!(net.a.peer_state(&b_id), PeerState::Unreachable);
+}
+
+#[test]
 fn a_sighting_on_one_transport_does_not_evict_another() {
     let (mut net, _a_id, b_id) = paired();
     // The better transport is overwritten first, because pairing has already

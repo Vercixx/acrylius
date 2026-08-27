@@ -1565,17 +1565,51 @@ impl Core {
     }
 
     fn on_link_down(&mut self, now_ms: u64, link: LinkId, out: &mut Outcome) {
-        if let Some(LinkState::Up(u)) = self.links.remove(&link) {
-            out.ui(UiEvent::PeerUnreachable {
+        let Some(LinkState::Up(u)) = self.links.remove(&link) else {
+            return;
+        };
+
+        // Losing a link is not losing a device.
+        //
+        // This used to announce every link's death as the peer's, which is
+        // wrong the moment a peer is reachable two ways — the arrangement a
+        // phone beside a desktop has all the time. Neither consequence is
+        // cosmetic. `PeerUnreachable` is what a host uses to throw away what a
+        // peer told it, and `on_peer_disconnected` is what stops a plugin
+        // broadcasting to it. So switching from Wi-Fi to Bluetooth emptied the
+        // phone's session controls and stopped the desktop announcing its lock
+        // state to a device it was still connected to.
+        //
+        // And nothing put either back, because the repair for both hangs off
+        // the peer becoming reachable again — which never happens to a peer
+        // that never left.
+        if self.best_link(&u.peer).is_some() {
+            // Still here, but possibly not over what it was. Said rather than
+            // left silent, because a host that shows which transport is
+            // carrying would otherwise go on showing the one that just died,
+            // and because this is the moment to ask a peer for anything that
+            // was only ever sent when it changed.
+            let name = self
+                .peers
+                .get(&u.peer)
+                .map(|r| r.name.clone())
+                .unwrap_or_default();
+            out.ui(UiEvent::PeerReachable {
                 peer: u.peer.clone(),
+                name,
             });
-            let mut cx = Cx::new(now_ms, self.next_token, self.serves);
-            for p in &mut self.plugins {
-                p.on_peer_disconnected(&mut cx, &u.peer);
-            }
-            self.next_token = cx.next_token;
-            self.drain_cx(cx, out);
+            return;
         }
+
+        out.ui(UiEvent::PeerUnreachable {
+            peer: u.peer.clone(),
+        });
+        let mut cx = Cx::new(now_ms, self.next_token, self.serves);
+        for p in &mut self.plugins {
+            p.on_peer_disconnected(&mut cx, &u.peer);
+        }
+        self.next_token = cx.next_token;
+        self.drain_cx(cx, out);
     }
 
     fn fail_link(&mut self, link: LinkId, detail: &str, out: &mut Outcome) {

@@ -1,3 +1,0 @@
-crates/acrylius-core/src/core.rs:216:46: replace match guard h.expect.as_ref() == Some(peer) with true in Core::peer_state
-crates/acrylius-core/src/core.rs:216:46: replace match guard h.expect.as_ref() == Some(peer) with false in Core::peer_state
-crates/acrylius-core/src/core.rs:216:64: replace == with != in Core::peer_state

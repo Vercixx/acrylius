@@ -1,5 +1,229 @@
 [
   {
+    "diff": "--- crates/acrylius-core/src/core.rs\n+++ replace Core::peer_state -> PeerState with Default::default()\n@@ -205,26 +205,17 @@\n             .as_ref()?\n             .awaiting\n             .as_ref()\n             .map(|a| a.sas.as_str())\n     }\n \n     #[must_use]\n     pub fn peer_state(&self, peer: &DeviceId) -> PeerState {\n-        for st in self.links.values() {\n-            match st {\n-                LinkState::Up(u) if &u.peer == peer => return PeerState::Reachable,\n-                LinkState::Handshaking(h) if h.expect.as_ref() == Some(peer) => {\n-                    return PeerState::Connecting;\n-                }\n-                _ => {}\n-            }\n-        }\n-        PeerState::Unreachable\n+        Default::default() /* ~ changed by cargo-mutants ~ */\n     }\n \n     /// The single entry point.\n     pub fn handle(&mut self, now: Now, ev: Event) -> Outcome {\n         // Everything below works in monotonic milliseconds. The wall clock is\n         // stashed for the one thing that needs it — see `Now`.\n         self.wall_ms = now.wall_ms;\n         let now_ms = now.monotonic_ms;\n",
+    "file": "crates/acrylius-core/src/core.rs",
+    "function": {
+      "function_name": "Core::peer_state",
+      "return_type": "-> PeerState",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 223
+        },
+        "start": {
+          "column": 5,
+          "line": 211
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/acrylius-core/src/core.rs:213:9: replace Core::peer_state -> PeerState with Default::default()",
+    "package": "acrylius-core",
+    "replacement": "Default::default()",
+    "span": {
+      "end": {
+        "column": 31,
+        "line": 222
+      },
+      "start": {
+        "column": 9,
+        "line": 213
+      }
+    }
+  },
+  {
+    "diff": "--- crates/acrylius-core/src/core.rs\n+++ replace match guard &u.peer == peer with true in Core::peer_state\n@@ -207,17 +207,17 @@\n             .as_ref()\n             .map(|a| a.sas.as_str())\n     }\n \n     #[must_use]\n     pub fn peer_state(&self, peer: &DeviceId) -> PeerState {\n         for st in self.links.values() {\n             match st {\n-                LinkState::Up(u) if &u.peer == peer => return PeerState::Reachable,\n+                LinkState::Up(u) if true /* ~ changed by cargo-mutants ~ */ => return PeerState::Reachable,\n                 LinkState::Handshaking(h) if h.expect.as_ref() == Some(peer) => {\n                     return PeerState::Connecting;\n                 }\n                 _ => {}\n             }\n         }\n         PeerState::Unreachable\n     }\n",
+    "file": "crates/acrylius-core/src/core.rs",
+    "function": {
+      "function_name": "Core::peer_state",
+      "return_type": "-> PeerState",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 223
+        },
+        "start": {
+          "column": 5,
+          "line": 211
+        }
+      }
+    },
+    "genre": "MatchArmGuard",
+    "name": "crates/acrylius-core/src/core.rs:215:37: replace match guard &u.peer == peer with true in Core::peer_state",
+    "package": "acrylius-core",
+    "replacement": "true",
+    "span": {
+      "end": {
+        "column": 52,
+        "line": 215
+      },
+      "start": {
+        "column": 37,
+        "line": 215
+      }
+    }
+  },
+  {
+    "diff": "--- crates/acrylius-core/src/core.rs\n+++ replace match guard &u.peer == peer with false in Core::peer_state\n@@ -207,17 +207,17 @@\n             .as_ref()\n             .map(|a| a.sas.as_str())\n     }\n \n     #[must_use]\n     pub fn peer_state(&self, peer: &DeviceId) -> PeerState {\n         for st in self.links.values() {\n             match st {\n-                LinkState::Up(u) if &u.peer == peer => return PeerState::Reachable,\n+                LinkState::Up(u) if false /* ~ changed by cargo-mutants ~ */ => return PeerState::Reachable,\n                 LinkState::Handshaking(h) if h.expect.as_ref() == Some(peer) => {\n                     return PeerState::Connecting;\n                 }\n                 _ => {}\n             }\n         }\n         PeerState::Unreachable\n     }\n",
+    "file": "crates/acrylius-core/src/core.rs",
+    "function": {
+      "function_name": "Core::peer_state",
+      "return_type": "-> PeerState",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 223
+        },
+        "start": {
+          "column": 5,
+          "line": 211
+        }
+      }
+    },
+    "genre": "MatchArmGuard",
+    "name": "crates/acrylius-core/src/core.rs:215:37: replace match guard &u.peer == peer with false in Core::peer_state",
+    "package": "acrylius-core",
+    "replacement": "false",
+    "span": {
+      "end": {
+        "column": 52,
+        "line": 215
+      },
+      "start": {
+        "column": 37,
+        "line": 215
+      }
+    }
+  },
+  {
+    "diff": "--- crates/acrylius-core/src/core.rs\n+++ replace match guard h.expect.as_ref() == Some(peer) with true in Core::peer_state\n@@ -208,17 +208,17 @@\n             .map(|a| a.sas.as_str())\n     }\n \n     #[must_use]\n     pub fn peer_state(&self, peer: &DeviceId) -> PeerState {\n         for st in self.links.values() {\n             match st {\n                 LinkState::Up(u) if &u.peer == peer => return PeerState::Reachable,\n-                LinkState::Handshaking(h) if h.expect.as_ref() == Some(peer) => {\n+                LinkState::Handshaking(h) if true /* ~ changed by cargo-mutants ~ */ => {\n                     return PeerState::Connecting;\n                 }\n                 _ => {}\n             }\n         }\n         PeerState::Unreachable\n     }\n \n",
+    "file": "crates/acrylius-core/src/core.rs",
+    "function": {
+      "function_name": "Core::peer_state",
+      "return_type": "-> PeerState",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 223
+        },
+        "start": {
+          "column": 5,
+          "line": 211
+        }
+      }
+    },
+    "genre": "MatchArmGuard",
+    "name": "crates/acrylius-core/src/core.rs:216:46: replace match guard h.expect.as_ref() == Some(peer) with true in Core::peer_state",
+    "package": "acrylius-core",
+    "replacement": "true",
+    "span": {
+      "end": {
+        "column": 77,
+        "line": 216
+      },
+      "start": {
+        "column": 46,
+        "line": 216
+      }
+    }
+  },
+  {
+    "diff": "--- crates/acrylius-core/src/core.rs\n+++ replace match guard h.expect.as_ref() == Some(peer) with false in Core::peer_state\n@@ -208,17 +208,17 @@\n             .map(|a| a.sas.as_str())\n     }\n \n     #[must_use]\n     pub fn peer_state(&self, peer: &DeviceId) -> PeerState {\n         for st in self.links.values() {\n             match st {\n                 LinkState::Up(u) if &u.peer == peer => return PeerState::Reachable,\n-                LinkState::Handshaking(h) if h.expect.as_ref() == Some(peer) => {\n+                LinkState::Handshaking(h) if false /* ~ changed by cargo-mutants ~ */ => {\n                     return PeerState::Connecting;\n                 }\n                 _ => {}\n             }\n         }\n         PeerState::Unreachable\n     }\n \n",
+    "file": "crates/acrylius-core/src/core.rs",
+    "function": {
+      "function_name": "Core::peer_state",
+      "return_type": "-> PeerState",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 223
+        },
+        "start": {
+          "column": 5,
+          "line": 211
+        }
+      }
+    },
+    "genre": "MatchArmGuard",
+    "name": "crates/acrylius-core/src/core.rs:216:46: replace match guard h.expect.as_ref() == Some(peer) with false in Core::peer_state",
+    "package": "acrylius-core",
+    "replacement": "false",
+    "span": {
+      "end": {
+        "column": 77,
+        "line": 216
+      },
+      "start": {
+        "column": 46,
+        "line": 216
+      }
+    }
+  },
+  {
+    "diff": "--- crates/acrylius-core/src/core.rs\n+++ replace == with != in Core::peer_state\n@@ -207,17 +207,17 @@\n             .as_ref()\n             .map(|a| a.sas.as_str())\n     }\n \n     #[must_use]\n     pub fn peer_state(&self, peer: &DeviceId) -> PeerState {\n         for st in self.links.values() {\n             match st {\n-                LinkState::Up(u) if &u.peer == peer => return PeerState::Reachable,\n+                LinkState::Up(u) if &u.peer != /* ~ changed by cargo-mutants ~ */ peer => return PeerState::Reachable,\n                 LinkState::Handshaking(h) if h.expect.as_ref() == Some(peer) => {\n                     return PeerState::Connecting;\n                 }\n                 _ => {}\n             }\n         }\n         PeerState::Unreachable\n     }\n",
+    "file": "crates/acrylius-core/src/core.rs",
+    "function": {
+      "function_name": "Core::peer_state",
+      "return_type": "-> PeerState",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 223
+        },
+        "start": {
+          "column": 5,
+          "line": 211
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "crates/acrylius-core/src/core.rs:215:45: replace == with != in Core::peer_state",
+    "package": "acrylius-core",
+    "replacement": "!=",
+    "span": {
+      "end": {
+        "column": 47,
+        "line": 215
+      },
+      "start": {
+        "column": 45,
+        "line": 215
+      }
+    }
+  },
+  {
+    "diff": "--- crates/acrylius-core/src/core.rs\n+++ replace == with != in Core::peer_state\n@@ -208,17 +208,17 @@\n             .map(|a| a.sas.as_str())\n     }\n \n     #[must_use]\n     pub fn peer_state(&self, peer: &DeviceId) -> PeerState {\n         for st in self.links.values() {\n             match st {\n                 LinkState::Up(u) if &u.peer == peer => return PeerState::Reachable,\n-                LinkState::Handshaking(h) if h.expect.as_ref() == Some(peer) => {\n+                LinkState::Handshaking(h) if h.expect.as_ref() != /* ~ changed by cargo-mutants ~ */ Some(peer) => {\n                     return PeerState::Connecting;\n                 }\n                 _ => {}\n             }\n         }\n         PeerState::Unreachable\n     }\n \n",
+    "file": "crates/acrylius-core/src/core.rs",
+    "function": {
+      "function_name": "Core::peer_state",
+      "return_type": "-> PeerState",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 223
+        },
+        "start": {
+          "column": 5,
+          "line": 211
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "crates/acrylius-core/src/core.rs:216:64: replace == with != in Core::peer_state",
+    "package": "acrylius-core",
+    "replacement": "!=",
+    "span": {
+      "end": {
+        "column": 66,
+        "line": 216
+      },
+      "start": {
+        "column": 64,
+        "line": 216
+      }
+    }
+  },
+  {
     "diff": "--- crates/acrylius-core/src/core.rs\n+++ replace Core::accept_hello -> bool with true\n@@ -653,49 +653,17 @@\n                 return;\n             }\n             self.finish_session(now_ms, link, h.hs, h.attrs, peer, out);\n         }\n     }\n \n     /// Validate a peer's Hello and advance its replay watermark.\n     fn accept_hello(&mut self, peer: &DeviceId, payload: &[u8], out: &mut Outcome) -> bool {\n-        let Ok(hello) = minicbor::decode::<Hello>(payload) else {\n-            out.ui(UiEvent::Error {\n-                code: ErrorCode::BadBody,\n-                detail: \"handshake payload did not decode\".to_string(),\n-            });\n-            return false;\n-        };\n-        let Some(rec) = self.peers.get_mut(peer) else {\n-            return false;\n-        };\n-        match hello.check_freshness(self.wall_ms, GreatestSeen(rec.greatest_seen)) {\n-            Ok(seen) => {\n-                rec.greatest_seen = seen.0;\n-                rec.name = hello.name;\n-                rec.platform = hello.platform;\n-                rec.caps_out = hello.caps_out;\n-                rec.caps_in = hello.caps_in;\n-                let (key, value) = Self::peer_blob(rec);\n-                out.push(Action::Persist {\n-                    key,\n-                    value,\n-                    sensitivity: Sensitivity::Secret,\n-                });\n-                true\n-            }\n-            Err(e) => {\n-                out.ui(UiEvent::Error {\n-                    code: ErrorCode::NotAllowed,\n-                    detail: e.to_string(),\n-                });\n-                false\n-            }\n-        }\n+        true /* ~ changed by cargo-mutants ~ */\n     }\n \n     fn finish_session(\n         &mut self,\n         now_ms: u64,\n         link: LinkId,\n         hs: Handshake,\n         attrs: LinkAttrs,\n",
     "file": "crates/acrylius-core/src/core.rs",
     "function": {
@@ -188,6 +412,230 @@
       "start": {
         "column": 24,
         "line": 883
+      }
+    }
+  },
+  {
+    "diff": "--- crates/acrylius-core/src/core.rs\n+++ replace Core::best_link -> Option<(LinkId, &UpLink)> with None\n@@ -1235,23 +1235,17 @@\n     /// names, and whether a file can be carried at all. Those were three\n     /// separate walks that agreed only because a `BTreeMap` happens to order\n     /// `LinkId`s the way transports are numbered — true by convention in the\n     /// daemon, and quietly false anywhere ids are minted another way.\n     ///\n     /// Preference is ascending transport id: Wi-Fi before Bluetooth, which is\n     /// the order the hosts register them in.\n     fn best_link(&self, peer: &DeviceId) -> Option<(LinkId, &UpLink)> {\n-        self.links\n-            .iter()\n-            .filter_map(|(id, st)| match st {\n-                LinkState::Up(u) if &u.peer == peer => Some((*id, &**u)),\n-                _ => None,\n-            })\n-            .min_by_key(|(_, u)| u.transport)\n+        None /* ~ changed by cargo-mutants ~ */\n     }\n \n     fn best_link_transport(&self, peer: &DeviceId) -> Option<TransportId> {\n         self.best_link(peer).map(|(_, u)| u.transport)\n     }\n \n     #[must_use]\n     pub fn transport_for(&self, peer: &DeviceId) -> Option<TransportKind> {\n",
+    "file": "crates/acrylius-core/src/core.rs",
+    "function": {
+      "function_name": "Core::best_link",
+      "return_type": "-> Option<(LinkId, &UpLink)>",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 1250
+        },
+        "start": {
+          "column": 5,
+          "line": 1216
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/acrylius-core/src/core.rs:1243:9: replace Core::best_link -> Option<(LinkId, &UpLink)> with None",
+    "package": "acrylius-core",
+    "replacement": "None",
+    "span": {
+      "end": {
+        "column": 46,
+        "line": 1249
+      },
+      "start": {
+        "column": 9,
+        "line": 1243
+      }
+    }
+  },
+  {
+    "diff": "--- crates/acrylius-core/src/core.rs\n+++ replace Core::best_link -> Option<(LinkId, &UpLink)> with Some((Default::default(), Box::leak(Box::new(Default::default()))))\n@@ -1235,23 +1235,17 @@\n     /// names, and whether a file can be carried at all. Those were three\n     /// separate walks that agreed only because a `BTreeMap` happens to order\n     /// `LinkId`s the way transports are numbered — true by convention in the\n     /// daemon, and quietly false anywhere ids are minted another way.\n     ///\n     /// Preference is ascending transport id: Wi-Fi before Bluetooth, which is\n     /// the order the hosts register them in.\n     fn best_link(&self, peer: &DeviceId) -> Option<(LinkId, &UpLink)> {\n-        self.links\n-            .iter()\n-            .filter_map(|(id, st)| match st {\n-                LinkState::Up(u) if &u.peer == peer => Some((*id, &**u)),\n-                _ => None,\n-            })\n-            .min_by_key(|(_, u)| u.transport)\n+        Some((Default::default(), Box::leak(Box::new(Default::default())))) /* ~ changed by cargo-mutants ~ */\n     }\n \n     fn best_link_transport(&self, peer: &DeviceId) -> Option<TransportId> {\n         self.best_link(peer).map(|(_, u)| u.transport)\n     }\n \n     #[must_use]\n     pub fn transport_for(&self, peer: &DeviceId) -> Option<TransportKind> {\n",
+    "file": "crates/acrylius-core/src/core.rs",
+    "function": {
+      "function_name": "Core::best_link",
+      "return_type": "-> Option<(LinkId, &UpLink)>",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 1250
+        },
+        "start": {
+          "column": 5,
+          "line": 1216
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/acrylius-core/src/core.rs:1243:9: replace Core::best_link -> Option<(LinkId, &UpLink)> with Some((Default::default(), Box::leak(Box::new(Default::default()))))",
+    "package": "acrylius-core",
+    "replacement": "Some((Default::default(), Box::leak(Box::new(Default::default()))))",
+    "span": {
+      "end": {
+        "column": 46,
+        "line": 1249
+      },
+      "start": {
+        "column": 9,
+        "line": 1243
+      }
+    }
+  },
+  {
+    "diff": "--- crates/acrylius-core/src/core.rs\n+++ replace match guard &u.peer == peer with true in Core::best_link\n@@ -1238,17 +1238,17 @@\n     /// daemon, and quietly false anywhere ids are minted another way.\n     ///\n     /// Preference is ascending transport id: Wi-Fi before Bluetooth, which is\n     /// the order the hosts register them in.\n     fn best_link(&self, peer: &DeviceId) -> Option<(LinkId, &UpLink)> {\n         self.links\n             .iter()\n             .filter_map(|(id, st)| match st {\n-                LinkState::Up(u) if &u.peer == peer => Some((*id, &**u)),\n+                LinkState::Up(u) if true /* ~ changed by cargo-mutants ~ */ => Some((*id, &**u)),\n                 _ => None,\n             })\n             .min_by_key(|(_, u)| u.transport)\n     }\n \n     fn best_link_transport(&self, peer: &DeviceId) -> Option<TransportId> {\n         self.best_link(peer).map(|(_, u)| u.transport)\n     }\n",
+    "file": "crates/acrylius-core/src/core.rs",
+    "function": {
+      "function_name": "Core::best_link",
+      "return_type": "-> Option<(LinkId, &UpLink)>",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 1250
+        },
+        "start": {
+          "column": 5,
+          "line": 1216
+        }
+      }
+    },
+    "genre": "MatchArmGuard",
+    "name": "crates/acrylius-core/src/core.rs:1246:37: replace match guard &u.peer == peer with true in Core::best_link",
+    "package": "acrylius-core",
+    "replacement": "true",
+    "span": {
+      "end": {
+        "column": 52,
+        "line": 1246
+      },
+      "start": {
+        "column": 37,
+        "line": 1246
+      }
+    }
+  },
+  {
+    "diff": "--- crates/acrylius-core/src/core.rs\n+++ replace match guard &u.peer == peer with false in Core::best_link\n@@ -1238,17 +1238,17 @@\n     /// daemon, and quietly false anywhere ids are minted another way.\n     ///\n     /// Preference is ascending transport id: Wi-Fi before Bluetooth, which is\n     /// the order the hosts register them in.\n     fn best_link(&self, peer: &DeviceId) -> Option<(LinkId, &UpLink)> {\n         self.links\n             .iter()\n             .filter_map(|(id, st)| match st {\n-                LinkState::Up(u) if &u.peer == peer => Some((*id, &**u)),\n+                LinkState::Up(u) if false /* ~ changed by cargo-mutants ~ */ => Some((*id, &**u)),\n                 _ => None,\n             })\n             .min_by_key(|(_, u)| u.transport)\n     }\n \n     fn best_link_transport(&self, peer: &DeviceId) -> Option<TransportId> {\n         self.best_link(peer).map(|(_, u)| u.transport)\n     }\n",
+    "file": "crates/acrylius-core/src/core.rs",
+    "function": {
+      "function_name": "Core::best_link",
+      "return_type": "-> Option<(LinkId, &UpLink)>",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 1250
+        },
+        "start": {
+          "column": 5,
+          "line": 1216
+        }
+      }
+    },
+    "genre": "MatchArmGuard",
+    "name": "crates/acrylius-core/src/core.rs:1246:37: replace match guard &u.peer == peer with false in Core::best_link",
+    "package": "acrylius-core",
+    "replacement": "false",
+    "span": {
+      "end": {
+        "column": 52,
+        "line": 1246
+      },
+      "start": {
+        "column": 37,
+        "line": 1246
+      }
+    }
+  },
+  {
+    "diff": "--- crates/acrylius-core/src/core.rs\n+++ replace == with != in Core::best_link\n@@ -1238,17 +1238,17 @@\n     /// daemon, and quietly false anywhere ids are minted another way.\n     ///\n     /// Preference is ascending transport id: Wi-Fi before Bluetooth, which is\n     /// the order the hosts register them in.\n     fn best_link(&self, peer: &DeviceId) -> Option<(LinkId, &UpLink)> {\n         self.links\n             .iter()\n             .filter_map(|(id, st)| match st {\n-                LinkState::Up(u) if &u.peer == peer => Some((*id, &**u)),\n+                LinkState::Up(u) if &u.peer != /* ~ changed by cargo-mutants ~ */ peer => Some((*id, &**u)),\n                 _ => None,\n             })\n             .min_by_key(|(_, u)| u.transport)\n     }\n \n     fn best_link_transport(&self, peer: &DeviceId) -> Option<TransportId> {\n         self.best_link(peer).map(|(_, u)| u.transport)\n     }\n",
+    "file": "crates/acrylius-core/src/core.rs",
+    "function": {
+      "function_name": "Core::best_link",
+      "return_type": "-> Option<(LinkId, &UpLink)>",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 1250
+        },
+        "start": {
+          "column": 5,
+          "line": 1216
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "crates/acrylius-core/src/core.rs:1246:45: replace == with != in Core::best_link",
+    "package": "acrylius-core",
+    "replacement": "!=",
+    "span": {
+      "end": {
+        "column": 47,
+        "line": 1246
+      },
+      "start": {
+        "column": 45,
+        "line": 1246
+      }
+    }
+  },
+  {
+    "diff": "--- crates/acrylius-core/src/core.rs\n+++ replace Core::best_link_transport -> Option<TransportId> with None\n@@ -1245,17 +1245,17 @@\n             .filter_map(|(id, st)| match st {\n                 LinkState::Up(u) if &u.peer == peer => Some((*id, &**u)),\n                 _ => None,\n             })\n             .min_by_key(|(_, u)| u.transport)\n     }\n \n     fn best_link_transport(&self, peer: &DeviceId) -> Option<TransportId> {\n-        self.best_link(peer).map(|(_, u)| u.transport)\n+        None /* ~ changed by cargo-mutants ~ */\n     }\n \n     #[must_use]\n     pub fn transport_for(&self, peer: &DeviceId) -> Option<TransportKind> {\n         self.best_link(peer).map(|(_, u)| u.kind.clone())\n     }\n \n     fn dispatch_bulk(&mut self, request: BulkRequest, out: &mut Outcome) {\n",
+    "file": "crates/acrylius-core/src/core.rs",
+    "function": {
+      "function_name": "Core::best_link_transport",
+      "return_type": "-> Option<TransportId>",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 1254
+        },
+        "start": {
+          "column": 5,
+          "line": 1252
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/acrylius-core/src/core.rs:1253:9: replace Core::best_link_transport -> Option<TransportId> with None",
+    "package": "acrylius-core",
+    "replacement": "None",
+    "span": {
+      "end": {
+        "column": 55,
+        "line": 1253
+      },
+      "start": {
+        "column": 9,
+        "line": 1253
+      }
+    }
+  },
+  {
+    "diff": "--- crates/acrylius-core/src/core.rs\n+++ replace Core::best_link_transport -> Option<TransportId> with Some(Default::default())\n@@ -1245,17 +1245,17 @@\n             .filter_map(|(id, st)| match st {\n                 LinkState::Up(u) if &u.peer == peer => Some((*id, &**u)),\n                 _ => None,\n             })\n             .min_by_key(|(_, u)| u.transport)\n     }\n \n     fn best_link_transport(&self, peer: &DeviceId) -> Option<TransportId> {\n-        self.best_link(peer).map(|(_, u)| u.transport)\n+        Some(Default::default()) /* ~ changed by cargo-mutants ~ */\n     }\n \n     #[must_use]\n     pub fn transport_for(&self, peer: &DeviceId) -> Option<TransportKind> {\n         self.best_link(peer).map(|(_, u)| u.kind.clone())\n     }\n \n     fn dispatch_bulk(&mut self, request: BulkRequest, out: &mut Outcome) {\n",
+    "file": "crates/acrylius-core/src/core.rs",
+    "function": {
+      "function_name": "Core::best_link_transport",
+      "return_type": "-> Option<TransportId>",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 1254
+        },
+        "start": {
+          "column": 5,
+          "line": 1252
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/acrylius-core/src/core.rs:1253:9: replace Core::best_link_transport -> Option<TransportId> with Some(Default::default())",
+    "package": "acrylius-core",
+    "replacement": "Some(Default::default())",
+    "span": {
+      "end": {
+        "column": 55,
+        "line": 1253
+      },
+      "start": {
+        "column": 9,
+        "line": 1253
       }
     }
   }
