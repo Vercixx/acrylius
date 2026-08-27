@@ -331,33 +331,40 @@ pub fn decode_share_finished(body: Vec<u8>) -> Result<FfiTransferEnd, FfiError> 
     })
 }
 
+/// The field list lives once. Two copies of it is how one of them quietly stops
+/// carrying `can_control` and a screen grows a dead button.
+impl From<FfiMediaState> for media::MediaState {
+    fn from(state: FfiMediaState) -> Self {
+        Self {
+            players: state
+                .players
+                .into_iter()
+                .map(|p| media::MediaPlayer {
+                    id: p.id,
+                    name: p.name,
+                    status: p.status,
+                    title: p.title,
+                    artist: p.artist,
+                    album: p.album,
+                    length_ms: p.length_ms,
+                    position_ms: p.position_ms,
+                    volume_percent: p.volume_percent,
+                    can_go_next: p.can_go_next,
+                    can_go_previous: p.can_go_previous,
+                    can_seek: p.can_seek,
+                    can_control: p.can_control,
+                })
+                .collect(),
+            active: state.active,
+            system_volume: state.system_volume,
+        }
+    }
+}
+
 #[uniffi::export]
 #[must_use]
 pub fn encode_media_state(state: FfiMediaState) -> Vec<u8> {
-    minicbor::to_vec(media::MediaState {
-        players: state
-            .players
-            .into_iter()
-            .map(|p| media::MediaPlayer {
-                id: p.id,
-                name: p.name,
-                status: p.status,
-                title: p.title,
-                artist: p.artist,
-                album: p.album,
-                length_ms: p.length_ms,
-                position_ms: p.position_ms,
-                volume_percent: p.volume_percent,
-                can_go_next: p.can_go_next,
-                can_go_previous: p.can_go_previous,
-                can_seek: p.can_seek,
-                can_control: p.can_control,
-            })
-            .collect(),
-        active: state.active,
-        system_volume: state.system_volume,
-    })
-    .unwrap_or_default()
+    minicbor::to_vec(media::MediaState::from(state)).unwrap_or_default()
 }
 
 #[uniffi::export]

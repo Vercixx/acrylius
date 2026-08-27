@@ -12,12 +12,24 @@
 
 use std::collections::HashMap;
 
-use acrylius_core::plugins::media::{MediaPlayer, MediaState};
+use acrylius_core::plugins::media::{MediaPlayer, MediaState, landed};
 use acrylius_core::vocab::MediaAction;
 use zbus::zvariant::{ObjectPath, OwnedValue};
 
 /// The prefix every player's bus name carries.
 const PREFIX: &str = "org.mpris.MediaPlayer2.";
+
+/// How long a command may take to show up in a reading before we answer anyway.
+///
+/// The number lives in the core, next to the budget a client waits, because two
+/// independently chosen timeouts that must be ordered is the bug that made a
+/// lock that worked report a failure.
+const CONTROL_CONFIRM: std::time::Duration =
+    std::time::Duration::from_millis(acrylius_core::plugins::media::CONTROL_CONFIRM_MS);
+
+/// How often to re-read while waiting. Short, because most players act in well
+/// under a tenth of a second and the common case should not pay for the rest.
+const CONTROL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(60);
 
 /// A proxy that mirrors whichever player is active.
 ///
@@ -192,14 +204,24 @@ impl MediaEffector {
         }
     }
 
-    pub async fn control(&self, player: &str, action: MediaAction) -> anyhow::Result<()> {
+    /// Carry out a command, and hand back the reading it was aimed at.
+    ///
+    /// The reading is not a courtesy: [`Media::control_and_settle`] needs to know
+    /// what the player looked like *before*, and this method has already paid for
+    /// it to find the target. `None` is the machine-volume path, which touches no
+    /// player and so has nothing to compare against.
+    pub async fn control(
+        &self,
+        player: &str,
+        action: MediaAction,
+    ) -> anyhow::Result<Option<MediaState>> {
         // The machine's volume, not a player's, when no player was named. It is
         // what a person means by "turn it down", it is the one control that
         // works whatever is playing, and it needs no player to exist at all —
         // so it is answered before anything looks for one.
         if let (MediaAction::SetVolume { percent }, true) = (&action, player.is_empty()) {
             crate::mixer::set_volume(*percent).await?;
-            return Ok(());
+            return Ok(None);
         }
         let state = self.state().await;
         let target = if player.is_empty() {
@@ -275,7 +297,49 @@ impl MediaEffector {
                 }
             }
         }
-        Ok(())
+        Ok(Some(state))
+    }
+
+    /// Carry out a command and answer with a reading that reflects it.
+    ///
+    /// An MPRIS call returns before the player has acted on it, so the first
+    /// reading afterwards is routinely the state we started from. Answering with
+    /// that one is what leaves a phone showing the previous track's title and a
+    /// timeline still running on something already paused, and — because the
+    /// position has moved between the two readings — it looks like a change, so
+    /// the caller is told the command worked.
+    ///
+    /// So the reading is repeated until it shows the command having landed, or
+    /// until the budget runs out. The last reading is answered with either way:
+    /// a player that ignored a command is a real answer, not an error, and the
+    /// peer can see for itself that nothing moved.
+    ///
+    /// The budget is well under the five seconds a phone waits, because a client
+    /// that gives up before the machine has answered reports a failure that did
+    /// not happen. That is the same mistake as `LOCK_CONFIRM` against
+    /// `awaitScreen`, and it is worth not making twice.
+    pub async fn control_and_settle(
+        &self,
+        player: &str,
+        action: MediaAction,
+    ) -> anyhow::Result<MediaState> {
+        let before = self.control(player, action).await?;
+        let deadline = std::time::Instant::now() + CONTROL_CONFIRM;
+        loop {
+            tokio::time::sleep(CONTROL_INTERVAL).await;
+            let now = self.state().await;
+            // Nothing to compare against, or nothing a reading can settle: this
+            // is the answer, and waiting longer would only delay it.
+            let Some(before) = before.as_ref() else {
+                return Ok(now);
+            };
+            if landed(&action, player, before, &now) != Some(false) {
+                return Ok(now);
+            }
+            if std::time::Instant::now() >= deadline {
+                return Ok(now);
+            }
+        }
     }
 }
 

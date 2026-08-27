@@ -197,17 +197,16 @@ impl Effector for LinuxEffector {
             },
 
             Effect::MediaControl { player, action } => match &self.media {
-                Some(m) => match m.control(&player, action).await {
-                    // Answered with the state afterwards, not with a bare
-                    // acknowledgement: a player may ignore a command, clamp a
-                    // seek, or stop of its own accord, and only reading it back
-                    // says which. A small pause first, because MPRIS calls
-                    // return before the player has acted on them and reading
-                    // immediately would report the state we started from.
-                    Ok(()) => {
-                        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
-                        Self::encode(&m.state().await)
-                    }
+                // Answered with the state afterwards, not with a bare
+                // acknowledgement: a player may ignore a command, clamp a seek,
+                // or stop of its own accord, and only reading it back says
+                // which. `control_and_settle` waits for a reading that actually
+                // reflects the command rather than pausing for a fixed moment
+                // and hoping — a player slower than the pause used to be
+                // answered with the state we started from, which is a phone
+                // showing the previous track.
+                Some(m) => match m.control_and_settle(&player, action).await {
+                    Ok(state) => Self::encode(&state),
                     Err(e) => EffectResult::Failed(e.to_string()),
                 },
                 None => EffectResult::Unsupported,

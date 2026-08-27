@@ -365,3 +365,61 @@ pub fn ble_tx_uuid() -> String {
 pub fn default_port() -> u16 {
     acrylius_proto::DEFAULT_PORT
 }
+
+/// How long to wait for a lock to be answered before calling it a failure.
+///
+/// Exported rather than written down again on this side. A host spends up to its
+/// own confirm budget watching the screen locker before it answers, so a client
+/// that waits any less reports a failure that did not happen — which is what a
+/// pair of eight-second timeouts, one here and one in Swift, used to do.
+#[uniffi::export]
+#[must_use]
+pub fn session_lock_budget_ms() -> u64 {
+    acrylius_core::plugins::session::LOCK_REPLY_BUDGET_MS
+}
+
+/// See [`session_lock_budget_ms`].
+#[uniffi::export]
+#[must_use]
+pub fn session_unlock_budget_ms() -> u64 {
+    acrylius_core::plugins::session::UNLOCK_REPLY_BUDGET_MS
+}
+
+/// See [`session_lock_budget_ms`].
+#[uniffi::export]
+#[must_use]
+pub fn media_command_budget_ms() -> u64 {
+    acrylius_core::plugins::media::CONTROL_REPLY_BUDGET_MS
+}
+
+/// Whether a reading taken after a command shows the player having acted on it.
+///
+/// The same rule the desktop waits on, so the two ends cannot disagree about
+/// what "it worked" means. `None` — surfaced here as a null — means a reading
+/// cannot answer the question and the caller should stop waiting rather than
+/// guess: a seek moves a position that also moves on its own.
+///
+/// Comparing whole states instead is what this replaces, and it was wrong in
+/// both directions: a playing track's position moves between any two readings,
+/// so every command looked like it landed, while a paused one looked like
+/// nothing ever did.
+#[uniffi::export]
+#[must_use]
+pub fn media_command_landed(
+    verb: String,
+    player: String,
+    value: i64,
+    before: crate::bodies::FfiMediaState,
+    now: crate::bodies::FfiMediaState,
+) -> Option<bool> {
+    use acrylius_core::plugins::media;
+    let cmd = media::MediaCommand {
+        player: player.clone(),
+        value,
+    };
+    // A verb this build does not know is not a question a reading can answer.
+    let Ok(action) = media::MediaPlugin::action_for(&verb, &cmd) else {
+        return None;
+    };
+    media::landed(&action, &player, &before.into(), &now.into())
+}
