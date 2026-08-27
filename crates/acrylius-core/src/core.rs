@@ -27,6 +27,12 @@ use crate::vocab::{
 /// whether a person asked for it.
 type PeerDial = (DeviceId, Vec<(TransportId, String)>, bool);
 
+/// How many unpaired sightings to remember at once.
+///
+/// Far more than a home or an office has, and small enough that the map cannot
+/// become a leak on a daemon that runs for months across many networks.
+const MAX_SEEN: usize = 256;
+
 /// What a link we dialled brings with it into its handshake.
 struct Dialled {
     attrs: LinkAttrs,
@@ -280,6 +286,20 @@ impl Core {
                     // chance to learn where that device lives.
                     // Per transport, so a sighting on one never evicts what
                     // another already knows.
+                    // Bounded, because nothing prunes it and every acrylius
+                    // device on every network this one ever joins leaves an
+                    // entry. A key and a couple of addresses is small, but the
+                    // map only ever grows, and a long-lived daemon on a busy
+                    // network is exactly where that stops being theoretical.
+                    //
+                    // Dropped rather than evicted cleverly: this is a cache of
+                    // where something was last seen, and anything discovery
+                    // still cares about will be advertised again within seconds.
+                    // A paired peer's address is kept in `addrs` below, which is
+                    // bounded by the number of peers and is the one that matters.
+                    if self.seen.len() >= MAX_SEEN && !self.seen.contains_key(&fp) {
+                        self.seen.clear();
+                    }
                     self.seen
                         .entry(fp.clone())
                         .or_default()
