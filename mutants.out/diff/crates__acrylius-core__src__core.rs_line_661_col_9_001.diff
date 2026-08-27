@@ -1,0 +1,53 @@
+--- crates/acrylius-core/src/core.rs
++++ replace Core::accept_hello -> bool with false
+@@ -653,49 +653,17 @@
+                 return;
+             }
+             self.finish_session(now_ms, link, h.hs, h.attrs, peer, out);
+         }
+     }
+ 
+     /// Validate a peer's Hello and advance its replay watermark.
+     fn accept_hello(&mut self, peer: &DeviceId, payload: &[u8], out: &mut Outcome) -> bool {
+-        let Ok(hello) = minicbor::decode::<Hello>(payload) else {
+-            out.ui(UiEvent::Error {
+-                code: ErrorCode::BadBody,
+-                detail: "handshake payload did not decode".to_string(),
+-            });
+-            return false;
+-        };
+-        let Some(rec) = self.peers.get_mut(peer) else {
+-            return false;
+-        };
+-        match hello.check_freshness(self.wall_ms, GreatestSeen(rec.greatest_seen)) {
+-            Ok(seen) => {
+-                rec.greatest_seen = seen.0;
+-                rec.name = hello.name;
+-                rec.platform = hello.platform;
+-                rec.caps_out = hello.caps_out;
+-                rec.caps_in = hello.caps_in;
+-                let (key, value) = Self::peer_blob(rec);
+-                out.push(Action::Persist {
+-                    key,
+-                    value,
+-                    sensitivity: Sensitivity::Secret,
+-                });
+-                true
+-            }
+-            Err(e) => {
+-                out.ui(UiEvent::Error {
+-                    code: ErrorCode::NotAllowed,
+-                    detail: e.to_string(),
+-                });
+-                false
+-            }
+-        }
++        false /* ~ changed by cargo-mutants ~ */
+     }
+ 
+     fn finish_session(
+         &mut self,
+         now_ms: u64,
+         link: LinkId,
+         hs: Handshake,
+         attrs: LinkAttrs,

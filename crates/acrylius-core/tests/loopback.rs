@@ -19,25 +19,42 @@ use acrylius_core::vocab::{
 };
 
 const CODE: &str = "ABCD1234";
+/// Wrong, but well formed. A code that fails `pairing::normalize` never leaves
+/// the device that typed it, so it is no guess at all and reaches no window.
+const WRONG: &str = "ZZZZ9999";
 const TRANSPORT: TransportId = TransportId(0);
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 enum Side {
     A,
     B,
+    /// A second computer, so that one device can be paired with two.
+    ///
+    /// Most tests need two devices and say nothing about C. It exists because
+    /// some questions cannot even be asked with two — chiefly "does the core
+    /// route to the *right* peer", which is invisible while every core has
+    /// exactly one peer and any answer is the correct one.
+    C,
 }
 
 impl Side {
+    /// The other end of an A–B pair.
+    ///
+    /// Deliberately not defined for C: "the other side" is only meaningful
+    /// where there are two, and a third device makes the question ambiguous
+    /// rather than harder. Wiring works from the dialled address instead.
     fn other(self) -> Self {
         match self {
             Self::A => Self::B,
             Self::B => Self::A,
+            Self::C => panic!("C is a third device; ask which side was dialled"),
         }
     }
     fn addr(self) -> &'static str {
         match self {
             Self::A => "A",
             Self::B => "B",
+            Self::C => "C",
         }
     }
 }
@@ -47,10 +64,17 @@ impl Side {
 struct Net {
     a: Core,
     b: Core,
+    /// A second computer. Built for every `Net` and left alone unless a test
+    /// pairs with it, because an unpaired core is inert: it is dialled by
+    /// nothing and dials nothing.
+    c: Core,
     now: u64,
     next_link: u64,
-    /// (side, link) -> the peer's link id for the same wire.
-    peer_link: BTreeMap<(Side, u64), u64>,
+    /// (side, link) -> the far end of the same wire.
+    ///
+    /// Both halves, because with three devices "the other side" is no longer a
+    /// property of the side that sent — it is a property of the wire.
+    peer_link: BTreeMap<(Side, u64), (Side, u64)>,
     queue: VecDeque<(Side, Event)>,
     /// Milliseconds to add to side B's clock. Two machines that booted at
     /// different times do not share an uptime.
@@ -86,6 +110,7 @@ impl Net {
         Self {
             a,
             b,
+            c: core("other-pc"),
             now: 1_700_000_000_000,
             next_link: 0,
             peer_link: BTreeMap::new(),
@@ -106,6 +131,9 @@ impl Net {
         match s {
             Side::A => 0,
             Side::B => self.b_skew,
+            // Its own origin again, so a three-device test cannot accidentally
+            // pass by two machines sharing an uptime.
+            Side::C => self.b_skew.wrapping_mul(2),
         }
     }
 
@@ -113,6 +141,7 @@ impl Net {
         match s {
             Side::A => &mut self.a,
             Side::B => &mut self.b,
+            Side::C => &mut self.c,
         }
     }
 
@@ -206,6 +235,7 @@ impl Net {
                 let Some(target) = (match addr.as_str() {
                     "A" => Some(Side::A),
                     "B" => Some(Side::B),
+                    "C" => Some(Side::C),
                     _ => None,
                 }) else {
                     self.queue.push_back((
@@ -217,14 +247,14 @@ impl Net {
                     ));
                     return;
                 };
-                assert_eq!(target, side.other(), "the harness only wires the two cores");
+                assert_ne!(target, side, "a core does not dial itself");
                 let mine = self.next_link;
                 let theirs = self.next_link + 1;
                 self.next_link += 2;
-                self.peer_link.insert((side, mine), theirs);
-                self.peer_link.insert((side.other(), theirs), mine);
+                self.peer_link.insert((side, mine), (target, theirs));
+                self.peer_link.insert((target, theirs), (side, mine));
                 self.links.push((side, transport, mine));
-                self.links.push((side.other(), transport, theirs));
+                self.links.push((target, transport, theirs));
                 let attrs = if self.links_are_ble || self.ble_transport == Some(transport) {
                     LinkAttrs::ble(transport)
                 } else {
@@ -239,7 +269,7 @@ impl Net {
                     },
                 ));
                 self.queue.push_back((
-                    side.other(),
+                    target,
                     Event::LinkUp {
                         link: LinkId(theirs),
                         attrs,
@@ -248,11 +278,11 @@ impl Net {
                 ));
             }
             Action::LinkSend { link, msg } => {
-                let Some(&peer) = self.peer_link.get(&(side, link.0)) else {
+                let Some(&(peer_side, peer)) = self.peer_link.get(&(side, link.0)) else {
                     return;
                 };
                 self.queue.push_back((
-                    side.other(),
+                    peer_side,
                     Event::LinkRecv {
                         link: LinkId(peer),
                         msg,
@@ -260,10 +290,10 @@ impl Net {
                 ));
             }
             Action::Close { link, .. } => {
-                if let Some(peer) = self.peer_link.remove(&(side, link.0)) {
-                    self.peer_link.remove(&(side.other(), peer));
+                if let Some((peer_side, peer)) = self.peer_link.remove(&(side, link.0)) {
+                    self.peer_link.remove(&(peer_side, peer));
                     self.queue.push_back((
-                        side.other(),
+                        peer_side,
                         Event::LinkDown {
                             link: LinkId(peer),
                             reason: LinkDownReason::Closed,
@@ -350,6 +380,42 @@ fn paired() -> (Net, DeviceId, DeviceId) {
     (net, a_id, b_id)
 }
 
+/// A, paired with two computers at once. Returns their ids in order.
+///
+/// The arrangement a phone actually has, and the one two cores cannot express:
+/// while every device has exactly one peer, routing to the wrong peer is
+/// indistinguishable from routing to the right one.
+fn paired_twice() -> (Net, DeviceId, DeviceId) {
+    let (mut net, _a_id, b_id) = paired();
+    let c_id = net.c.device_id();
+
+    // A second session with a second peer needs a later opener than the first.
+    net.wall += 1_000;
+    net.local(
+        Side::C,
+        LocalCommand::OpenPairingWindow {
+            code: CODE.to_string(),
+        },
+    );
+    net.local(
+        Side::A,
+        LocalCommand::RequestPairing {
+            transport: TRANSPORT,
+            addr: Side::C.addr().to_string(),
+            code: CODE.to_string(),
+        },
+    );
+    net.local(Side::A, LocalCommand::ConfirmPairing { accept: true });
+    net.local(Side::C, LocalCommand::ConfirmPairing { accept: true });
+    // Checked here rather than left to fail later: a helper that quietly did
+    // not pair sends every test built on it looking in the wrong place.
+    assert!(
+        net.saw(Side::C, |e| matches!(e, UiEvent::PairingComplete { .. })),
+        "the second computer did not pair"
+    );
+    (net, b_id, c_id)
+}
+
 /// Tell A where B lives, the way discovery would.
 fn discover(net: &mut Net, side: Side, of: Side) {
     discover_via(net, side, of, TRANSPORT, of.addr());
@@ -361,6 +427,7 @@ fn discover_via(net: &mut Net, side: Side, of: Side, transport: TransportId, add
     let fp = match of {
         Side::A => net.a.fingerprint(),
         Side::B => net.b.fingerprint(),
+        Side::C => net.c.fingerprint(),
     };
     net.queue.push_back((
         side,
@@ -531,6 +598,107 @@ fn a_better_transport_is_taken_even_while_a_worse_one_is_working() {
 }
 
 #[test]
+fn a_hello_no_newer_than_the_last_one_is_refused() {
+    // `Noise_IKpsk2` message 1 is replayable — an eavesdropper can record a
+    // session opener and send it again — so every opener carries a timestamp
+    // and a peer's watermark only ever moves forward. PROTOCOL.md §7 is about
+    // this, and `accept_hello` is where it is enforced.
+    //
+    // It works. Nothing said so: the whole suite passed with `accept_hello`
+    // replaced by `true`, which accepts every opener ever offered, including
+    // one replayed from a device with no record at all. Found by mutation
+    // testing, which is also how the exact shape below came out — the setup is
+    // the one that hit the watermark by accident while a different test was
+    // being written.
+    let (mut net, _a_id, b_id) = paired();
+    net.ble_transport = Some(SLOWER);
+
+    discover_via(&mut net, Side::A, Side::B, TRANSPORT, "not-listening");
+    discover_via(&mut net, Side::A, Side::B, SLOWER, "B");
+    assert_eq!(
+        net.a.transport_for(&b_id),
+        Some(TransportKind::BleGatt),
+        "the worse transport is what connected"
+    );
+
+    // Now the better transport turns up — and the clock has deliberately not
+    // moved, so the Hello that comes back repeats a timestamp already seen.
+    discover_via(&mut net, Side::A, Side::B, TRANSPORT, "B");
+
+    assert_eq!(
+        net.a.transport_for(&b_id),
+        Some(TransportKind::BleGatt),
+        "a replayed opener must not open a session, however good its route"
+    );
+    assert_eq!(
+        net.a.peer_state(&b_id),
+        PeerState::Reachable,
+        "and refusing it must not cost the session that was already working"
+    );
+}
+
+#[test]
+fn a_pairing_window_closes_after_too_many_wrong_codes() {
+    // The code is short enough to be read aloud, which is only safe because
+    // the window stops accepting guesses. Nothing tested that: deleting
+    // `pairing_attempt_failed` outright left the suite green, as did inverting
+    // the comparison so the window burned on the first failure instead of the
+    // last.
+    let (a, b) = (core("phone"), core("pc"));
+    let mut net = Net::new(a, b);
+    net.local(
+        Side::B,
+        LocalCommand::OpenPairingWindow {
+            code: CODE.to_string(),
+        },
+    );
+
+    let limit = CoreConfig::default().max_pairing_attempts;
+    assert!(limit > 1, "a limit of one cannot tell the two ends apart");
+
+    let closed = |net: &Net| {
+        net.saw(
+            Side::B,
+            |e| matches!(e, UiEvent::PairingFailed { reason } if reason.contains("too many")),
+        )
+    };
+
+    for attempt in 1..limit {
+        guess(&mut net, WRONG);
+        assert!(
+            !closed(&net),
+            "the window closed after {attempt} of {limit} attempts"
+        );
+    }
+
+    guess(&mut net, WRONG);
+    assert!(
+        closed(&net),
+        "the window is still open after {limit} wrong codes"
+    );
+
+    // And it is really shut, not merely reported shut: the right code no
+    // longer works either.
+    guess(&mut net, CODE);
+    assert!(
+        !net.saw(Side::B, |e| matches!(e, UiEvent::PairingComplete { .. })),
+        "a burnt window must not pair, even with the correct code"
+    );
+}
+
+/// One pairing attempt from A, with whatever code it believes in.
+fn guess(net: &mut Net, code: &str) {
+    net.local(
+        Side::A,
+        LocalCommand::RequestPairing {
+            transport: TRANSPORT,
+            addr: Side::B.addr().to_string(),
+            code: code.to_string(),
+        },
+    );
+}
+
+#[test]
 fn a_device_already_reached_is_not_dialled_again() {
     // Discovery repeats — a service resolves, a radio re-announces, a scan
     // starts over. Dialling per sighting would be a storm aimed at a device
@@ -623,6 +791,56 @@ fn two_cores_pair_and_agree_on_everything() {
         net.persisted
             .iter()
             .any(|(s, k, present)| *s == Side::B && k.starts_with("peer/") && *present)
+    );
+}
+
+#[test]
+fn a_message_goes_to_the_peer_it_is_addressed_to() {
+    // `best_link` filters the link table by peer before choosing. Removing that
+    // filter — so it returns whichever link sorts first, whoever it belongs to —
+    // left the entire suite green, because every core in it had exactly one
+    // peer and any link was that peer's link.
+    //
+    // What it would cost in the real world is not subtle: a clipboard, a file,
+    // or a command addressed to one computer, delivered to a different one.
+    // Two devices cannot ask the question. This is why C exists.
+    let (mut net, b_id, c_id) = paired_twice();
+    discover(&mut net, Side::A, Side::B);
+    net.wall += 1_000;
+    discover(&mut net, Side::A, Side::C);
+
+    assert_eq!(net.a.peer_state(&b_id), PeerState::Reachable);
+    assert_eq!(net.a.peer_state(&c_id), PeerState::Reachable);
+
+    // Addressed to C, which is deliberately *not* the link that sorts first —
+    // B was paired earlier and holds the lower id, so a core that ignores who a
+    // link belongs to sends this to B.
+    net.local(
+        Side::A,
+        LocalCommand::Plugin {
+            peer: c_id.clone(),
+            cap: ping::CAP.to_string(),
+            ty: "ping".to_string(),
+            body: b"for-c".to_vec(),
+        },
+    );
+
+    // The answer names who sent it, which is what makes this observable at all:
+    // a ping delivered to the wrong computer is still answered, and the pong
+    // still comes back. Only the name on it is different.
+    assert!(
+        net.saw(Side::A, |e| {
+            matches!(e, UiEvent::Plugin { peer, ty, body, .. }
+                if ty == "pong" && body == b"for-c" && peer == &c_id)
+        }),
+        "the pong did not come from the computer the ping was addressed to"
+    );
+    assert!(
+        !net.saw(Side::A, |e| {
+            matches!(e, UiEvent::Plugin { peer, body, .. }
+                if body == b"for-c" && peer == &b_id)
+        }),
+        "a message addressed to one computer was answered by another"
     );
 }
 

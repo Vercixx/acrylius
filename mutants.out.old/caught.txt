@@ -1,0 +1,6 @@
+crates/acrylius-core/src/core.rs:661:9: replace Core::accept_hello -> bool with true
+crates/acrylius-core/src/core.rs:661:9: replace Core::accept_hello -> bool with false
+crates/acrylius-core/src/core.rs:881:9: replace Core::pairing_attempt_failed with ()
+crates/acrylius-core/src/core.rs:882:24: replace += with -= in Core::pairing_attempt_failed
+crates/acrylius-core/src/core.rs:882:24: replace += with *= in Core::pairing_attempt_failed
+crates/acrylius-core/src/core.rs:883:24: replace >= with < in Core::pairing_attempt_failed

@@ -1,0 +1,194 @@
+[
+  {
+    "diff": "--- crates/acrylius-core/src/core.rs\n+++ replace Core::accept_hello -> bool with true\n@@ -653,49 +653,17 @@\n                 return;\n             }\n             self.finish_session(now_ms, link, h.hs, h.attrs, peer, out);\n         }\n     }\n \n     /// Validate a peer's Hello and advance its replay watermark.\n     fn accept_hello(&mut self, peer: &DeviceId, payload: &[u8], out: &mut Outcome) -> bool {\n-        let Ok(hello) = minicbor::decode::<Hello>(payload) else {\n-            out.ui(UiEvent::Error {\n-                code: ErrorCode::BadBody,\n-                detail: \"handshake payload did not decode\".to_string(),\n-            });\n-            return false;\n-        };\n-        let Some(rec) = self.peers.get_mut(peer) else {\n-            return false;\n-        };\n-        match hello.check_freshness(self.wall_ms, GreatestSeen(rec.greatest_seen)) {\n-            Ok(seen) => {\n-                rec.greatest_seen = seen.0;\n-                rec.name = hello.name;\n-                rec.platform = hello.platform;\n-                rec.caps_out = hello.caps_out;\n-                rec.caps_in = hello.caps_in;\n-                let (key, value) = Self::peer_blob(rec);\n-                out.push(Action::Persist {\n-                    key,\n-                    value,\n-                    sensitivity: Sensitivity::Secret,\n-                });\n-                true\n-            }\n-            Err(e) => {\n-                out.ui(UiEvent::Error {\n-                    code: ErrorCode::NotAllowed,\n-                    detail: e.to_string(),\n-                });\n-                false\n-            }\n-        }\n+        true /* ~ changed by cargo-mutants ~ */\n     }\n \n     fn finish_session(\n         &mut self,\n         now_ms: u64,\n         link: LinkId,\n         hs: Handshake,\n         attrs: LinkAttrs,\n",
+    "file": "crates/acrylius-core/src/core.rs",
+    "function": {
+      "function_name": "Core::accept_hello",
+      "return_type": "-> bool",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 694
+        },
+        "start": {
+          "column": 5,
+          "line": 659
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/acrylius-core/src/core.rs:661:9: replace Core::accept_hello -> bool with true",
+    "package": "acrylius-core",
+    "replacement": "true",
+    "span": {
+      "end": {
+        "column": 10,
+        "line": 693
+      },
+      "start": {
+        "column": 9,
+        "line": 661
+      }
+    }
+  },
+  {
+    "diff": "--- crates/acrylius-core/src/core.rs\n+++ replace Core::accept_hello -> bool with false\n@@ -653,49 +653,17 @@\n                 return;\n             }\n             self.finish_session(now_ms, link, h.hs, h.attrs, peer, out);\n         }\n     }\n \n     /// Validate a peer's Hello and advance its replay watermark.\n     fn accept_hello(&mut self, peer: &DeviceId, payload: &[u8], out: &mut Outcome) -> bool {\n-        let Ok(hello) = minicbor::decode::<Hello>(payload) else {\n-            out.ui(UiEvent::Error {\n-                code: ErrorCode::BadBody,\n-                detail: \"handshake payload did not decode\".to_string(),\n-            });\n-            return false;\n-        };\n-        let Some(rec) = self.peers.get_mut(peer) else {\n-            return false;\n-        };\n-        match hello.check_freshness(self.wall_ms, GreatestSeen(rec.greatest_seen)) {\n-            Ok(seen) => {\n-                rec.greatest_seen = seen.0;\n-                rec.name = hello.name;\n-                rec.platform = hello.platform;\n-                rec.caps_out = hello.caps_out;\n-                rec.caps_in = hello.caps_in;\n-                let (key, value) = Self::peer_blob(rec);\n-                out.push(Action::Persist {\n-                    key,\n-                    value,\n-                    sensitivity: Sensitivity::Secret,\n-                });\n-                true\n-            }\n-            Err(e) => {\n-                out.ui(UiEvent::Error {\n-                    code: ErrorCode::NotAllowed,\n-                    detail: e.to_string(),\n-                });\n-                false\n-            }\n-        }\n+        false /* ~ changed by cargo-mutants ~ */\n     }\n \n     fn finish_session(\n         &mut self,\n         now_ms: u64,\n         link: LinkId,\n         hs: Handshake,\n         attrs: LinkAttrs,\n",
+    "file": "crates/acrylius-core/src/core.rs",
+    "function": {
+      "function_name": "Core::accept_hello",
+      "return_type": "-> bool",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 694
+        },
+        "start": {
+          "column": 5,
+          "line": 659
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/acrylius-core/src/core.rs:661:9: replace Core::accept_hello -> bool with false",
+    "package": "acrylius-core",
+    "replacement": "false",
+    "span": {
+      "end": {
+        "column": 10,
+        "line": 693
+      },
+      "start": {
+        "column": 9,
+        "line": 661
+      }
+    }
+  },
+  {
+    "diff": "--- crates/acrylius-core/src/core.rs\n+++ replace Core::pairing_attempt_failed with ()\n@@ -873,29 +873,17 @@\n         out.push(Action::Close {\n             link: a.link,\n             reason: LinkDownReason::Closed,\n         });\n         self.links.remove(&a.link);\n     }\n \n     fn pairing_attempt_failed(&mut self, link: LinkId, out: &mut Outcome) {\n-        let burned = if let Some(w) = &mut self.pairing {\n-            w.attempts += 1;\n-            w.attempts >= self.config.max_pairing_attempts\n-        } else {\n-            false\n-        };\n-        self.fail_link(link, \"pairing handshake failed\", out);\n-        if burned {\n-            self.pairing = None;\n-            out.ui(UiEvent::PairingFailed {\n-                reason: \"too many failed attempts; the window is closed\".to_string(),\n-            });\n-        }\n+        () /* ~ changed by cargo-mutants ~ */\n     }\n \n     fn peer_blob(rec: &PeerRecord) -> (String, Option<Vec<u8>>) {\n         (\n             format!(\"peer/{}\", rec.device_id),\n             Some(minicbor::to_vec(rec).expect(\"peer record encodes\")),\n         )\n     }\n",
+    "file": "crates/acrylius-core/src/core.rs",
+    "function": {
+      "function_name": "Core::pairing_attempt_failed",
+      "return_type": "",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 894
+        },
+        "start": {
+          "column": 5,
+          "line": 880
+        }
+      }
+    },
+    "genre": "FnValue",
+    "name": "crates/acrylius-core/src/core.rs:881:9: replace Core::pairing_attempt_failed with ()",
+    "package": "acrylius-core",
+    "replacement": "()",
+    "span": {
+      "end": {
+        "column": 10,
+        "line": 893
+      },
+      "start": {
+        "column": 9,
+        "line": 881
+      }
+    }
+  },
+  {
+    "diff": "--- crates/acrylius-core/src/core.rs\n+++ replace += with -= in Core::pairing_attempt_failed\n@@ -874,17 +874,17 @@\n             link: a.link,\n             reason: LinkDownReason::Closed,\n         });\n         self.links.remove(&a.link);\n     }\n \n     fn pairing_attempt_failed(&mut self, link: LinkId, out: &mut Outcome) {\n         let burned = if let Some(w) = &mut self.pairing {\n-            w.attempts += 1;\n+            w.attempts -= /* ~ changed by cargo-mutants ~ */ 1;\n             w.attempts >= self.config.max_pairing_attempts\n         } else {\n             false\n         };\n         self.fail_link(link, \"pairing handshake failed\", out);\n         if burned {\n             self.pairing = None;\n             out.ui(UiEvent::PairingFailed {\n",
+    "file": "crates/acrylius-core/src/core.rs",
+    "function": {
+      "function_name": "Core::pairing_attempt_failed",
+      "return_type": "",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 894
+        },
+        "start": {
+          "column": 5,
+          "line": 880
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "crates/acrylius-core/src/core.rs:882:24: replace += with -= in Core::pairing_attempt_failed",
+    "package": "acrylius-core",
+    "replacement": "-=",
+    "span": {
+      "end": {
+        "column": 26,
+        "line": 882
+      },
+      "start": {
+        "column": 24,
+        "line": 882
+      }
+    }
+  },
+  {
+    "diff": "--- crates/acrylius-core/src/core.rs\n+++ replace += with *= in Core::pairing_attempt_failed\n@@ -874,17 +874,17 @@\n             link: a.link,\n             reason: LinkDownReason::Closed,\n         });\n         self.links.remove(&a.link);\n     }\n \n     fn pairing_attempt_failed(&mut self, link: LinkId, out: &mut Outcome) {\n         let burned = if let Some(w) = &mut self.pairing {\n-            w.attempts += 1;\n+            w.attempts *= /* ~ changed by cargo-mutants ~ */ 1;\n             w.attempts >= self.config.max_pairing_attempts\n         } else {\n             false\n         };\n         self.fail_link(link, \"pairing handshake failed\", out);\n         if burned {\n             self.pairing = None;\n             out.ui(UiEvent::PairingFailed {\n",
+    "file": "crates/acrylius-core/src/core.rs",
+    "function": {
+      "function_name": "Core::pairing_attempt_failed",
+      "return_type": "",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 894
+        },
+        "start": {
+          "column": 5,
+          "line": 880
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "crates/acrylius-core/src/core.rs:882:24: replace += with *= in Core::pairing_attempt_failed",
+    "package": "acrylius-core",
+    "replacement": "*=",
+    "span": {
+      "end": {
+        "column": 26,
+        "line": 882
+      },
+      "start": {
+        "column": 24,
+        "line": 882
+      }
+    }
+  },
+  {
+    "diff": "--- crates/acrylius-core/src/core.rs\n+++ replace >= with < in Core::pairing_attempt_failed\n@@ -875,17 +875,17 @@\n             reason: LinkDownReason::Closed,\n         });\n         self.links.remove(&a.link);\n     }\n \n     fn pairing_attempt_failed(&mut self, link: LinkId, out: &mut Outcome) {\n         let burned = if let Some(w) = &mut self.pairing {\n             w.attempts += 1;\n-            w.attempts >= self.config.max_pairing_attempts\n+            w.attempts < /* ~ changed by cargo-mutants ~ */ self.config.max_pairing_attempts\n         } else {\n             false\n         };\n         self.fail_link(link, \"pairing handshake failed\", out);\n         if burned {\n             self.pairing = None;\n             out.ui(UiEvent::PairingFailed {\n                 reason: \"too many failed attempts; the window is closed\".to_string(),\n",
+    "file": "crates/acrylius-core/src/core.rs",
+    "function": {
+      "function_name": "Core::pairing_attempt_failed",
+      "return_type": "",
+      "span": {
+        "end": {
+          "column": 6,
+          "line": 894
+        },
+        "start": {
+          "column": 5,
+          "line": 880
+        }
+      }
+    },
+    "genre": "BinaryOperator",
+    "name": "crates/acrylius-core/src/core.rs:883:24: replace >= with < in Core::pairing_attempt_failed",
+    "package": "acrylius-core",
+    "replacement": "<",
+    "span": {
+      "end": {
+        "column": 26,
+        "line": 883
+      },
+      "start": {
+        "column": 24,
+        "line": 883
+      }
+    }
+  }
+]

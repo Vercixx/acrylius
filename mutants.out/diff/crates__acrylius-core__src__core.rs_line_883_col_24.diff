@@ -1,0 +1,21 @@
+--- crates/acrylius-core/src/core.rs
++++ replace >= with < in Core::pairing_attempt_failed
+@@ -875,17 +875,17 @@
+             reason: LinkDownReason::Closed,
+         });
+         self.links.remove(&a.link);
+     }
+ 
+     fn pairing_attempt_failed(&mut self, link: LinkId, out: &mut Outcome) {
+         let burned = if let Some(w) = &mut self.pairing {
+             w.attempts += 1;
+-            w.attempts >= self.config.max_pairing_attempts
++            w.attempts < /* ~ changed by cargo-mutants ~ */ self.config.max_pairing_attempts
+         } else {
+             false
+         };
+         self.fail_link(link, "pairing handshake failed", out);
+         if burned {
+             self.pairing = None;
+             out.ui(UiEvent::PairingFailed {
+                 reason: "too many failed attempts; the window is closed".to_string(),

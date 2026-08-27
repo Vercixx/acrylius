@@ -1,0 +1,434 @@
+{
+  "outcomes": [
+    {
+      "scenario": "Baseline",
+      "summary": "Success",
+      "log_path": "log/baseline.log",
+      "diff_path": null,
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 9.819169584,
+          "process_status": "Success",
+          "argv": [
+            "/usr/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=acrylius-core@0.1.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.301413806,
+          "process_status": "Success",
+          "argv": [
+            "/usr/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=acrylius-core@0.1.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/acrylius-core/src/core.rs:661:9: replace Core::accept_hello -> bool with true",
+          "package": "acrylius-core",
+          "file": "crates/acrylius-core/src/core.rs",
+          "function": {
+            "function_name": "Core::accept_hello",
+            "return_type": "-> bool",
+            "span": {
+              "start": {
+                "line": 659,
+                "column": 5
+              },
+              "end": {
+                "line": 694,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 661,
+              "column": 9
+            },
+            "end": {
+              "line": 693,
+              "column": 10
+            }
+          },
+          "replacement": "true",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__acrylius-core__src__core.rs_line_661_col_9.log",
+      "diff_path": "diff/crates__acrylius-core__src__core.rs_line_661_col_9.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.901996093,
+          "process_status": "Success",
+          "argv": [
+            "/usr/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=acrylius-core@0.1.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.151062256,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/usr/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=acrylius-core@0.1.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/acrylius-core/src/core.rs:661:9: replace Core::accept_hello -> bool with false",
+          "package": "acrylius-core",
+          "file": "crates/acrylius-core/src/core.rs",
+          "function": {
+            "function_name": "Core::accept_hello",
+            "return_type": "-> bool",
+            "span": {
+              "start": {
+                "line": 659,
+                "column": 5
+              },
+              "end": {
+                "line": 694,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 661,
+              "column": 9
+            },
+            "end": {
+              "line": 693,
+              "column": 10
+            }
+          },
+          "replacement": "false",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__acrylius-core__src__core.rs_line_661_col_9_001.log",
+      "diff_path": "diff/crates__acrylius-core__src__core.rs_line_661_col_9_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.701725638,
+          "process_status": "Success",
+          "argv": [
+            "/usr/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=acrylius-core@0.1.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.15102679,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/usr/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=acrylius-core@0.1.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/acrylius-core/src/core.rs:881:9: replace Core::pairing_attempt_failed with ()",
+          "package": "acrylius-core",
+          "file": "crates/acrylius-core/src/core.rs",
+          "function": {
+            "function_name": "Core::pairing_attempt_failed",
+            "return_type": "",
+            "span": {
+              "start": {
+                "line": 880,
+                "column": 5
+              },
+              "end": {
+                "line": 894,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 881,
+              "column": 9
+            },
+            "end": {
+              "line": 893,
+              "column": 10
+            }
+          },
+          "replacement": "()",
+          "genre": "FnValue"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__acrylius-core__src__core.rs_line_881_col_9.log",
+      "diff_path": "diff/crates__acrylius-core__src__core.rs_line_881_col_9.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.952094533,
+          "process_status": "Success",
+          "argv": [
+            "/usr/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=acrylius-core@0.1.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.151021751,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/usr/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=acrylius-core@0.1.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/acrylius-core/src/core.rs:882:24: replace += with -= in Core::pairing_attempt_failed",
+          "package": "acrylius-core",
+          "file": "crates/acrylius-core/src/core.rs",
+          "function": {
+            "function_name": "Core::pairing_attempt_failed",
+            "return_type": "",
+            "span": {
+              "start": {
+                "line": 880,
+                "column": 5
+              },
+              "end": {
+                "line": 894,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 882,
+              "column": 24
+            },
+            "end": {
+              "line": 882,
+              "column": 26
+            }
+          },
+          "replacement": "-=",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__acrylius-core__src__core.rs_line_882_col_24.log",
+      "diff_path": "diff/crates__acrylius-core__src__core.rs_line_882_col_24.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.801991035,
+          "process_status": "Success",
+          "argv": [
+            "/usr/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=acrylius-core@0.1.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.151022662,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/usr/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=acrylius-core@0.1.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/acrylius-core/src/core.rs:882:24: replace += with *= in Core::pairing_attempt_failed",
+          "package": "acrylius-core",
+          "file": "crates/acrylius-core/src/core.rs",
+          "function": {
+            "function_name": "Core::pairing_attempt_failed",
+            "return_type": "",
+            "span": {
+              "start": {
+                "line": 880,
+                "column": 5
+              },
+              "end": {
+                "line": 894,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 882,
+              "column": 24
+            },
+            "end": {
+              "line": 882,
+              "column": 26
+            }
+          },
+          "replacement": "*=",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__acrylius-core__src__core.rs_line_882_col_24_001.log",
+      "diff_path": "diff/crates__acrylius-core__src__core.rs_line_882_col_24_001.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.701659867,
+          "process_status": "Success",
+          "argv": [
+            "/usr/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=acrylius-core@0.1.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.151200153,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/usr/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=acrylius-core@0.1.0"
+          ]
+        }
+      ]
+    },
+    {
+      "scenario": {
+        "Mutant": {
+          "name": "crates/acrylius-core/src/core.rs:883:24: replace >= with < in Core::pairing_attempt_failed",
+          "package": "acrylius-core",
+          "file": "crates/acrylius-core/src/core.rs",
+          "function": {
+            "function_name": "Core::pairing_attempt_failed",
+            "return_type": "",
+            "span": {
+              "start": {
+                "line": 880,
+                "column": 5
+              },
+              "end": {
+                "line": 894,
+                "column": 6
+              }
+            }
+          },
+          "span": {
+            "start": {
+              "line": 883,
+              "column": 24
+            },
+            "end": {
+              "line": 883,
+              "column": 26
+            }
+          },
+          "replacement": "<",
+          "genre": "BinaryOperator"
+        }
+      },
+      "summary": "CaughtMutant",
+      "log_path": "log/crates__acrylius-core__src__core.rs_line_883_col_24.log",
+      "diff_path": "diff/crates__acrylius-core__src__core.rs_line_883_col_24.diff",
+      "phase_results": [
+        {
+          "phase": "Build",
+          "duration": 0.701769792,
+          "process_status": "Success",
+          "argv": [
+            "/usr/bin/cargo",
+            "test",
+            "--no-run",
+            "--verbose",
+            "--package=acrylius-core@0.1.0"
+          ]
+        },
+        {
+          "phase": "Test",
+          "duration": 0.151061374,
+          "process_status": {
+            "Failure": 101
+          },
+          "argv": [
+            "/usr/bin/cargo",
+            "test",
+            "--verbose",
+            "--package=acrylius-core@0.1.0"
+          ]
+        }
+      ]
+    }
+  ],
+  "total_mutants": 6,
+  "missed": 0,
+  "caught": 6,
+  "timeout": 0,
+  "unviable": 0,
+  "success": 0,
+  "start_time": "2026-08-27T14:50:32.175071783Z",
+  "end_time": "2026-08-27T14:50:48.034232137Z",
+  "cargo_mutants_version": "27.1.0"
+}

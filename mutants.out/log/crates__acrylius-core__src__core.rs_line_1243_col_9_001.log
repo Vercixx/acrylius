@@ -1,0 +1,146 @@
+
+*** crates/acrylius-core/src/core.rs:1243:9: replace Core::best_link -> Option<(LinkId, &UpLink)> with Some((Default::default(), Box::leak(Box::new(Default::default()))))
+
+*** mutation diff:
+--- crates/acrylius-core/src/core.rs
++++ replace Core::best_link -> Option<(LinkId, &UpLink)> with Some((Default::default(), Box::leak(Box::new(Default::default()))))
+@@ -1235,23 +1235,17 @@
+     /// names, and whether a file can be carried at all. Those were three
+     /// separate walks that agreed only because a `BTreeMap` happens to order
+     /// `LinkId`s the way transports are numbered — true by convention in the
+     /// daemon, and quietly false anywhere ids are minted another way.
+     ///
+     /// Preference is ascending transport id: Wi-Fi before Bluetooth, which is
+     /// the order the hosts register them in.
+     fn best_link(&self, peer: &DeviceId) -> Option<(LinkId, &UpLink)> {
+-        self.links
+-            .iter()
+-            .filter_map(|(id, st)| match st {
+-                LinkState::Up(u) if &u.peer == peer => Some((*id, &**u)),
+-                _ => None,
+-            })
+-            .min_by_key(|(_, u)| u.transport)
++        Some((Default::default(), Box::leak(Box::new(Default::default())))) /* ~ changed by cargo-mutants ~ */
+     }
+ 
+     fn best_link_transport(&self, peer: &DeviceId) -> Option<TransportId> {
+         self.best_link(peer).map(|(_, u)| u.transport)
+     }
+ 
+     #[must_use]
+     pub fn transport_for(&self, peer: &DeviceId) -> Option<TransportKind> {
+
+
+*** /usr/bin/cargo test --no-run --verbose --package=acrylius-core@0.1.0
+       Fresh version_check v0.9.5
+       Fresh unicode-ident v1.0.24
+       Fresh typenum v1.20.1
+       Fresh subtle v2.6.1
+       Fresh cfg-if v1.0.4
+       Fresh cpufeatures v0.2.17
+       Fresh semver v1.0.28
+       Fresh opaque-debug v0.3.1
+       Fresh shlex v2.0.1
+       Fresh find-msvc-tools v0.1.11
+       Fresh proc-macro2 v1.0.107
+       Fresh rustc_version v0.4.1
+       Fresh cc v1.4.4
+       Fresh once_cell v1.21.4
+       Fresh untrusted v0.9.0
+       Fresh rand_core v0.6.4
+       Fresh pin-project-lite v0.2.17
+       Fresh quote v1.0.47
+       Fresh generic-array v0.14.7
+       Fresh libc v0.2.189
+       Fresh tracing-core v0.1.36
+       Fresh crypto-common v0.1.7
+       Fresh syn v2.0.119
+       Fresh inout v0.1.4
+       Fresh block-buffer v0.10.4
+       Fresh syn v3.0.4
+       Fresh getrandom v0.2.17
+       Fresh getrandom v0.3.4
+       Fresh zeroize_derive v1.5.0
+       Fresh universal-hash v0.5.1
+       Fresh digest v0.10.7
+       Fresh aead v0.5.2
+       Fresh curve25519-dalek-derive v0.1.1
+       Fresh thiserror-impl v2.0.20
+       Fresh minicbor-derive v0.19.5
+       Fresh tracing-attributes v0.1.31
+       Fresh ring v0.17.14
+       Fresh zeroize v1.9.0
+       Fresh poly1305 v0.8.0
+       Fresh polyval v0.6.2
+       Fresh hmac v0.12.1
+       Fresh sha2 v0.10.9
+       Fresh minicbor v2.3.0
+       Fresh blake2 v0.10.6
+       Fresh thiserror v2.0.20
+       Fresh tracing v0.1.44
+       Fresh cipher v0.4.4
+       Fresh ghash v0.5.1
+       Fresh curve25519-dalek v4.1.3
+       Fresh hkdf v0.12.4
+       Fresh chacha20 v0.9.1
+       Fresh ctr v0.9.2
+       Fresh aes v0.8.4
+       Fresh x25519-dalek v2.0.1
+       Fresh chacha20poly1305 v0.10.1
+       Fresh aes-gcm v0.10.3
+       Fresh snow v0.10.0
+       Fresh acrylius-proto v0.1.0 (/tmp/cargo-mutants-acrylius-DSWymY.tmp/crates/acrylius-proto)
+       Dirty acrylius-core v0.1.0 (/tmp/cargo-mutants-acrylius-DSWymY.tmp/crates/acrylius-core): the file `crates/acrylius-core/src/core.rs` has changed (1787842555.228878645s, 1s after last build at 1787842554.188676232s)
+   Compiling acrylius-core v0.1.0 (/tmp/cargo-mutants-acrylius-DSWymY.tmp/crates/acrylius-core)
+     Running `rustc --crate-name acrylius_core --edition=2024 crates/acrylius-core/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --emit=dep-info,link -C embed-bitcode=no -C debuginfo=2 '--deny=clippy::all' --forbid=unsafe_code --test --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=1f146e29c7bc7774 -C extra-filename=-fe560969f6fd3877 --out-dir /tmp/cargo-mutants-acrylius-DSWymY.tmp/target/debug/deps -C incremental=/tmp/cargo-mutants-acrylius-DSWymY.tmp/target/debug/incremental -L dependency=/tmp/cargo-mutants-acrylius-DSWymY.tmp/target/debug/deps --extern acrylius_proto=/tmp/cargo-mutants-acrylius-DSWymY.tmp/target/debug/deps/libacrylius_proto-9b41e143449d1e99.rlib --extern hkdf=/tmp/cargo-mutants-acrylius-DSWymY.tmp/target/debug/deps/libhkdf-c93853d61f869e75.rlib --extern minicbor=/tmp/cargo-mutants-acrylius-DSWymY.tmp/target/debug/deps/libminicbor-5d980ed9606f28a3.rlib --extern sha2=/tmp/cargo-mutants-acrylius-DSWymY.tmp/target/debug/deps/libsha2-315e5af5d5b6fba0.rlib --extern snow=/tmp/cargo-mutants-acrylius-DSWymY.tmp/target/debug/deps/libsnow-702102b113c9e790.rlib --extern thiserror=/tmp/cargo-mutants-acrylius-DSWymY.tmp/target/debug/deps/libthiserror-030a32e56ed4cd4a.rlib --extern tracing=/tmp/cargo-mutants-acrylius-DSWymY.tmp/target/debug/deps/libtracing-2c53f95a51bb1867.rlib --extern x25519_dalek=/tmp/cargo-mutants-acrylius-DSWymY.tmp/target/debug/deps/libx25519_dalek-a1afcf7fc0767d4f.rlib -L native=/tmp/cargo-mutants-acrylius-DSWymY.tmp/target/debug/build/ring-7aa863b0e8d94f2f/out`
+     Running `rustc --crate-name acrylius_core --edition=2024 crates/acrylius-core/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=2 '--deny=clippy::all' --forbid=unsafe_code --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=444654ecbbeba1c0 -C extra-filename=-882191bac8c538f4 --out-dir /tmp/cargo-mutants-acrylius-DSWymY.tmp/target/debug/deps -C incremental=/tmp/cargo-mutants-acrylius-DSWymY.tmp/target/debug/incremental -L dependency=/tmp/cargo-mutants-acrylius-DSWymY.tmp/target/debug/deps --extern acrylius_proto=/tmp/cargo-mutants-acrylius-DSWymY.tmp/target/debug/deps/libacrylius_proto-9b41e143449d1e99.rmeta --extern hkdf=/tmp/cargo-mutants-acrylius-DSWymY.tmp/target/debug/deps/libhkdf-c93853d61f869e75.rmeta --extern minicbor=/tmp/cargo-mutants-acrylius-DSWymY.tmp/target/debug/deps/libminicbor-5d980ed9606f28a3.rmeta --extern sha2=/tmp/cargo-mutants-acrylius-DSWymY.tmp/target/debug/deps/libsha2-315e5af5d5b6fba0.rmeta --extern snow=/tmp/cargo-mutants-acrylius-DSWymY.tmp/target/debug/deps/libsnow-702102b113c9e790.rmeta --extern thiserror=/tmp/cargo-mutants-acrylius-DSWymY.tmp/target/debug/deps/libthiserror-030a32e56ed4cd4a.rmeta --extern tracing=/tmp/cargo-mutants-acrylius-DSWymY.tmp/target/debug/deps/libtracing-2c53f95a51bb1867.rmeta --extern x25519_dalek=/tmp/cargo-mutants-acrylius-DSWymY.tmp/target/debug/deps/libx25519_dalek-a1afcf7fc0767d4f.rmeta -L native=/tmp/cargo-mutants-acrylius-DSWymY.tmp/target/debug/build/ring-7aa863b0e8d94f2f/out`
+error[E0277]: the trait bound `LinkId: Default` is not satisfied
+    --> crates/acrylius-core/src/core.rs:1243:15
+     |
+1243 |         Some((Default::default(), Box::leak(Box::new(Default::default())))) /* ~ changed by cargo-mutants ~ */
+     |               ^^^^^^^^^^^^^^^^^^ the trait `Default` is not implemented for `LinkId`
+     |
+help: consider annotating `LinkId` with `#[derive(Default)]`
+    -->  crates/acrylius-core/src/link.rs:13:1
+     |
+  13 + #[derive(Default)]
+  14 | pub struct LinkId(pub u64);
+     |
+
+error[E0277]: the trait bound `UpLink: Default` is not satisfied
+    --> crates/acrylius-core/src/core.rs:1243:54
+     |
+1243 |         Some((Default::default(), Box::leak(Box::new(Default::default())))) /* ~ changed by cargo-mutants ~ */
+     |                                                      ^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+     |
+help: the trait `Default` is not implemented for `UpLink`
+    --> crates/acrylius-core/src/core.rs:54:1
+     |
+  54 | struct UpLink {
+     | ^^^^^^^^^^^^^
+
+For more information about this error, try `rustc --explain E0277`.
+error: could not compile `acrylius-core` (lib) due to 2 previous errors
+
+Caused by:
+  process didn't exit successfully: `rustc --crate-name acrylius_core --edition=2024 crates/acrylius-core/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C embed-bitcode=no -C debuginfo=2 '--deny=clippy::all' --forbid=unsafe_code --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=444654ecbbeba1c0 -C extra-filename=-882191bac8c538f4 --out-dir /tmp/cargo-mutants-acrylius-DSWymY.tmp/target/debug/deps -C incremental=/tmp/cargo-mutants-acrylius-DSWymY.tmp/target/debug/incremental -L dependency=/tmp/cargo-mutants-acrylius-DSWymY.tmp/target/debug/deps --extern acrylius_proto=/tmp/cargo-mutants-acrylius-DSWymY.tmp/target/debug/deps/libacrylius_proto-9b41e143449d1e99.rmeta --extern hkdf=/tmp/cargo-mutants-acrylius-DSWymY.tmp/target/debug/deps/libhkdf-c93853d61f869e75.rmeta --extern minicbor=/tmp/cargo-mutants-acrylius-DSWymY.tmp/target/debug/deps/libminicbor-5d980ed9606f28a3.rmeta --extern sha2=/tmp/cargo-mutants-acrylius-DSWymY.tmp/target/debug/deps/libsha2-315e5af5d5b6fba0.rmeta --extern snow=/tmp/cargo-mutants-acrylius-DSWymY.tmp/target/debug/deps/libsnow-702102b113c9e790.rmeta --extern thiserror=/tmp/cargo-mutants-acrylius-DSWymY.tmp/target/debug/deps/libthiserror-030a32e56ed4cd4a.rmeta --extern tracing=/tmp/cargo-mutants-acrylius-DSWymY.tmp/target/debug/deps/libtracing-2c53f95a51bb1867.rmeta --extern x25519_dalek=/tmp/cargo-mutants-acrylius-DSWymY.tmp/target/debug/deps/libx25519_dalek-a1afcf7fc0767d4f.rmeta -L native=/tmp/cargo-mutants-acrylius-DSWymY.tmp/target/debug/build/ring-7aa863b0e8d94f2f/out` (exit status: 1)
+warning: build failed, waiting for other jobs to finish...
+error[E0277]: the trait bound `link::LinkId: Default` is not satisfied
+    --> crates/acrylius-core/src/core.rs:1243:15
+     |
+1243 |         Some((Default::default(), Box::leak(Box::new(Default::default())))) /* ~ changed by cargo-mutants ~ */
+     |               ^^^^^^^^^^^^^^^^^^ the trait `Default` is not implemented for `link::LinkId`
+     |
+help: consider annotating `link::LinkId` with `#[derive(Default)]`
+    -->  crates/acrylius-core/src/link.rs:13:1
+     |
+  13 + #[derive(Default)]
+  14 | pub struct LinkId(pub u64);
+     |
+
+error: could not compile `acrylius-core` (lib test) due to 2 previous errors
+
+Caused by:
+  process didn't exit successfully: `rustc --crate-name acrylius_core --edition=2024 crates/acrylius-core/src/lib.rs --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --emit=dep-info,link -C embed-bitcode=no -C debuginfo=2 '--deny=clippy::all' --forbid=unsafe_code --test --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values())' -C metadata=1f146e29c7bc7774 -C extra-filename=-fe560969f6fd3877 --out-dir /tmp/cargo-mutants-acrylius-DSWymY.tmp/target/debug/deps -C incremental=/tmp/cargo-mutants-acrylius-DSWymY.tmp/target/debug/incremental -L dependency=/tmp/cargo-mutants-acrylius-DSWymY.tmp/target/debug/deps --extern acrylius_proto=/tmp/cargo-mutants-acrylius-DSWymY.tmp/target/debug/deps/libacrylius_proto-9b41e143449d1e99.rlib --extern hkdf=/tmp/cargo-mutants-acrylius-DSWymY.tmp/target/debug/deps/libhkdf-c93853d61f869e75.rlib --extern minicbor=/tmp/cargo-mutants-acrylius-DSWymY.tmp/target/debug/deps/libminicbor-5d980ed9606f28a3.rlib --extern sha2=/tmp/cargo-mutants-acrylius-DSWymY.tmp/target/debug/deps/libsha2-315e5af5d5b6fba0.rlib --extern snow=/tmp/cargo-mutants-acrylius-DSWymY.tmp/target/debug/deps/libsnow-702102b113c9e790.rlib --extern thiserror=/tmp/cargo-mutants-acrylius-DSWymY.tmp/target/debug/deps/libthiserror-030a32e56ed4cd4a.rlib --extern tracing=/tmp/cargo-mutants-acrylius-DSWymY.tmp/target/debug/deps/libtracing-2c53f95a51bb1867.rlib --extern x25519_dalek=/tmp/cargo-mutants-acrylius-DSWymY.tmp/target/debug/deps/libx25519_dalek-a1afcf7fc0767d4f.rlib -L native=/tmp/cargo-mutants-acrylius-DSWymY.tmp/target/debug/build/ring-7aa863b0e8d94f2f/out` (exit status: 1)
+
+*** result: Failure(101)
