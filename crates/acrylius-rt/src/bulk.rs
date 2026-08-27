@@ -176,15 +176,32 @@ fn temp_beside(dest: &Path) -> PathBuf {
 // many, and it is the copy that drifts which becomes the path traversal.
 pub use acrylius_proto::bulk::safe_name;
 
-/// A path in `dir` that is not already taken.
+/// A path in `dir` that is not already taken, **claimed** by creating it.
 ///
 /// A transfer never overwrites. Two photos with the same name is a normal thing
 /// to happen and losing the first one is not.
-#[must_use]
-pub fn free_path(dir: &Path, name: &str) -> PathBuf {
+///
+/// Creating the file is the whole point, and replaces a version that only
+/// looked. Looking is not a claim: two transfers of the same name offered at the
+/// same time both looked before either wrote, both were told `photo.jpg` was
+/// free, and both then wrote to it and to one `photo.jpg.part` between them.
+/// One file arrived, made of both. `create_new` is the only step here that is
+/// atomic against somebody else doing the same thing.
+///
+/// The empty file left behind is the reservation. Whoever finishes renames its
+/// `.part` over it; whoever fails should remove it.
+pub fn reserve_path(dir: &Path, name: &str) -> std::io::Result<PathBuf> {
+    let claim = |candidate: &Path| {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(candidate)
+    };
     let candidate = dir.join(name);
-    if !candidate.exists() {
-        return candidate;
+    match claim(&candidate) {
+        Ok(_) => return Ok(candidate),
+        Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => return Err(e),
+        Err(_) => {}
     }
     let (stem, ext) = match name.rsplit_once('.') {
         Some((s, e)) if !s.is_empty() => (s.to_string(), format!(".{e}")),
@@ -192,11 +209,16 @@ pub fn free_path(dir: &Path, name: &str) -> PathBuf {
     };
     for n in 2..10_000 {
         let candidate = dir.join(format!("{stem} ({n}){ext}"));
-        if !candidate.exists() {
-            return candidate;
+        match claim(&candidate) {
+            Ok(_) => return Ok(candidate),
+            Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => return Err(e),
+            Err(_) => {}
         }
     }
-    dir.join(name)
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        format!("ten thousand files are already called {name}"),
+    ))
 }
 
 #[cfg(test)]
@@ -278,12 +300,29 @@ mod tests {
     #[test]
     fn a_second_file_of_the_same_name_does_not_replace_the_first() {
         let dir = std::env::temp_dir().join(format!("acr-free-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::create_dir_all(&dir);
-        let first = free_path(&dir, "photo.jpg");
+        let first = reserve_path(&dir, "photo.jpg").unwrap();
         std::fs::write(&first, b"one").unwrap();
-        let second = free_path(&dir, "photo.jpg");
+        let second = reserve_path(&dir, "photo.jpg").unwrap();
         assert_ne!(first, second);
         assert!(second.to_string_lossy().contains("photo (2).jpg"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn two_transfers_of_one_name_do_not_share_a_destination() {
+        // The reservation, which is the point of creating the file rather than
+        // looking at it. Both of these are decided before either writes a byte —
+        // which is exactly the order two offers accepted together arrive in.
+        let dir = std::env::temp_dir().join(format!("acr-claim-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::create_dir_all(&dir);
+        let a = reserve_path(&dir, "photo.jpg").unwrap();
+        let b = reserve_path(&dir, "photo.jpg").unwrap();
+        assert_ne!(a, b, "one file made of two transfers is the bug");
+        // And so do their temporaries, which is the other half of it.
+        assert_ne!(a.with_extension("jpg.part"), b.with_extension("jpg.part"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

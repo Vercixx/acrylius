@@ -176,7 +176,9 @@ impl BulkHost for FileBulk {
         // The peer chose a name and nothing else. It is made safe here, and a
         // file already there is never replaced: two photos with the same name
         // is a normal thing to happen and losing the first one is not.
-        let dest = bulk::free_path(&self.dir, &bulk::safe_name(&offer.name));
+        // Claimed here, not merely chosen. Two transfers of the same name
+        // accepted at once both used to be told the name was free.
+        let dest = bulk::reserve_path(&self.dir, &bulk::safe_name(&offer.name))?;
         let listening = bulk::listen(&self.host).await?;
         let endpoint = listening.endpoint.clone();
 
@@ -227,6 +229,17 @@ impl BulkHost for FileBulk {
                 Ok(())
             }
             Err(e) => {
+                // The empty file that reserved this name goes with it. It was
+                // created to stop a second transfer of the same name landing on
+                // top of this one; leaving it behind would fill the download
+                // directory with nothing, and make the next file of that name
+                // arrive as "photo (2).jpg" for no reason a person can see.
+                //
+                // Only if it is still empty: a rename may have already put the
+                // received bytes there and failed afterwards.
+                if std::fs::metadata(&dest).is_ok_and(|m| m.len() == 0) {
+                    let _ = std::fs::remove_file(&dest);
+                }
                 // Loud, because until now a transfer that failed said nothing
                 // anywhere and looked exactly like one that had not happened.
                 tracing::warn!(path = %dest.display(), error = %e, "a file did not arrive");
