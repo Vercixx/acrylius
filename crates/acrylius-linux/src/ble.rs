@@ -283,6 +283,25 @@ async fn readvertise(conn: &zbus::Connection, shared: &Shared) -> bool {
         *last = Some(std::time::Instant::now());
     }
 
+    // The GATT application goes with a bluetoothd restart, and it goes quietly.
+    // Only the advertisement was ever put back, so the desktop returned to the
+    // air with no service behind it: a phone finds it, connects, and there is
+    // nothing there — which looks like the phone's fault and is not.
+    //
+    // BlueZ offers no way to ask whether an application is still registered, so
+    // this asks again and treats the error that means "it already is" as the
+    // ordinary answer. Registering is cheap and does not disturb a central that
+    // is already connected.
+    if let Ok(builder) = GattManagerProxy::builder(conn).path(ADAPTER)
+        && let Ok(gatt) = builder.build().await
+        && let Ok(app) = ObjectPath::try_from(APP_PATH)
+    {
+        match gatt.register_application(&app, HashMap::new()).await {
+            Ok(()) => tracing::info!("GATT application registered again"),
+            Err(e) => tracing::debug!(error = %e, "GATT application was still registered"),
+        }
+    }
+
     let Ok(builder) = LeAdvertisingManagerProxy::builder(conn).path(ADAPTER) else {
         return false;
     };
