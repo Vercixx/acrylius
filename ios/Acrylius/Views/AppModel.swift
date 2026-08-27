@@ -227,6 +227,28 @@ final class AppModel {
         await send(peer, cap: capSession(), ty: "query", body: Data())
     }
 
+    /// Ask a peer that has just come back where things stand.
+    ///
+    /// Losing a peer discards its session state — `PeerCatalog.ingest` clears it
+    /// on `peerUnreachable`, because a lock screen remembered from ten minutes
+    /// ago is worse than no answer. Nothing put it back. The device screen asks
+    /// once, in `.task` when it appears, and a peer that goes away and returns
+    /// while you are already looking at it never triggers that again — so the
+    /// Session controls vanished and stayed vanished until the screen was left
+    /// and re-entered.
+    ///
+    /// Watching a computer switch from Wi-Fi to Bluetooth is exactly when
+    /// somebody is looking at that screen. Media hid the same bug: its state is
+    /// broadcast whenever a track or position changes, so it refilled itself
+    /// within seconds and only looked briefly stale, while the session state —
+    /// which changes when someone locks their screen, and not otherwise — had
+    /// nothing to refill it.
+    private func reacquaint(with peerId: String) async {
+        guard let peer = peers.first(where: { $0.deviceId == peerId }) else { return }
+        await refreshSession(peer)
+        await refreshMedia(peer)
+    }
+
     func run(_ command: FfiCommand, on peer: FfiPeer) async {
         await send(peer, cap: capCommand(), ty: "run",
                    body: encodeRunRequest(id: command.id))
@@ -416,9 +438,12 @@ final class AppModel {
             pairingSas = nil
             pairingCode = nil
             lastError = reason
-        case let .peerReachable(_, name):
+        case let .peerReachable(peer, name):
             status = "connected to \(name)"
-            Task { await refresh() }
+            Task {
+                await refresh()
+                await reacquaint(with: peer)
+            }
         case .peerUnreachable:
             status = "not connected"
             Task { await refresh() }
