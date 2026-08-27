@@ -116,6 +116,19 @@ impl SharePlugin {
         self.offered.iter().map(|(id, i)| (*id, &i.peer, &i.offer))
     }
 
+    /// Whether this outgoing transfer is the one we have with `peer`.
+    ///
+    /// A transfer id is chosen by whoever offered, so two peers hand out the
+    /// same small numbers as a matter of course and an id on its own names
+    /// nothing. Every answer about a transfer therefore has to come from the
+    /// device the transfer is actually with. Without this, a second paired
+    /// device could accept a file offered to the first — and an `accept`
+    /// carries the address to send it to, so it would be handed the file — or
+    /// simply cancel a transfer it had nothing to do with.
+    fn is_sending_to(&self, peer: &DeviceId, transfer: TransferId) -> bool {
+        self.sending.get(&transfer).is_some_and(|o| &o.peer == peer)
+    }
+
     fn announce(cx: &mut Cx, peer: &DeviceId, ty: &str, body: &impl minicbor::Encode<()>) {
         if let Ok(encoded) = minicbor::to_vec(body) {
             cx.ui(UiEvent::Plugin {
@@ -182,10 +195,10 @@ impl Plugin for SharePlugin {
                 let accept: Accept =
                     minicbor::decode(env.body).map_err(|_| PluginError::BadBody)?;
                 let transfer = TransferId(accept.transfer);
-                if !self.sending.contains_key(&transfer) {
-                    // An endpoint for a transfer we never offered. Refused
-                    // rather than dialled: it is somewhere to connect chosen by
-                    // someone else.
+                if !self.is_sending_to(peer, transfer) {
+                    // An endpoint for a transfer we never offered *to this
+                    // peer*. Refused rather than dialled: it is somewhere to
+                    // connect chosen by someone else.
                     return Err(PluginError::NotAllowed);
                 }
                 cx.bulk_send(peer, transfer, &accept.endpoint);
@@ -194,7 +207,11 @@ impl Plugin for SharePlugin {
 
             "reject" => {
                 let f: Finished = minicbor::decode(env.body).map_err(|_| PluginError::BadBody)?;
-                self.sending.remove(&TransferId(f.transfer));
+                let transfer = TransferId(f.transfer);
+                if !self.is_sending_to(peer, transfer) {
+                    return Err(PluginError::NotAllowed);
+                }
+                self.sending.remove(&transfer);
                 Self::announce(cx, peer, "reject", &f);
                 Ok(())
             }
@@ -202,6 +219,13 @@ impl Plugin for SharePlugin {
             "finished" => {
                 let f: Finished = minicbor::decode(env.body).map_err(|_| PluginError::BadBody)?;
                 let transfer = TransferId(f.transfer);
+                // Either direction may be finishing, but only the device the
+                // transfer is actually with may say so.
+                let mine = self.is_sending_to(peer, transfer)
+                    || self.offered.get(&transfer).is_some_and(|i| &i.peer == peer);
+                if !mine {
+                    return Err(PluginError::NotAllowed);
+                }
                 self.sending.remove(&transfer);
                 self.offered.remove(&transfer);
                 Self::announce(cx, peer, "finished", &f);
@@ -459,6 +483,70 @@ mod tests {
                 PluginError::NotAllowed
             );
         });
+    }
+
+    #[test]
+    fn another_paired_device_cannot_accept_a_file_offered_to_someone_else() {
+        // Pairing a second phone must not make it able to read what you send to
+        // the first. The id check alone was not enough: every device numbers its
+        // own transfers from one, so "transfer 1" exists for all of them, and an
+        // `accept` carries the address to deliver to.
+        let mut p = SharePlugin::default();
+        let intended = peer();
+        let eavesdropper = DeviceId::of(&[8u8; 32]);
+        let body = offer(10);
+        run(0, |cx| p.on_local(cx, &intended, "offer", &body).unwrap());
+
+        let accept = minicbor::to_vec(Accept {
+            transfer: 1,
+            endpoint: "10.6.6.6:4444".to_string(),
+        })
+        .unwrap();
+        let r = run(0, |cx| {
+            assert_eq!(
+                p.on_message(cx, &eavesdropper, &envelope(2, CAP, "accept", &accept))
+                    .unwrap_err(),
+                PluginError::NotAllowed,
+                "an accept from a device the offer was not made to"
+            );
+        });
+        assert!(
+            r.bulk.is_empty(),
+            "and above all, nothing is dialled: the address came from the wrong device"
+        );
+
+        // The offer is untouched, so the device it was actually made to can
+        // still accept it.
+        let r2 = run(0, |cx| {
+            p.on_message(cx, &intended, &envelope(3, CAP, "accept", &accept))
+                .unwrap();
+        });
+        assert!(matches!(r2.bulk.first(), Some(BulkRequest::Send { .. })));
+    }
+
+    #[test]
+    fn another_paired_device_cannot_cancel_a_transfer_it_has_nothing_to_do_with() {
+        let mut p = SharePlugin::default();
+        let intended = peer();
+        let meddler = DeviceId::of(&[8u8; 32]);
+        run(0, |cx| {
+            p.on_local(cx, &intended, "offer", &offer(10)).unwrap()
+        });
+
+        let f = minicbor::to_vec(Finished {
+            transfer: 1,
+            ok: false,
+            detail: "no thanks".to_string(),
+        })
+        .unwrap();
+        run(0, |cx| {
+            assert_eq!(
+                p.on_message(cx, &meddler, &envelope(4, CAP, "reject", &f))
+                    .unwrap_err(),
+                PluginError::NotAllowed
+            );
+        });
+        assert_eq!(p.sending.len(), 1, "the transfer survives a stranger's no");
     }
 
     #[test]

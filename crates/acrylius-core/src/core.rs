@@ -102,7 +102,16 @@ struct AwaitingConfirm {
 }
 
 struct PairingWindow {
-    psk: [u8; 32],
+    /// The code's key, or `None` for a window that answers no one.
+    ///
+    /// `None` is the side that *initiated*. It has no code to answer with — it
+    /// already sent one — and only needs somewhere to keep the confirmation it
+    /// is waiting on. It used to keep it in a window with an all-zero psk, which
+    /// is a constant anybody can type: for as long as a human was looking at the
+    /// SAS dialog, any device that could reach this one completed `XXpsk0`
+    /// against a known key, and the handshake it finished *replaced* the pending
+    /// confirmation. The human then compared a code and approved a stranger.
+    psk: Option<[u8; 32]>,
     deadline: u64,
     attempts: u8,
     awaiting: Option<AwaitingConfirm>,
@@ -508,7 +517,13 @@ impl Core {
                     self.fail_link(link, "no pairing window is open", out);
                     return;
                 };
-                let psk = window.psk;
+                let Some(psk) = window.psk else {
+                    // A window belonging to a pairing we started. It answers
+                    // nobody: we are the one waiting to be confirmed, and there
+                    // is no code here for anyone to have matched.
+                    self.fail_link(link, "no pairing window is open", out);
+                    return;
+                };
                 match Handshake::pair_responder(&self.identity, &psk) {
                     Ok(mut hs) => {
                         if hs.read(body).is_err() {
@@ -641,7 +656,7 @@ impl Core {
         }
 
         if h.pairing_flow {
-            self.pairing_completed(link, h, &payload, out);
+            self.pairing_completed(now_ms, link, h, &payload, out);
         } else {
             // A session initiator learns the peer's Hello from message 2.
             let Some(peer) = h.expect.clone() else {
@@ -755,6 +770,7 @@ impl Core {
 impl Core {
     fn pairing_completed(
         &mut self,
+        now_ms: u64,
         link: LinkId,
         h: Box<HandshakingLink>,
         payload: &[u8],
@@ -807,9 +823,16 @@ impl Core {
             });
         } else {
             // We initiated; there is no window, so keep the same state inline.
+            // `None`, not a zero key: this holds a confirmation, it does not
+            // open a door. See `PairingWindow::psk`.
             self.pairing = Some(PairingWindow {
-                psk: [0u8; 32],
-                deadline: h.deadline,
+                psk: None,
+                // The window a *person* now has to compare six digits in, not
+                // the handshake timeout that got us here. `h.deadline` is
+                // fifteen seconds measured from before the connection was made;
+                // the responder has always given this two minutes, and the side
+                // that typed the code deserves the same.
+                deadline: now_ms + self.config.pairing_window_ms,
                 attempts: 0,
                 awaiting: Some(AwaitingConfirm {
                     link,
@@ -1304,7 +1327,17 @@ impl Core {
             });
             return;
         };
-        let key = crate::proto::bulk::key(&hash, transfer.0).to_vec();
+        // Whoever offered the transfer owns the id, and its device id separates
+        // the two directions. Both ends can name it without asking: the side
+        // that dials is the side that offered, and the side that listens was
+        // offered to. Without this the first transfer each way shares a key and
+        // a nonce sequence — see `proto::bulk::key`.
+        let offerer = match &request {
+            BulkRequest::Send { .. } => self.device_id(),
+            BulkRequest::Listen { .. } => peer.clone(),
+            BulkRequest::Cancel { .. } => unreachable!("handled above"),
+        };
+        let key = crate::proto::bulk::key(&hash, offerer.as_str(), transfer.0).to_vec();
 
         match request {
             BulkRequest::Listen { expect_bytes, .. } => out.push(Action::BulkListen {
@@ -1338,7 +1371,7 @@ impl Core {
                 Ok(norm) => {
                     let deadline = now_ms + self.config.pairing_window_ms;
                     self.pairing = Some(PairingWindow {
-                        psk: pairing::psk(&norm),
+                        psk: Some(pairing::psk(&norm)),
                         deadline,
                         attempts: 0,
                         awaiting: None,

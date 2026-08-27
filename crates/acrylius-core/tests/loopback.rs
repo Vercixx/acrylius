@@ -958,6 +958,68 @@ fn a_wrong_pairing_code_does_not_pair() {
 }
 
 #[test]
+fn a_pairing_we_started_does_not_answer_anybody_elses_handshake() {
+    // The window that holds "waiting for a person to compare six digits" is not
+    // a window anyone may knock on. It used to be: the side that *initiated*
+    // kept its confirmation in a window whose psk was all zeroes — a constant,
+    // so anything that could reach this device completed `XXpsk0` against a key
+    // it already knew, and the handshake it finished replaced the confirmation
+    // the human was looking at. Approving the dialog then paired the stranger.
+    //
+    // Short of knowing that, a stranger's attempt still spent the window's
+    // attempts and could cancel a pairing that was going perfectly well, which
+    // is what this asserts without needing a hostile client to write.
+    let (a, b) = (core("phone"), core("pc"));
+    let mut net = Net::new(a, b);
+    net.local(
+        Side::B,
+        LocalCommand::OpenPairingWindow {
+            code: CODE.to_string(),
+        },
+    );
+    net.local(
+        Side::A,
+        LocalCommand::RequestPairing {
+            transport: TRANSPORT,
+            addr: Side::B.addr().to_string(),
+            code: CODE.to_string(),
+        },
+    );
+    let waiting_on = net
+        .sas_for(Side::A)
+        .expect("A is waiting to be confirmed")
+        .to_string();
+
+    // C, uninvited, aims pairing handshakes at A — enough of them to exhaust a
+    // window's attempts, because one is not enough to tell the two behaviours
+    // apart. A window that answers C at all counts these against itself and
+    // burns on the third; a window that is not open to C never sees them.
+    for _ in 0..4 {
+        net.local(
+            Side::C,
+            LocalCommand::RequestPairing {
+                transport: TRANSPORT,
+                addr: Side::A.addr().to_string(),
+                code: "ABCD1235".to_string(),
+            },
+        );
+    }
+
+    assert_eq!(
+        net.sas_for(Side::A).map(str::to_string),
+        Some(waiting_on),
+        "A is still comparing the code it was already comparing"
+    );
+    assert_eq!(net.c.peers().count(), 0, "and C has paired with nothing");
+
+    // The pairing that was actually in progress still completes.
+    net.local(Side::A, LocalCommand::ConfirmPairing { accept: true });
+    net.local(Side::B, LocalCommand::ConfirmPairing { accept: true });
+    assert_eq!(net.a.peers().count(), 1, "A paired with B, and only B");
+    assert_eq!(net.b.peers().count(), 1);
+}
+
+#[test]
 fn pairing_is_refused_when_no_window_is_open() {
     let (a, b) = (core("phone"), core("pc"));
     let mut net = Net::new(a, b);
