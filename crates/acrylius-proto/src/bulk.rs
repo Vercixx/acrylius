@@ -169,23 +169,42 @@ fn cipher(key: &[u8]) -> Result<ChaCha20Poly1305, ChunkError> {
 pub fn safe_name(offered: &str) -> alloc::string::String {
     use alloc::string::{String, ToString};
 
-    let base = offered
+    // Control characters come out first, not last.
+    //
+    // Stripping the dots before them meant a name could hide behind one: the
+    // leading character of `"\u{0}.."` is not a dot, so nothing was trimmed,
+    // and the filter then removed the NUL and handed back `".."`. That is
+    // exactly the kind of name this function exists to never return.
+    let base: String = offered
         .rsplit(['/', '\\'])
         .next()
         .unwrap_or(offered)
-        .trim()
-        .trim_start_matches('.');
-    let cleaned: String = base
         .chars()
-        .filter(|c| !c.is_control() && *c != '\0')
-        .take(120)
+        .filter(|c| !c.is_control())
         .collect();
+    let trimmed = base.trim().trim_start_matches('.').trim();
+
+    // Bounded in bytes rather than characters. A file name is stored as bytes
+    // and most filesystems stop at 255 of them, so 120 characters was up to 480
+    // — a name the receiver cannot create, failing the transfer with an errno
+    // instead of a reason. Short of the limit, to leave room for the `.part`
+    // suffix and a ` (2)` if the name is taken.
+    let mut cleaned = String::new();
+    for c in trimmed.chars() {
+        if cleaned.len() + c.len_utf8() > MAX_NAME_BYTES {
+            break;
+        }
+        cleaned.push(c);
+    }
     if cleaned.is_empty() {
         "received".to_string()
     } else {
         cleaned
     }
 }
+
+/// The most a made-safe name may take on disk.
+const MAX_NAME_BYTES: usize = 200;
 
 #[cfg(test)]
 mod tests {
@@ -225,6 +244,33 @@ mod tests {
         // same info string from different inputs. Device ids are fixed width
         // today, which is exactly the assumption worth not depending on.
         assert_ne!(key(b"hh", "AB", 1), key(b"hh", "A", 1));
+    }
+
+    #[test]
+    fn a_name_cannot_hide_dots_behind_a_control_character() {
+        // The order of the two cleanups is the whole finding. Dots were trimmed
+        // first, so a name starting with something invisible kept its dots
+        // through the trim and lost the invisible part to the filter after —
+        // handing back the one name this function must never produce.
+        assert_eq!(safe_name("\u{0}.."), "received");
+        assert_eq!(safe_name("\u{1}."), "received");
+        assert_eq!(safe_name("\u{7}../etc/passwd"), "passwd");
+        assert_eq!(safe_name("\u{0}.bashrc"), "bashrc");
+        // And the ordinary case is untouched.
+        assert_eq!(safe_name("holiday.jpg"), "holiday.jpg");
+    }
+
+    #[test]
+    fn a_name_is_bounded_in_bytes_because_a_filesystem_is() {
+        // 120 characters of emoji is 480 bytes, and a name over 255 cannot be
+        // created at all: the transfer used to fail with an errno rather than
+        // with a reason.
+        let long = "🙂".repeat(200);
+        let safe = safe_name(&long);
+        assert!(safe.len() <= 200, "{} bytes", safe.len());
+        assert!(!safe.is_empty());
+        // Cut on a character boundary, never through one.
+        assert!(safe.chars().all(|c| c == '🙂'));
     }
 
     #[test]
