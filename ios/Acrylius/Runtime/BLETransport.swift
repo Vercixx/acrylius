@@ -286,6 +286,15 @@ extension BLETransport: CBCentralManagerDelegate {
         push(.state(name, auth: auth))
         guard c.state == .poweredOn else {
             push(.scanning(false))
+            // The radio going away takes every link on it, and the core has to
+            // be told. Saying only "not scanning" left the phone holding a
+            // Bluetooth link across a Bluetooth toggle — up, preferred over
+            // nothing, and carrying no messages at all. CoreBluetooth does not
+            // send a disconnect for these: the connections simply cease to
+            // exist along with the manager's state.
+            for id in linkedPeers() {
+                retire(id, why: "Bluetooth was turned \(name)")
+            }
             return
         }
         startScan(c, why: "powered on")
@@ -418,6 +427,15 @@ extension BLETransport: CBCentralManagerDelegate {
         let why = error?.localizedDescription ?? "unknown"
         push(.note("could not connect: \(why)"))
         if let remedy = Self.remedy(for: error) { push(.trouble(remedy)) }
+        // Scan again, or this desktop is never seen again.
+        //
+        // `allowDuplicates: false` means a peripheral is reported once for the
+        // life of a scan, and it has already been reported — that is how we came
+        // to be connecting to it. So a connect that fails, with nothing to
+        // restart the scan, was the end of Bluetooth for that desktop until the
+        // app was killed: no retry, no rediscovery, and a screen that said only
+        // that one connection had not worked.
+        startScan(c, why: "a connection failed")
     }
 
     /// What to actually do about a failure, where there is something to do.
@@ -475,6 +493,16 @@ extension BLETransport: CBCentralManagerDelegate {
     /// Shared by every route to that conclusion, because more than one can
     /// arrive for a single death and the core must hear about it exactly once.
     /// Whoever clears the link record is the one who reports it.
+    /// Every peer this transport currently holds a link for.
+    ///
+    /// Snapshotted under the lock and returned, rather than retired in place:
+    /// `retire` takes the same lock and fires into the core, and doing that with
+    /// it held is how a transport deadlocks against the runtime.
+    private func linkedPeers() -> [UUID] {
+        lock.lock(); defer { lock.unlock() }
+        return peers.compactMap { $0.value.link == nil ? nil : $0.key }
+    }
+
     @discardableResult
     private func retire(_ id: UUID, why: String?) -> Bool {
         lock.lock()
