@@ -218,7 +218,15 @@ public final class BLETransport: NSObject, Transport, @unchecked Sendable {
             // A link belongs to one transport, and the core does not track
             // which, so every transport is offered every send. Not ours:
             // nothing to do.
-            guard let self, let p = self.peer(forLink: link), let rx = p.rx else { return }
+            guard let self, let p = self.peer(forLink: link) else { return }
+            // Belt and braces under `didModifyServices`. If the peripheral has
+            // gone and CoreBluetooth has not said so, writing here would be
+            // silent — and silence is the failure this transport is worst at,
+            // because a write without response cannot report anything either.
+            guard p.peripheral.state == .connected, let rx = p.rx else {
+                self.retire(p.peripheral.identifier, why: "the computer is no longer connected")
+                return
+            }
             // The negotiated payload, asked for rather than assumed. iOS reports
             // 512 against a modern peripheral and 20 against an old one, and
             // guessing either way is how fragments get silently truncated.
@@ -449,15 +457,6 @@ extension BLETransport: CBCentralManagerDelegate {
         error: (any Error)?
     ) {
         let why = error?.localizedDescription
-        lock.lock()
-        let p = peers[peripheral.identifier]
-        let link = p?.link
-        p?.link = nil
-        p?.rx = nil
-        p?.tx = nil
-        p?.reassembler = nil
-        p?.pending.removeAll()
-        lock.unlock()
         push(.link("none"))
         push(.note("disconnected\(why.map { ": \($0)" } ?? "")"))
         // A bond can fail on the way out as well as on the way in.
@@ -468,18 +467,67 @@ extension BLETransport: CBCentralManagerDelegate {
         if c.state == .poweredOn {
             startScan(c, why: "after a disconnect")
         }
-        if let link {
-            fire(
-                .linkDown(
-                    link: link,
-                    reason: why.map { FfiLinkDown.transport(detail: $0) } ?? .closed))
-        }
+        retire(peripheral.identifier, why: why)
+    }
+
+    /// Let go of a peripheral we can no longer talk to, and tell the core once.
+    ///
+    /// Shared by every route to that conclusion, because more than one can
+    /// arrive for a single death and the core must hear about it exactly once.
+    /// Whoever clears the link record is the one who reports it.
+    @discardableResult
+    private func retire(_ id: UUID, why: String?) -> Bool {
+        lock.lock()
+        let p = peers[id]
+        let link = p?.link
+        p?.link = nil
+        p?.rx = nil
+        p?.tx = nil
+        p?.reassembler = nil
+        p?.pending.removeAll()
+        lock.unlock()
+        guard let link else { return false }
+        fire(
+            .linkDown(
+                link: link,
+                reason: why.map { FfiLinkDown.transport(detail: $0) } ?? .closed))
+        return true
     }
 }
 
 // MARK: - peripheral
 
 extension BLETransport: CBPeripheralDelegate {
+    /// The desktop's GATT database changed underneath us.
+    ///
+    /// This is what stopping the daemon looks like from here, and it is the
+    /// quietest failure on this transport. The connection does not drop —
+    /// bluetoothd keeps the ACL, and the phone stays bonded and connected to
+    /// the computer — but the acrylius application is unregistered, so the
+    /// service and both characteristics stop existing. There is no disconnect.
+    /// Writes are sent without response and so report no error. Nothing else in
+    /// CoreBluetooth ever mentions it.
+    ///
+    /// Without this the app went on saying it was connected over Bluetooth to a
+    /// daemon that had exited, and — because the peer never became unreachable —
+    /// never re-asked that computer anything either, which is how the session
+    /// controls stayed empty and the media state stayed stale.
+    ///
+    /// Rediscovery is started rather than the peripheral being hung up on: the
+    /// commonest reason for this to fire is a daemon being restarted, and the
+    /// service is usually back within a second or two.
+    public func peripheral(
+        _ peripheral: CBPeripheral, didModifyServices invalidatedServices: [CBService]
+    ) {
+        guard invalidatedServices.contains(where: { $0.uuid == serviceUUID }) else { return }
+        push(.note("the acrylius service went away on the computer"))
+        push(.link("none"))
+        retire(peripheral.identifier, why: "the service went away")
+        if peripheral.state == .connected {
+            peripheral.discoverServices([serviceUUID])
+        }
+    }
+
     public func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: (any Error)?) {
         if let error {
             push(.note("service discovery failed: \(error.localizedDescription)"))
