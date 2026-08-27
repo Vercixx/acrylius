@@ -15,3 +15,9 @@
 # UniFFI output, produced by the build.
 /ios/Generated
 /target/xcodegen
+
+# cargo-mutants output. Regenerated on every run, and its lock.json records the
+# hostname and username of whoever ran it.
+/mutants.out
+/mutants.out.old
+/mutants.out.*
