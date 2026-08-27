@@ -615,6 +615,48 @@ fn a_session_dropped_over_a_bad_frame_says_the_device_has_gone() {
 }
 
 #[test]
+fn a_handshake_that_never_finishes_falls_back_to_the_next_route() {
+    // A dial that connects has proved a socket, not a peer. Here the preferred
+    // address has the wrong machine on it: the connection opens, the handshake
+    // cannot finish, and the attempt used to end there in silence — the untried
+    // routes were dropped the moment the link came up, on the assumption that a
+    // connected socket was a reached device.
+    let (mut net, _a_id, b_id) = paired();
+    // Both routes on record before anything is dialled: the preferred transport
+    // points at the wrong machine, the other at B.
+    discover_via(&mut net, Side::A, Side::B, TransportId(1), "B");
+    discover_via(&mut net, Side::A, Side::B, TransportId(0), "C");
+    net.local(Side::A, LocalCommand::Disconnect { peer: b_id.clone() });
+    net.ui.clear();
+    net.dialed.clear();
+    // A second opener in the same millisecond as the first is a replay, and B is
+    // right to refuse it. Real clocks move; this one has to be told to.
+    net.wall += 1_000;
+
+    net.local(Side::A, LocalCommand::Connect { peer: b_id.clone() });
+
+    assert!(
+        net.dialed
+            .iter()
+            .any(|(t, a)| *t == TransportId(0) && a == "C"),
+        "the preferred route is tried first: {:?}",
+        net.dialed
+    );
+    assert!(
+        net.dialed
+            .iter()
+            .any(|(t, a)| *t == TransportId(1) && a == "B"),
+        "and the next one after it came to nothing: {:?}",
+        net.dialed
+    );
+    assert_eq!(
+        net.a.peer_state(&b_id),
+        PeerState::Reachable,
+        "the device was reachable all along, by the second route"
+    );
+}
+
+#[test]
 fn losing_the_last_route_does_report_the_device_as_gone() {
     // The other half, kept honest: the case above must not be bought by never
     // reporting a departure at all.

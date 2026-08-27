@@ -27,6 +27,14 @@ use crate::vocab::{
 /// whether a person asked for it.
 type PeerDial = (DeviceId, Vec<(TransportId, String)>, bool);
 
+/// What a link we dialled brings with it into its handshake.
+struct Dialled {
+    attrs: LinkAttrs,
+    deadline: u64,
+    /// Routes not tried yet. See [`HandshakingLink::fallback`].
+    fallback: Option<PeerDial>,
+}
+
 /// A link that exists but has not said anything yet. We do not know whether it
 /// wants to pair or to resume until its first frame arrives.
 struct PendingLink {
@@ -49,6 +57,17 @@ struct HandshakingLink {
     /// throwing that away was the reason a freshly paired device reported
     /// itself unreachable until discovery happened to run again.
     via: Option<(TransportId, String)>,
+    /// The routes this dial had not tried yet, kept until the *session* is up
+    /// rather than until the socket is.
+    ///
+    /// A dial that connects has proved a socket, not a peer. If the handshake
+    /// then never finishes — something else listening on the port, a stale NAT
+    /// mapping, a peer that is not the one expected — there is no `DialFailed`
+    /// to walk the rest of the list, because the dial did not fail. Dropping
+    /// the alternatives the moment the link came up left a device with a
+    /// perfectly good second route unreachable until something else happened
+    /// to dial it, and told nobody.
+    fallback: Option<PeerDial>,
 }
 
 struct UpLink {
@@ -246,32 +265,8 @@ impl Core {
             Event::LinkDown { link, .. } => self.on_link_down(now_ms, link, &mut out),
             Event::DialFailed { dial, reason } => {
                 self.pending_pair_dials.remove(&dial);
-                if let Some((peer, mut routes, by_hand)) = self.pending_peer_dials.remove(&dial) {
-                    // A device on Wi-Fi and BLE has two ways in. Reporting it
-                    // unreachable because the first failed would be wrong, and
-                    // wrong in the direction a user cannot diagnose.
-                    if routes.is_empty() {
-                        // Only when a person asked. An automatic attempt runs
-                        // on every sighting, and one route can easily be seen
-                        // before a working one is — announcing that would make
-                        // a device flicker "unreachable" while it is coming up
-                        // perfectly normally. It stays unreachable either way;
-                        // that is a fact about its state, not news.
-                        if by_hand {
-                            out.ui(UiEvent::PeerUnreachable { peer });
-                        }
-                    } else {
-                        let (transport, addr) = routes.remove(0);
-                        self.next_dial += 1;
-                        let next = DialToken(self.next_dial);
-                        self.pending_peer_dials
-                            .insert(next, (peer, routes, by_hand));
-                        out.push(Action::Dial {
-                            transport,
-                            addr,
-                            dial: next,
-                        });
-                    }
+                if let Some(pending) = self.pending_peer_dials.remove(&dial) {
+                    self.try_next_route(pending, &mut out);
                 } else {
                     out.ui(UiEvent::PairingFailed { reason });
                 }
@@ -409,6 +404,9 @@ impl Core {
                                     expect: None,
                                     pairing_flow: true,
                                     via: Some(via),
+                                    // Pairing walks no route list: a person
+                                    // typed one address and a code for it.
+                                    fallback: None,
                                 })),
                             );
                         }
@@ -422,11 +420,23 @@ impl Core {
 
         // A link we dialled to reach a known peer: IKpsk2, we speak first.
         if let Some(d) = dial
-            && let Some((peer, _untried, _by_hand)) = self.pending_peer_dials.remove(&d)
+            && let Some(pending) = self.pending_peer_dials.remove(&d)
         {
-            // The routes we did not need are dropped with the token: this dial
-            // landed, so there is nothing left to fall back to.
-            self.start_session_initiator(now_ms, link, attrs, peer, deadline, out);
+            // The routes we have not tried travel with the link, not with the
+            // dial token. A connected socket is not a finished session, and
+            // until it is one there is still somewhere else to go.
+            let peer = pending.0.clone();
+            self.start_session_initiator(
+                now_ms,
+                link,
+                peer,
+                Dialled {
+                    attrs,
+                    deadline,
+                    fallback: Some(pending),
+                },
+                out,
+            );
             return;
         }
 
@@ -439,11 +449,15 @@ impl Core {
         &mut self,
         now_ms: u64,
         link: LinkId,
-        attrs: LinkAttrs,
         peer: DeviceId,
-        deadline: u64,
+        dialled: Dialled,
         out: &mut Outcome,
     ) {
+        let Dialled {
+            attrs,
+            deadline,
+            fallback,
+        } = dialled;
         let Some(rec) = self.peers.get(&peer) else {
             self.fail_link(link, "no such peer", out);
             return;
@@ -472,6 +486,7 @@ impl Core {
                                 expect: Some(peer),
                                 pairing_flow: false,
                                 via: None,
+                                fallback,
                             })),
                         );
                     }
@@ -546,6 +561,9 @@ impl Core {
                                         expect: None,
                                         pairing_flow: true,
                                         via: None,
+                                        // Somebody dialled us, so there is no
+                                        // list of ours to walk.
+                                        fallback: None,
                                     })),
                                 );
                             }
@@ -1158,6 +1176,46 @@ impl Core {
     /// dial that is going nowhere — but discovery may resolve the same service
     /// repeatedly, and a dial per sighting would be a storm aimed at a device
     /// whose only offence is being switched on.
+    /// Try the next address for a peer, or say it cannot be reached.
+    ///
+    /// Reached from both ways an attempt can end without a session: the dial
+    /// itself failing, and a dial that connected whose handshake then ran out of
+    /// time. The second used to go nowhere at all — the routes were dropped the
+    /// moment the socket opened, on the assumption that a connected socket was a
+    /// reached peer.
+    fn try_next_route(&mut self, pending: PeerDial, out: &mut Outcome) {
+        let (peer, mut routes, by_hand) = pending;
+        // Something else got there while this was failing. Neither a further
+        // dial nor a death notice would be true.
+        if self.best_link(&peer).is_some() {
+            return;
+        }
+        // A device on Wi-Fi and BLE has two ways in. Reporting it unreachable
+        // because the first failed would be wrong, and wrong in the direction a
+        // user cannot diagnose.
+        if routes.is_empty() {
+            // Only when a person asked. An automatic attempt runs on every
+            // sighting, and one route can easily be seen before a working one
+            // is — announcing that would make a device flicker "unreachable"
+            // while it is coming up perfectly normally. It stays unreachable
+            // either way; that is a fact about its state, not news.
+            if by_hand {
+                out.ui(UiEvent::PeerUnreachable { peer });
+            }
+            return;
+        }
+        let (transport, addr) = routes.remove(0);
+        self.next_dial += 1;
+        let next = DialToken(self.next_dial);
+        self.pending_peer_dials
+            .insert(next, (peer, routes, by_hand));
+        out.push(Action::Dial {
+            transport,
+            addr,
+            dial: next,
+        });
+    }
+
     fn connect_peer(&mut self, peer: DeviceId, out: &mut Outcome, by_hand: bool) {
         if !by_hand && self.pending_peer_dials.values().any(|(p, _, _)| p == &peer) {
             return;
@@ -1584,11 +1642,19 @@ impl Core {
             .map(|(k, _)| *k)
             .collect();
         for l in stale {
-            self.links.remove(&l);
+            let was = self.links.remove(&l);
             out.push(Action::Close {
                 link: l,
                 reason: LinkDownReason::Closed,
             });
+            // A handshake that ran out of time has not proved the *device*
+            // unreachable, only this way in. Carry on down the list this dial
+            // was walking — or, if there is nothing left of it, say so once.
+            if let Some(LinkState::Handshaking(h)) = was
+                && let Some(pending) = h.fallback
+            {
+                self.try_next_route(pending, out);
+            }
         }
 
         if let Some(w) = self.plugin_wake
@@ -1605,8 +1671,20 @@ impl Core {
     }
 
     fn on_link_down(&mut self, now_ms: u64, link: LinkId, out: &mut Outcome) {
-        let Some(LinkState::Up(u)) = self.links.remove(&link) else {
-            return;
+        let u = match self.links.remove(&link) {
+            Some(LinkState::Up(u)) => u,
+            // A dialled link that died before it was ever a session has not
+            // proved the *device* unreachable, only this way in — something
+            // else answering on the port, or the peer refusing us. Carry on
+            // down the list this dial was walking rather than stopping here
+            // with the alternatives still untried and nobody told.
+            Some(LinkState::Handshaking(h)) => {
+                if let Some(pending) = h.fallback {
+                    self.try_next_route(pending, out);
+                }
+                return;
+            }
+            _ => return,
         };
 
         // Losing a link is not losing a device.
