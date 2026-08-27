@@ -232,18 +232,17 @@ final class AppModel {
             // which a comparison of the readings themselves cannot tell us.
             if features.mediaAt != beforeAt, let now = features.media {
                 guard let before else { return true }
-                switch mediaCommandLanded(
+                guard let landed = mediaCommandLanded(
                     verb: verb, player: player, value: value, before: before, now: now
-                ) {
-                case true: return true
-                // A reading cannot answer this one — a seek moves a position
-                // that also moves on its own — so the reading is the answer.
-                case nil: return true
-                // Not yet. Keep waiting rather than answering: the two-second
-                // poll can land between the command and its reply, and it would
-                // be showing the state we started from.
-                case false: break
+                ) else {
+                    // A reading cannot answer this one — a seek moves a position
+                    // that also moves on its own — so the reading is the answer.
+                    return true
                 }
+                // Not yet is not no. Keep waiting rather than answering: the
+                // two-second poll can land between the command and its reply,
+                // and it would be showing the state we started from.
+                if landed { return true }
             }
             try? await Task.sleep(for: .milliseconds(120))
         }

@@ -24,6 +24,8 @@ public final class NWTransport: Transport, @unchecked Sendable {
     private let lock = NSLock()
     private var emit: (@Sendable (FfiEvent) -> Void)?
     private var connections: [UInt64: NWConnection] = [:]
+    /// Links opened for a dial that has not been answered yet. See `answerDial`.
+    private var dialled: [UInt64: UInt64] = [:]
     private var nextLink: UInt64 = 1
     private var browser: NWBrowser?
     private let queue = DispatchQueue(label: "org.acrylius.transport")
@@ -61,7 +63,33 @@ public final class NWTransport: Transport, @unchecked Sendable {
     }
     private func release(_ link: UInt64) -> NWConnection? {
         lock.lock(); defer { lock.unlock() }
+        // Both tables, or a link retired before it ever came up leaves its dial
+        // token behind for as long as the transport lives.
+        dialled.removeValue(forKey: link)
         return connections.removeValue(forKey: link)
+    }
+
+    /// Claim the dial this link was opened for, if it is still unanswered.
+    ///
+    /// A dial is answered once, by whichever comes first: the connection going
+    /// `.ready`, or it failing before it ever did. Removing the token is the
+    /// claim, the same trick `retire` uses, so the two cannot both report.
+    ///
+    /// This exists because the token used to be captured for the connection's
+    /// whole life. A link that came up and *then* died still had one, so it
+    /// reported `dialFailed` for a dial that had already succeeded — and the
+    /// core, which had recorded `LinkUp` and was routing over it, never heard
+    /// `LinkDown`. The link stayed up forever, the peer stayed reachable over a
+    /// route that carried nothing, and no plugin was ever told the peer had
+    /// gone. Wi-Fi outranks Bluetooth, so everything went into the dead one.
+    private func answerDial(_ link: UInt64) -> UInt64? {
+        lock.lock(); defer { lock.unlock() }
+        return dialled.removeValue(forKey: link)
+    }
+
+    private func noteDial(_ link: UInt64, _ dial: UInt64) {
+        lock.lock(); defer { lock.unlock() }
+        dialled[link] = dial
     }
 
     /// Tell the core a link died, exactly once.
@@ -184,22 +212,33 @@ public final class NWTransport: Transport, @unchecked Sendable {
 
     private func attach(_ c: NWConnection, dial: UInt64?) {
         let link = claimLink(c)
+        if let dial { noteDial(link, dial) }
         c.stateUpdateHandler = { [weak self] state in
             guard let self else { return }
             switch state {
             case .ready:
+                // The dial is answered here and nowhere else. After this the
+                // connection is a link, and anything that happens to it is a
+                // link going down — never a dial that failed.
                 self.fire(.linkUp(link: link, attrs: tcpLanAttrs(transport: self.transportId),
-                                  dial: dial))
+                                  dial: self.answerDial(link)))
                 self.receiveHeader(c, link: link)
             case let .failed(error):
-                if let dial {
+                if let pending = self.answerDial(link) {
                     _ = self.release(link)
-                    self.fire(.dialFailed(dial: dial, reason: "\(error)"))
+                    self.fire(.dialFailed(dial: pending, reason: "\(error)"))
                 } else {
                     self.retire(link, .transport(detail: "\(error)"))
                 }
             case .cancelled:
-                self.retire(link, .closed)
+                // A dial cancelled before it ever came up still has to be
+                // answered, or the core waits on it for as long as it lives.
+                if let pending = self.answerDial(link) {
+                    _ = self.release(link)
+                    self.fire(.dialFailed(dial: pending, reason: "cancelled"))
+                } else {
+                    self.retire(link, .closed)
+                }
             default:
                 break
             }

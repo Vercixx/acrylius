@@ -231,10 +231,18 @@ impl Plugin for SessionPlugin {
                 }
                 cx.send_reply(&p.peer, CAP, p.reply, bytes.clone(), p.request);
             }
-            EffectResult::Failed(detail) => {
+            // Nobody asked, so there is nobody to answer.
+            //
+            // A broadcast's `peer` is the placeholder the host uses to mean
+            // "everyone" and its request id is zero. Answering it sent an `err`
+            // addressed to a device that does not exist, every three seconds,
+            // for as long as the machine had no session to read — and the core
+            // reported each one as a peer it could not reach. The media plugin
+            // has guarded this since it was written; this one never did.
+            EffectResult::Failed(detail) if p.reply != "broadcast" => {
                 cx.send_error(&p.peer, CAP, p.request, "effect_failed", detail);
             }
-            EffectResult::Unsupported => {
+            EffectResult::Unsupported if p.reply != "broadcast" => {
                 cx.send_error(
                     &p.peer,
                     CAP,
@@ -243,6 +251,7 @@ impl Plugin for SessionPlugin {
                     "no session on this device",
                 );
             }
+            EffectResult::Failed(_) | EffectResult::Unsupported => {}
         }
     }
 }
@@ -329,6 +338,45 @@ mod tests {
         assert!(
             r.effects.is_empty(),
             "an unknown verb must not reach the host"
+        );
+    }
+
+    #[test]
+    fn a_background_poll_that_fails_answers_nobody() {
+        // The poll is the host talking to itself: its peer is a placeholder for
+        // "everyone" and its request id is zero. A machine with no session to
+        // read failed one of these every three seconds, and each failure was
+        // answered with an `err` addressed to a device that does not exist.
+        let mut p = SessionPlugin::default();
+        run(0, |cx| p.on_peer_connected(cx, &peer()));
+
+        let r = run(0, |cx| p.on_local(cx, &peer(), "notify", b"").unwrap());
+        let r2 = run(r.next_token, |cx| {
+            p.on_effect_result(
+                cx,
+                r.token(),
+                &EffectResult::Failed("no graphical session".to_string()),
+            );
+        });
+        assert!(r2.sends.is_empty(), "nothing was asked, so nothing answers");
+
+        // An unsupported host is the same question with a different answer.
+        let r3 = run(0, |cx| p.on_local(cx, &peer(), "notify", b"").unwrap());
+        let r4 = run(r3.next_token, |cx| {
+            p.on_effect_result(cx, r3.token(), &EffectResult::Unsupported);
+        });
+        assert!(r4.sends.is_empty());
+
+        // A request from a real peer is still answered.
+        let env = envelope(5, CAP, "lock", b"");
+        let r5 = run(0, |cx| p.on_message(cx, &peer(), &env).unwrap());
+        let r6 = run(r5.next_token, |cx| {
+            p.on_effect_result(cx, r5.token(), &EffectResult::Unsupported);
+        });
+        assert_eq!(
+            r6.sent("err").map(|s| s.re),
+            Some(Some(5)),
+            "somebody did ask, so they hear about it"
         );
     }
 

@@ -941,13 +941,20 @@ impl Core {
         out: &mut Outcome,
     ) {
         if kind != FrameKind::Transport {
-            self.fail_link(link, "handshake frame on an established link", out);
+            self.fail_up_link(
+                now_ms,
+                link,
+                u,
+                "handshake frame on an established link",
+                out,
+            );
             return;
         }
         let plaintext = match u.session.decrypt(body) {
             Ok(p) => p,
             Err(e) => {
-                self.fail_link(link, &e.to_string(), out);
+                let detail = e.to_string();
+                self.fail_up_link(now_ms, link, u, &detail, out);
                 return;
             }
         };
@@ -1643,6 +1650,40 @@ impl Core {
         }
         self.next_token = cx.next_token;
         self.drain_cx(cx, out);
+    }
+
+    /// Drop an *established* link and announce it the way any other death is.
+    ///
+    /// `fail_link` is not enough for one of these. It removes the link from the
+    /// table, which is right for a link that never came up — but
+    /// `on_transport_frame` holds the only `Box<UpLink>` *out* of that table for
+    /// the duration of the call, so the remove found nothing to remove. The peer
+    /// was never announced unreachable, no plugin was told it had gone, and the
+    /// `LinkDown` the transport sent once it acted on the `Close` found nothing
+    /// left to report either. A session dropped over one bad frame left a device
+    /// that looked connected, and stayed that way.
+    ///
+    /// So the link goes back before it is torn down, and the teardown is the one
+    /// every other link gets — including the part that decides a peer reachable
+    /// two ways has not actually gone anywhere.
+    fn fail_up_link(
+        &mut self,
+        now_ms: u64,
+        link: LinkId,
+        u: Box<UpLink>,
+        detail: &str,
+        out: &mut Outcome,
+    ) {
+        self.links.insert(link, LinkState::Up(u));
+        out.push(Action::Close {
+            link,
+            reason: LinkDownReason::Protocol(ErrorCode::NotAllowed),
+        });
+        out.ui(UiEvent::Error {
+            code: ErrorCode::NotAllowed,
+            detail: detail.to_string(),
+        });
+        self.on_link_down(now_ms, link, out);
     }
 
     fn fail_link(&mut self, link: LinkId, detail: &str, out: &mut Outcome) {

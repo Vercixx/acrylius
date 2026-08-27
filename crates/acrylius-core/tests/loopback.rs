@@ -452,6 +452,36 @@ const SLOWER: TransportId = TransportId(1);
 ///
 /// Both ends hear it, because both ends have a socket and both are wrong about
 /// it until told otherwise.
+/// Deliver a well-formed transport frame that will not decrypt, on a live link.
+///
+/// A frame, not junk: junk is refused by the framing before it ever reaches an
+/// established session, and it is the established-session path this exercises.
+/// The link stays in the harness's table on purpose — the point is that the
+/// *core* drops it, and that it says so.
+fn deliver_undecryptable(net: &mut Net, side: Side, transport: TransportId) {
+    // The last one, not the first: `links` keeps every link the harness ever
+    // brought up, and pairing leaves closed ones in front of the live session.
+    let link = net
+        .links
+        .iter()
+        .rev()
+        .find(|(s, t, _)| *s == side && *t == transport)
+        .map(|(_, _, l)| *l)
+        .expect("a live link to spoil");
+    let msg = acrylius_core::proto::frame::join(
+        acrylius_core::proto::frame::FrameKind::Transport,
+        &[0xffu8; 32],
+    );
+    net.queue.push_back((
+        side,
+        Event::LinkRecv {
+            link: LinkId(link),
+            msg,
+        },
+    ));
+    net.run();
+}
+
 fn lose_link(net: &mut Net, transport: TransportId) {
     let dead: Vec<(Side, u64)> = net
         .links
@@ -557,6 +587,31 @@ fn losing_one_of_two_routes_does_not_report_the_device_as_gone() {
         "nothing told the host the route had changed"
     );
     assert_eq!(net.a.peer_state(&b_id), PeerState::Reachable);
+}
+
+#[test]
+fn a_session_dropped_over_a_bad_frame_says_the_device_has_gone() {
+    // Dropping a link because the peer sent nonsense is right. Doing it in
+    // silence is not: `on_transport_frame` holds the only `UpLink` out of the
+    // table, so removing it removed nothing, nobody was told the peer had gone,
+    // and the `LinkDown` that followed the close found nothing left to report.
+    // The device stayed `Reachable` with no route under it, for good.
+    let (mut net, _a_id, b_id) = paired();
+    discover(&mut net, Side::A, Side::B);
+    assert_eq!(net.a.peer_state(&b_id), PeerState::Reachable);
+
+    net.ui.clear();
+    deliver_undecryptable(&mut net, Side::A, TRANSPORT);
+
+    assert!(
+        net.saw(Side::A, |e| matches!(e, UiEvent::PeerUnreachable { .. })),
+        "the session was dropped and nobody was told"
+    );
+    assert_eq!(
+        net.a.peer_state(&b_id),
+        PeerState::Unreachable,
+        "and the core must not still believe it can be reached"
+    );
 }
 
 #[test]
