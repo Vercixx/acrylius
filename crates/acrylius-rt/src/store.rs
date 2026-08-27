@@ -208,9 +208,15 @@ mod tests {
             // weakened and the other two would cover for it.
             "peer/..",
         ] {
-            assert!(
-                s.put(bad, Some(b"x"), Sensitivity::Ordinary).is_err(),
-                "{bad} should be refused"
+            // The *reason* matters. `root/peer/..` is `root`, which the
+            // filesystem refuses on its own for being a directory — so an
+            // `is_err()` here passed just as well with the key check weakened,
+            // and the guard could have been broken without a word.
+            let e = s.put(bad, Some(b"x"), Sensitivity::Ordinary).unwrap_err();
+            assert_eq!(
+                e.kind(),
+                io::ErrorKind::InvalidInput,
+                "{bad} must be refused by the key check, not by luck"
             );
         }
         assert!(
@@ -218,5 +224,79 @@ mod tests {
                 .is_ok()
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_record_comes_back_the_way_it_went_in_and_can_be_taken_away() {
+        let dir = scratch("roundtrip");
+        let mut s = FileStore::open(&dir).unwrap();
+        assert!(s.load_peers().unwrap().is_empty(), "a fresh store has none");
+
+        let rec = PeerRecord {
+            device_id: "AAAAAAAAAAAAAAAAAAAAAA".to_string(),
+            public_key: vec![1u8; 32],
+            name: "pc".to_string(),
+            platform: "linux".to_string(),
+            session_psk: vec![2u8; 32],
+            greatest_seen: 0,
+            caps_out: Vec::new(),
+            caps_in: Vec::new(),
+        };
+        let key = format!("peer/{}", rec.device_id);
+        s.put(
+            &key,
+            Some(&minicbor::to_vec(&rec).unwrap()),
+            Sensitivity::Secret,
+        )
+        .unwrap();
+
+        // A half-written temporary, left by a crash mid-`put`. It is not a peer
+        // and must not be read as one: a truncated record either fails to decode
+        // or, worse, decodes into something with the wrong key in it.
+        std::fs::write(dir.join("peer").join("leftover.tmp"), b"half a record").unwrap();
+
+        let back = s.load_peers().unwrap();
+        assert_eq!(back.len(), 1, "what was written is what is read");
+        assert_eq!(back[0].device_id, rec.device_id);
+        assert_eq!(back[0].public_key, rec.public_key);
+
+        // Deleting is a `put` of nothing, and deleting twice is not an error:
+        // revoking a peer that is already gone is a thing that happens.
+        s.put(&key, None, Sensitivity::Secret).unwrap();
+        assert!(s.load_peers().unwrap().is_empty());
+        s.put(&key, None, Sensitivity::Secret)
+            .expect("removing what is not there is not a failure");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_in_memory_store_keeps_the_same_promises() {
+        // It stands in for the file one in tests and on a host with nowhere to
+        // write, so a version of it that quietly kept nothing would make every
+        // test above it pass while proving nothing.
+        let mut s = MemoryStore::default();
+        assert!(s.load_peers().unwrap().is_empty());
+        let rec = PeerRecord {
+            device_id: "BBBBBBBBBBBBBBBBBBBBBB".to_string(),
+            public_key: vec![3u8; 32],
+            name: "phone".to_string(),
+            platform: "ios".to_string(),
+            session_psk: vec![4u8; 32],
+            greatest_seen: 7,
+            caps_out: Vec::new(),
+            caps_in: Vec::new(),
+        };
+        let key = format!("peer/{}", rec.device_id);
+        s.put(
+            &key,
+            Some(&minicbor::to_vec(&rec).unwrap()),
+            Sensitivity::Secret,
+        )
+        .unwrap();
+        let back = s.load_peers().unwrap();
+        assert_eq!(back.len(), 1);
+        assert_eq!(back[0].greatest_seen, 7);
+        s.put(&key, None, Sensitivity::Secret).unwrap();
+        assert!(s.load_peers().unwrap().is_empty());
     }
 }

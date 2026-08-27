@@ -630,26 +630,29 @@ mod tests {
         });
         assert!(p.sending.is_empty(), "the right device closed it out");
 
-        // Incoming.
+        // Incoming. `offer(n)` sets the *size*; the id it carries is 1, which is
+        // exactly why ids collide across devices. Naming any other id here would
+        // be refused for the wrong reason and prove nothing.
         let body = offer(11);
         run(0, |cx| {
             p.on_message(cx, &mine, &envelope(11, CAP, "offer", &body))
                 .unwrap();
         });
-        let g = minicbor::to_vec(Finished {
-            transfer: 11,
-            ok: true,
-            detail: String::new(),
-        })
-        .unwrap();
+        assert_eq!(p.pending().count(), 1);
         run(0, |cx| {
             assert_eq!(
-                p.on_message(cx, &stranger, &envelope(12, CAP, "finished", &g))
+                p.on_message(cx, &stranger, &envelope(12, CAP, "finished", &f))
                     .unwrap_err(),
-                PluginError::NotAllowed
+                PluginError::NotAllowed,
+                "a stranger naming the id of an offer made to us"
             );
         });
         assert_eq!(p.pending().count(), 1, "the offer survives a stranger");
+        run(0, |cx| {
+            p.on_message(cx, &mine, &envelope(13, CAP, "finished", &f))
+                .unwrap();
+        });
+        assert_eq!(p.pending().count(), 0, "and the right device closes it");
     }
 
     #[test]
@@ -682,6 +685,20 @@ mod tests {
             assert_eq!(
                 p.on_message(cx, &peer(), &envelope(2, CAP, "offer", &too_big))
                     .unwrap_err(),
+                PluginError::TooLarge
+            );
+        });
+
+        // The same bound on the way out, which is a separate check in a separate
+        // function and needs saying separately. This is the one a person meets:
+        // it is refused here, before anything is sent.
+        let mut q = SharePlugin::default();
+        run(0, |cx| {
+            q.on_local(cx, &peer(), "offer", &body).unwrap();
+        });
+        run(0, |cx| {
+            assert_eq!(
+                q.on_local(cx, &peer(), "offer", &too_big).unwrap_err(),
                 PluginError::TooLarge
             );
         });
