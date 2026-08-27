@@ -27,6 +27,12 @@ thiserror = { version = "2", default-features = false }
 tracing   = "0.1"
 tokio     = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "io-std", "fs", "sync", "time", "process", "signal"] }
 mdns-sd   = "0.21"
+# Keepalive and TCP_USER_TIMEOUT on an established socket. tokio exposes
+# neither, and without them a peer that vanishes — a phone whose Wi-Fi is
+# switched off — leaves a link that stays "up" for as long as the kernel keeps
+# retransmitting, which is a quarter of an hour. Already in the lock file as a
+# transitive dependency of tokio, so this adds nothing new to the tree.
+socket2   = "0.6"
 anyhow    = "1"
 async-trait = "0.1"
 clap = { version = "4", features = ["derive", "env"] }

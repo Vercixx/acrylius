@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, VecDeque};
 
 use acrylius_core::config::CoreConfig;
 use acrylius_core::core::{Core, CoreBuilder};
-use acrylius_core::link::{LinkAttrs, LinkDownReason, LinkId, TransportId};
+use acrylius_core::link::{LinkAttrs, LinkDownReason, LinkId, TransportId, TransportKind};
 use acrylius_core::noise::Identity;
 use acrylius_core::peer::PeerState;
 use acrylius_core::plugins::ping;
@@ -73,6 +73,12 @@ struct Net {
     /// Wi-Fi at the same time, which is the arrangement a phone actually has
     /// and the one where preferring the wrong link shows up.
     pub ble_transport: Option<TransportId>,
+    /// Every link the harness has brought up, and which transport carried it,
+    /// so a test can take one away by name. Losing the better transport while
+    /// the worse one is still connected is the case a real phone meets every
+    /// time Wi-Fi is switched off, and the only way to write it is to be able
+    /// to say *which* link died.
+    pub links: Vec<(Side, TransportId, u64)>,
 }
 
 impl Net {
@@ -92,6 +98,7 @@ impl Net {
             dialed: Vec::new(),
             links_are_ble: false,
             ble_transport: None,
+            links: Vec::new(),
         }
     }
 
@@ -216,6 +223,8 @@ impl Net {
                 self.next_link += 2;
                 self.peer_link.insert((side, mine), theirs);
                 self.peer_link.insert((side.other(), theirs), mine);
+                self.links.push((side, transport, mine));
+                self.links.push((side.other(), transport, theirs));
                 let attrs = if self.links_are_ble || self.ble_transport == Some(transport) {
                     LinkAttrs::ble(transport)
                 } else {
@@ -371,6 +380,79 @@ fn discover_via(net: &mut Net, side: Side, of: Side, transport: TransportId, add
 /// A second transport, worse than `TRANSPORT`. Preference is ascending id, so
 /// this stands in for BLE beside Wi-Fi.
 const SLOWER: TransportId = TransportId(1);
+
+/// Take one transport's link away, the way switching Wi-Fi off does.
+///
+/// Both ends hear it, because both ends have a socket and both are wrong about
+/// it until told otherwise.
+fn lose_link(net: &mut Net, transport: TransportId) {
+    let dead: Vec<(Side, u64)> = net
+        .links
+        .iter()
+        .filter(|(_, t, _)| *t == transport)
+        .map(|(s, _, l)| (*s, *l))
+        .collect();
+    assert!(!dead.is_empty(), "no link on {transport:?} to lose");
+    net.links.retain(|(_, t, _)| *t != transport);
+    for (side, link) in dead {
+        net.queue.push_back((
+            side,
+            Event::LinkDown {
+                link: LinkId(link),
+                reason: LinkDownReason::Closed,
+            },
+        ));
+    }
+    net.run();
+}
+
+#[test]
+fn a_worse_transport_takes_over_when_the_better_one_dies() {
+    // The mirror of `a_better_transport_is_taken_even_while_a_worse_one_is_working`,
+    // and the half that was missing. Switching Wi-Fi off does not close a TCP
+    // connection — nothing is closed, the peer just stops answering — so both
+    // ends went on believing a dead link was the best route to each other.
+    //
+    // Because routing picks the lowest transport id among *live* links, that
+    // one belief was enough to send every message into a socket that could not
+    // carry it, while a working Bluetooth link sat beside it unused. On the
+    // phone it looked like "connected, but nothing happens"; on the desktop it
+    // was a socket with four kilobytes stuck in its send queue.
+    //
+    // Noticing the death is a host's job — keepalive on Linux, path viability
+    // on iOS. What the core owes is this: once told, fall back at once.
+    let (mut net, _a_id, b_id) = paired();
+    net.ble_transport = Some(SLOWER);
+
+    // Same setup as the upgrade test: pairing already recorded a working route
+    // on the better transport, so it is overwritten with one that does not
+    // answer, the worse transport connects, and only then does Wi-Fi turn up.
+    discover_via(&mut net, Side::A, Side::B, TRANSPORT, "not-listening");
+    discover_via(&mut net, Side::A, Side::B, SLOWER, "B");
+    // A second session to one peer needs a strictly later opener timestamp than
+    // the last one seen, or it is indistinguishable from a replay of it.
+    net.wall += 1_000;
+    discover_via(&mut net, Side::A, Side::B, TRANSPORT, "B");
+    assert_eq!(
+        net.a.transport_for(&b_id),
+        Some(TransportKind::UnixLoopback),
+        "the better transport carries while both are up"
+    );
+
+    lose_link(&mut net, TRANSPORT);
+
+    // Still reachable, over what is left.
+    assert_eq!(
+        net.a.peer_state(&b_id),
+        PeerState::Reachable,
+        "one dead route is not an unreachable device while another is connected"
+    );
+    assert_eq!(
+        net.a.transport_for(&b_id),
+        Some(TransportKind::BleGatt),
+        "and what is left is what carries"
+    );
+}
 
 #[test]
 fn a_sighting_on_one_transport_does_not_evict_another() {

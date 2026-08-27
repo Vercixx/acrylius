@@ -64,6 +64,23 @@ public final class NWTransport: Transport, @unchecked Sendable {
         return connections.removeValue(forKey: link)
     }
 
+    /// Tell the core a link died, exactly once.
+    ///
+    /// One dropped connection is noticed by several things at once — a read
+    /// that errors, a state change to `.failed`, then `.cancelled` behind it,
+    /// and the viability handler — and the core must hear about it once.
+    /// Removing it from the table is the claim, and only the caller who
+    /// succeeds in removing it gets to report.
+    /// Returns the connection it removed, so a caller that also wants to hang
+    /// up can do so without capturing it — a handler stored *on* a connection
+    /// that captures that connection never lets it go.
+    @discardableResult
+    private func retire(_ link: UInt64, _ reason: FfiLinkDown) -> NWConnection? {
+        guard let dead = release(link) else { return nil }
+        fire(.linkDown(link: link, reason: reason))
+        return dead
+    }
+
     // MARK: - Transport
 
     public func start(events: @escaping @Sendable (FfiEvent) -> Void) async {
@@ -176,17 +193,36 @@ public final class NWTransport: Transport, @unchecked Sendable {
                 self.receiveHeader(c, link: link)
             case let .failed(error):
                 if let dial {
+                    _ = self.release(link)
                     self.fire(.dialFailed(dial: dial, reason: "\(error)"))
                 } else {
-                    self.fire(.linkDown(link: link, reason: .transport(detail: "\(error)")))
+                    self.retire(link, .transport(detail: "\(error)"))
                 }
-                _ = self.release(link)
             case .cancelled:
-                self.fire(.linkDown(link: link, reason: .closed))
-                _ = self.release(link)
+                self.retire(link, .closed)
             default:
                 break
             }
+        }
+        // The direct answer to "Wi-Fi was switched off".
+        //
+        // Turning Wi-Fi off does not fail an established connection — nothing
+        // is closed, the peer simply stops answering, and the socket sits
+        // `.ready` and silent while the kernel retransmits. The core ranks
+        // transports by id and Wi-Fi outranks Bluetooth, so until this link is
+        // retired every message is routed into a connection that cannot carry
+        // it, past a Bluetooth link that is up and working. The app says
+        // "connected", and nothing happens.
+        //
+        // iOS knows the moment it happens and will say so, which is far better
+        // than any timeout: viability going false means the path this
+        // connection runs over can no longer carry traffic. There is no waiting
+        // to see whether it recovers — the core re-dials when discovery finds
+        // the desktop again, and being wrong for a second costs a redial, while
+        // being right and slow costs every message in between.
+        c.viabilityUpdateHandler = { [weak self] viable in
+            guard let self, !viable else { return }
+            self.retire(link, .transport(detail: "the network went away"))?.cancel()
         }
         c.start(queue: queue)
     }
@@ -195,8 +231,7 @@ public final class NWTransport: Transport, @unchecked Sendable {
         c.receive(minimumIncompleteLength: 4, maximumLength: 4) { [weak self] data, _, done, error in
             guard let self else { return }
             if error != nil || done {
-                self.fire(.linkDown(link: link, reason: .closed))
-                _ = self.release(link)
+                self.retire(link, .closed)
                 return
             }
             guard let data, data.count == 4 else { return }
@@ -204,9 +239,7 @@ public final class NWTransport: Transport, @unchecked Sendable {
             guard n <= Self.maxFrame else {
                 // Refuse before allocating. A peer that claims more than the cap
                 // is hung up on rather than believed.
-                self.fire(.linkDown(link: link,
-                                    reason: .transport(detail: "frame of \(n) exceeds the cap")))
-                _ = self.release(link)
+                self.retire(link, .transport(detail: "frame of \(n) exceeds the cap"))
                 c.cancel()
                 return
             }
@@ -220,8 +253,7 @@ public final class NWTransport: Transport, @unchecked Sendable {
             [weak self] data, _, done, error in
             guard let self else { return }
             if error != nil || done {
-                self.fire(.linkDown(link: link, reason: .closed))
-                _ = self.release(link)
+                self.retire(link, .closed)
                 return
             }
             if let data, data.count == count {

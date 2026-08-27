@@ -69,6 +69,7 @@ dependencies = [
  "chacha20poly1305",
  "mdns-sd",
  "minicbor",
+ "socket2",
  "thiserror",
  "tokio",
  "tracing",

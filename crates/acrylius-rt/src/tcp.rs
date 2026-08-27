@@ -68,6 +68,41 @@ async fn read_frame(stream: &mut tokio::net::tcp::OwnedReadHalf) -> std::io::Res
 }
 
 /// Pump one accepted or dialled connection until it ends.
+/// How long a peer may be silent, or leave data unacknowledged, before the
+/// socket is declared dead.
+///
+/// This is a *routing* deadline, not a network one. The core picks the best
+/// transport for a peer by transport id, and TCP outranks Bluetooth — so a Wi-Fi
+/// link that is dead but still believed carries every message into a hole, and
+/// the Bluetooth link sitting right beside it, connected and working, is never
+/// chosen. Twenty seconds is how long that can last.
+const DEAD_PEER: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Make a vanished peer show up as a broken socket in bounded time.
+///
+/// Switching Wi-Fi off on a phone does not close anything. The peer simply stops
+/// answering, and by default the kernel is extraordinarily patient about that:
+/// unacknowledged data is retransmitted for roughly fifteen minutes before the
+/// connection errors, and a connection with *nothing* outstanding is never
+/// questioned at all. Both were observed on this project — a desktop holding
+/// `ESTAB … Send-Q 4559` to a phone that had been off Wi-Fi for minutes, while
+/// the phone sat connected over Bluetooth wondering why nothing worked.
+///
+/// So both cases are bounded. Keepalive covers the idle socket; `TCP_USER_TIMEOUT`
+/// covers the one with bytes stuck in the send queue, which is the case
+/// keepalive alone does *not* answer. Failures to set either are ignored: this
+/// is an improvement to how quickly a fault is noticed, and a platform that will
+/// not have it should still carry messages.
+fn bound_the_wait_for_a_dead_peer(stream: &TcpStream) {
+    let sock = socket2::SockRef::from(stream);
+    let keepalive = socket2::TcpKeepalive::new()
+        .with_time(DEAD_PEER / 2)
+        .with_interval(DEAD_PEER / 4);
+    let _ = sock.set_tcp_keepalive(&keepalive);
+    #[cfg(target_os = "linux")]
+    let _ = sock.set_tcp_user_timeout(Some(DEAD_PEER));
+}
+
 async fn serve(
     link: LinkId,
     stream: TcpStream,
@@ -77,6 +112,7 @@ async fn serve(
     writers: Writers,
 ) {
     let _ = stream.set_nodelay(true);
+    bound_the_wait_for_a_dead_peer(&stream);
     let (mut rd, mut wr) = stream.into_split();
     let (tx, mut rx) = mpsc::unbounded_channel::<Option<Vec<u8>>>();
     writers.lock().await.insert(link, tx);
