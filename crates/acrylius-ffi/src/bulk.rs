@@ -269,7 +269,7 @@ mod tests {
         let bytes: Vec<u8> = (0..CHUNK * 2 + 1234).map(|i| (i % 251) as u8).collect();
         std::fs::write(&source, &bytes).unwrap();
 
-        let k = key(b"a shared handshake hash", 7);
+        let k = key(b"a shared handshake hash", "the-offerer", 7);
         let listening = acrylius_rt::bulk::listen("127.0.0.1").await.unwrap();
         let endpoint = listening.endpoint.clone();
         let dest = dir.join("arrived.jpg");
@@ -313,11 +313,16 @@ mod tests {
         let sending = {
             let path = source.to_string_lossy().into_owned();
             // A key from a session this sender never had.
-            let wrong = key(b"some other handshake", 7).to_vec();
+            let wrong = key(b"some other handshake", "the-offerer", 7).to_vec();
             tokio::task::spawn_blocking(move || bulk_send(7, endpoint, wrong, path))
         };
         let outcome = listening
-            .receive(7, &key(b"a shared handshake hash", 7), 14, &dest)
+            .receive(
+                7,
+                &key(b"a shared handshake hash", "the-offerer", 7),
+                14,
+                &dest,
+            )
             .await;
         let _ = sending.await;
 
@@ -345,7 +350,7 @@ mod tests {
         let bytes: Vec<u8> = (0..CHUNK * 2 + 999).map(|i| (i % 251) as u8).collect();
         std::fs::write(&source, &bytes).unwrap();
 
-        let k = key(b"a shared handshake hash", 11);
+        let k = key(b"a shared handshake hash", "the-offerer", 11);
         let listener = BulkListener::bind("127.0.0.1".to_string()).unwrap();
         let endpoint = listener.endpoint();
         assert!(
@@ -385,7 +390,7 @@ mod tests {
         let source = dir.join("build.ipa");
         std::fs::write(&source, b"only fourteen").unwrap();
 
-        let k = key(b"a shared handshake hash", 12);
+        let k = key(b"a shared handshake hash", "the-offerer", 12);
         let listener = BulkListener::bind("127.0.0.1".to_string()).unwrap();
         let endpoint = listener.endpoint();
         let dest = dir.join("arrived.ipa");

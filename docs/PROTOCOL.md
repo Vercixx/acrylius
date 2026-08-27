@@ -633,13 +633,27 @@ that completed the session handshake can have:
 
 ```
 key = HKDF-SHA256(ikm = session handshake hash,
-                  info = "acrylius/bulk/v1" || transfer as u64be,
+                  info = "acrylius/bulk/v1"
+                         || len(offerer) as u8 || offerer
+                         || transfer as u64be,
                   salt = none)[0..32]
 ```
 
+`offerer` is the device id, as ASCII, of the side that made the offer — the side
+that allocated the transfer id and that dials the listener. Both ends know it
+without another round trip: the sender knows it offered, and the receiver knows
+the offer arrived from its peer.
+
+It is in the derivation because each end numbers its own transfers from one, so
+the first transfer in each direction of a session shares an id. Keyed on the id
+alone, those two derived the same key and both began at nonce zero — keystream
+reuse on a channel that is a plain TCP connection outside the session, taking
+the one-time Poly1305 key with it. The length prefix keeps `offerer || transfer`
+from being read two ways.
+
 The nonce is the chunk's sequence number, counting from zero, in the last eight
 bytes of the twelve. Sequence numbers are never reused under a key, because a
-key is used for exactly one transfer.
+key is used for exactly one transfer in one direction.
 
 The hello is in the clear and is only a demultiplexer: it says which transfer is
 arriving so the listener can pick a key. It authenticates nothing. A connection
