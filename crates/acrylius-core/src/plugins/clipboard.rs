@@ -293,6 +293,33 @@ mod tests {
     }
 
     #[test]
+    fn an_offer_skips_the_peer_that_left_and_reaches_the_one_that_stayed() {
+        // See the twin of this in `plugins::session`. Mutation testing found the
+        // same untested `retain` in all three plugins that keep a peer list:
+        // `!=` could become `==`, dropping every peer except the one that had
+        // just gone, and nothing objected.
+        let mut p = ClipboardPlugin::default();
+        let gone = peer();
+        let stayed = DeviceId::of(&[9u8; 32]);
+        run(0, |cx| p.on_peer_connected(cx, &gone));
+        run(0, |cx| p.on_peer_connected(cx, &stayed));
+        run(0, |cx| p.on_peer_disconnected(cx, &gone));
+
+        let r = run(0, |cx| p.on_local(cx, &gone, "push", b"hello").unwrap());
+        let told: Vec<&DeviceId> = r
+            .sends
+            .iter()
+            .filter(|s| s.ty == "set")
+            .map(|s| &s.peer)
+            .collect();
+        assert_eq!(
+            told,
+            vec![&stayed],
+            "a clipboard must not follow a peer that has gone"
+        );
+    }
+
+    #[test]
     fn a_local_change_is_offered_to_every_peer() {
         let mut p = ClipboardPlugin::default();
         run(0, |cx| p.on_peer_connected(cx, &peer()));

@@ -236,6 +236,18 @@ mod tests {
     }
 
     #[test]
+    fn a_message_of_exactly_the_size_allowed_is_kept() {
+        // The boundary the `>` guards, and which nothing pinned: a `>=` here
+        // refuses a message of exactly `max_message`, which the other end is
+        // entitled to send. The core's own check is `len > max_message`, so the
+        // two would disagree by one byte and the link would be dropped for a
+        // message that was never too big.
+        let mut r = Reassembler::new(4);
+        assert_eq!(r.push(&[START | MORE, 1, 2]), Ok(None));
+        assert_eq!(r.push(&[0, 3, 4]), Ok(Some(vec![1, 2, 3, 4])));
+    }
+
+    #[test]
     fn a_fragment_with_no_header_is_refused() {
         let mut r = Reassembler::new(16);
         assert_eq!(r.push(&[]), Err(BleError::Empty));
