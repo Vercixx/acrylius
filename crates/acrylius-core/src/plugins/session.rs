@@ -443,6 +443,19 @@ mod tests {
             Some(Some(5)),
             "somebody did ask, so they hear about it"
         );
+
+        // And the other failure shape, which is a separate arm and so needs
+        // saying separately.
+        let env = envelope(6, CAP, "lock", b"");
+        let r7 = run(0, |cx| p.on_message(cx, &peer(), &env).unwrap());
+        let r8 = run(r7.next_token, |cx| {
+            p.on_effect_result(
+                cx,
+                r7.token(),
+                &EffectResult::Failed("logind said no".to_string()),
+            );
+        });
+        assert_eq!(r8.sent("err").map(|s| s.re), Some(Some(6)));
     }
 
     #[test]

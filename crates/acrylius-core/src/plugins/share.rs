@@ -601,6 +601,93 @@ mod tests {
     }
 
     #[test]
+    fn only_the_device_a_transfer_is_with_may_finish_it() {
+        // Both directions of `finished`, and a stranger refused in each. A
+        // transfer id alone names nothing, so without the peer check any paired
+        // device could close out somebody else's transfer.
+        let mut p = SharePlugin::default();
+        let mine = peer();
+        let stranger = DeviceId::of(&[7u8; 32]);
+        let f = minicbor::to_vec(Finished {
+            transfer: 1,
+            ok: true,
+            detail: String::new(),
+        })
+        .unwrap();
+
+        // Outgoing.
+        run(0, |cx| p.on_local(cx, &mine, "offer", &offer(10)).unwrap());
+        run(0, |cx| {
+            assert_eq!(
+                p.on_message(cx, &stranger, &envelope(9, CAP, "finished", &f))
+                    .unwrap_err(),
+                PluginError::NotAllowed
+            );
+        });
+        run(0, |cx| {
+            p.on_message(cx, &mine, &envelope(10, CAP, "finished", &f))
+                .unwrap();
+        });
+        assert!(p.sending.is_empty(), "the right device closed it out");
+
+        // Incoming.
+        let body = offer(11);
+        run(0, |cx| {
+            p.on_message(cx, &mine, &envelope(11, CAP, "offer", &body))
+                .unwrap();
+        });
+        let g = minicbor::to_vec(Finished {
+            transfer: 11,
+            ok: true,
+            detail: String::new(),
+        })
+        .unwrap();
+        run(0, |cx| {
+            assert_eq!(
+                p.on_message(cx, &stranger, &envelope(12, CAP, "finished", &g))
+                    .unwrap_err(),
+                PluginError::NotAllowed
+            );
+        });
+        assert_eq!(p.pending().count(), 1, "the offer survives a stranger");
+    }
+
+    #[test]
+    fn an_offer_of_exactly_the_largest_size_is_taken() {
+        // A bound, not the first value outside it. Nothing pinned that, so the
+        // check could quietly become `>=` and refuse a transfer that is exactly
+        // allowed — with an error naming a size it does not exceed.
+        let mut p = SharePlugin::default();
+        let body = minicbor::to_vec(Offer {
+            transfer: 5,
+            name: "big.bin".to_string(),
+            size: MAX_BYTES,
+            mime: String::new(),
+        })
+        .unwrap();
+        run(0, |cx| {
+            p.on_message(cx, &peer(), &envelope(1, CAP, "offer", &body))
+                .unwrap();
+        });
+        assert_eq!(p.pending().count(), 1);
+
+        let too_big = minicbor::to_vec(Offer {
+            transfer: 6,
+            name: "bigger.bin".to_string(),
+            size: MAX_BYTES + 1,
+            mime: String::new(),
+        })
+        .unwrap();
+        run(0, |cx| {
+            assert_eq!(
+                p.on_message(cx, &peer(), &envelope(2, CAP, "offer", &too_big))
+                    .unwrap_err(),
+                PluginError::TooLarge
+            );
+        });
+    }
+
+    #[test]
     fn a_sender_dials_the_endpoint_it_was_given() {
         let mut p = SharePlugin::default();
         let body = offer(10);

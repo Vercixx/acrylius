@@ -202,6 +202,11 @@ mod tests {
             "peer/a/b",
             "nodir",
             "..",
+            // One separator, no leading slash, and it climbs out anyway —
+            // `root/peer/..` is `root`. The only clause that refuses this is
+            // the `contains("..")` one, so without it here that clause could be
+            // weakened and the other two would cover for it.
+            "peer/..",
         ] {
             assert!(
                 s.put(bad, Some(b"x"), Sensitivity::Ordinary).is_err(),
