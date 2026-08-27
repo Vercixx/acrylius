@@ -19,9 +19,17 @@ use acrylius_core::plugins::session::{SessionOutcome, SessionState};
 use crate::compositor;
 
 /// How long to wait for a session to actually report unlocked.
-const UNLOCK_CONFIRM: Duration = Duration::from_secs(5);
+///
+/// Both numbers live in the core, next to the budgets a client waits against
+/// them. They were a pair of bare literals here, and the phone had its own pair
+/// in Swift; the two happened to be equal for locking, so the reply could not
+/// arrive before the phone had stopped listening and a lock that worked was
+/// reported as a failure.
+const UNLOCK_CONFIRM: Duration =
+    Duration::from_millis(acrylius_core::plugins::session::UNLOCK_CONFIRM_MS);
 /// Longer, because a locker has more to do on the way in.
-const LOCK_CONFIRM: Duration = Duration::from_secs(8);
+const LOCK_CONFIRM: Duration =
+    Duration::from_millis(acrylius_core::plugins::session::LOCK_CONFIRM_MS);
 const CONFIRM_INTERVAL: Duration = Duration::from_millis(200);
 
 /// What `ListSessions` returns: id, uid, user name, seat, object path.

@@ -23,6 +23,40 @@ use crate::vocab::{Effect, EffectKind, EffectResult, EffectToken, UiEvent};
 
 pub const CAP: &str = "org.acrylius.session/1";
 
+/// How long a host may spend confirming a lock before it answers anyway.
+///
+/// logind only emits a signal; whether anything acts on it is the screen
+/// locker's choice, so the host watches the state until it moves. Locking is
+/// given longer than unlocking because a locker that has to tear down a session
+/// is slower than one that is handed a password.
+pub const LOCK_CONFIRM_MS: u64 = 8_000;
+
+/// See [`LOCK_CONFIRM_MS`].
+pub const UNLOCK_CONFIRM_MS: u64 = 5_000;
+
+/// How long a client waits for the answer to a lock before calling it a failure.
+///
+/// Not a number anyone picked: it is the host's budget plus
+/// [`crate::plugin::REPLY_SLACK_MS`]. A client that waits less than the host is
+/// allowed to spend will call a lock that worked a failure, and it will do it
+/// intermittently, depending on how quick the locker is that day.
+pub const LOCK_REPLY_BUDGET_MS: u64 = LOCK_CONFIRM_MS + crate::plugin::REPLY_SLACK_MS;
+
+/// See [`LOCK_REPLY_BUDGET_MS`].
+pub const UNLOCK_REPLY_BUDGET_MS: u64 = UNLOCK_CONFIRM_MS + crate::plugin::REPLY_SLACK_MS;
+
+// The bug these constants exist to prevent, refused at compile time rather than
+// by a test. `LOCK_CONFIRM` was eight seconds and the phone's wait was eight
+// seconds, picked independently in two languages with nothing relating them, so
+// the reply could not arrive before the client had stopped listening and a lock
+// that worked was reported as a failure. Unlocking only ever worked because its
+// host budget happened to be three seconds shorter — luck, not design.
+const _: () = assert!(
+    LOCK_REPLY_BUDGET_MS > LOCK_CONFIRM_MS,
+    "a client that gives up before the host may answer reports failures that did not happen"
+);
+const _: () = assert!(UNLOCK_REPLY_BUDGET_MS > UNLOCK_CONFIRM_MS);
+
 /// The host's answer to [`Effect::QuerySession`], and the payload of `state`.
 #[derive(Clone, PartialEq, Eq, Debug, Default, minicbor::Encode, minicbor::Decode)]
 pub struct SessionState {
@@ -295,6 +329,52 @@ mod tests {
         assert!(
             r.effects.is_empty(),
             "an unknown verb must not reach the host"
+        );
+    }
+
+    #[test]
+    fn a_broadcast_skips_the_peer_that_left_and_reaches_the_one_that_stayed() {
+        // Mutation testing found this: `retain(|p| p != peer)` could be flipped
+        // to `==` — keeping only the peer that had just gone and dropping every
+        // other — without one test objecting. Both halves are asserted here,
+        // because a test that only checks the departed peer is gone passes just
+        // as happily when the list has been emptied.
+        //
+        // This is the guard for "losing one route is not losing the device": a
+        // phone that moves from Wi-Fi to Bluetooth must not stop being told
+        // things because the link it arrived on died.
+        let mut p = SessionPlugin::default();
+        let gone = peer();
+        let stayed = DeviceId::of(&[2u8; 32]);
+        run(0, |cx| p.on_peer_connected(cx, &gone));
+        run(0, |cx| p.on_peer_connected(cx, &stayed));
+        run(0, |cx| p.on_peer_disconnected(cx, &gone));
+
+        let state = SessionState {
+            locked: true,
+            session_id: "1".to_string(),
+            kind: "wayland".to_string(),
+            active: true,
+        };
+        let r = run(0, |cx| p.on_local(cx, &gone, "notify", b"").unwrap());
+        let r2 = run(r.next_token, |cx| {
+            p.on_effect_result(
+                cx,
+                r.token(),
+                &EffectResult::Ok(minicbor::to_vec(&state).unwrap()),
+            );
+        });
+
+        let told: Vec<&DeviceId> = r2
+            .sends
+            .iter()
+            .filter(|s| s.ty == "state")
+            .map(|s| &s.peer)
+            .collect();
+        assert_eq!(
+            told,
+            vec![&stayed],
+            "exactly the peer still connected, and only it"
         );
     }
 

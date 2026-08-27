@@ -16,6 +16,21 @@ use crate::proto::envelope::{Envelope, ErrorBody, ErrorCode};
 use crate::proto::ids::DeviceId;
 use crate::vocab::{Effect, EffectKind, EffectResult, EffectToken, UiEvent};
 
+/// How much longer than a host's own budget a client waits for the answer.
+///
+/// Some verbs cannot be answered until the machine has watched something else
+/// happen — a screen locker acting on a signal, a player acting on an MPRIS
+/// call — so the host spends a while confirming before it replies. A client
+/// that gives up inside that window reports a failure that did not happen,
+/// which is exactly what "the screen locked but the phone said it failed" was:
+/// `LOCK_CONFIRM` and the phone's wait were both eight seconds, so the reply
+/// could not arrive before the client had already stopped listening.
+///
+/// The slack covers the answer travelling back, which over Bluetooth is not
+/// instant. Every client budget is a host budget plus this, and there is a test
+/// beside each one saying so, because the two numbers living apart is the bug.
+pub const REPLY_SLACK_MS: u64 = 4_000;
+
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct PluginManifest {
     /// Reverse-DNS, no version: `"org.acrylius.clipboard"`.
