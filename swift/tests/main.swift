@@ -281,10 +281,33 @@ check(paused["p"].positionMs(at: pausedAt.addingTimeInterval(60)) == 10_000,
 
 // A track that ended while nobody was asking must not report a time longer
 // than itself.
-let ended = withMedia("playing", positionMs: 190_000, lengthMs: 200_000)
+let ended = withMedia("playing", positionMs: 195_000, lengthMs: 200_000)
 let endedAt = ended["p"].mediaAt ?? Date()
-check(ended["p"].positionMs(at: endedAt.addingTimeInterval(600)) == 200_000,
+check(ended["p"].positionMs(at: endedAt.addingTimeInterval(9)) == 200_000,
       "and never past the end of it")
+
+// `position` is reported, never counted — the core says so, and gives the
+// reason: a receiver that keeps counting goes on counting after the media
+// stopped somewhere it cannot see. Readings arrive every couple of seconds
+// while anyone is looking, so one this old means they have stopped coming.
+// Freezing where it was last actually seen is the honest answer; extrapolating
+// ten minutes on is inventing a position nobody reported.
+let abandoned = withMedia("playing", positionMs: 190_000, lengthMs: 200_000)
+let abandonedAt = abandoned["p"].mediaAt ?? Date()
+check(abandoned["p"].positionMs(at: abandonedAt.addingTimeInterval(600)) == 190_000,
+      "a reading nobody refreshed stops being counted forward")
+
+// The same thing said outright: the peer is gone, so the clock under the track
+// stops. This is the case that ran forever — a stream reports no length, so the
+// clamp above would never have caught it either.
+var wentAway = withMedia("playing", positionMs: 10_000, lengthMs: 0)
+let wentAwayAt = wentAway["p"].mediaAt ?? Date()
+check(wentAway["p"].positionMs(at: wentAwayAt.addingTimeInterval(5)) == 15_000,
+      "still counting while the peer is there")
+_ = wentAway.ingest(.peerUnreachable(peer: "p"))
+check(wentAway["p"].media != nil, "the track stays on screen")
+check(wentAway["p"].positionMs(at: wentAwayAt.addingTimeInterval(600)) == 10_000,
+      "but an unreachable peer's timeline stops where it was last seen")
 
 check(playing["p"].media?.systemVolume == 40, "the machine's own volume comes through")
 

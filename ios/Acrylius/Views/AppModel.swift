@@ -184,8 +184,17 @@ final class AppModel {
     ///
     /// The answer comes from what the machine reports after re-reading its own
     /// state, never from the request having been delivered.
+    ///
+    /// How long to wait is not a number chosen here. The desktop watches its own
+    /// screen locker for up to its confirm window before it answers at all, so a
+    /// budget picked independently on this side can be shorter than the machine
+    /// is allowed to take — and then a lock that worked is reported as a failure,
+    /// intermittently, depending on how quick the locker is. It was eight seconds
+    /// against a host allowed eight, leaving nothing at all for the answer to
+    /// travel back over Bluetooth. The core hands out both numbers now.
     private func awaitScreen(_ peer: FfiPeer, locked: Bool) async -> Bool {
-        let deadline = ContinuousClock.now.advanced(by: .seconds(8))
+        let budget = locked ? sessionLockBudgetMs() : sessionUnlockBudgetMs()
+        let deadline = ContinuousClock.now.advanced(by: .milliseconds(Int(budget)))
         while ContinuousClock.now < deadline {
             if catalog[peer.deviceId].session?.locked == locked { return true }
             try? await Task.sleep(for: .milliseconds(150))
@@ -200,20 +209,42 @@ final class AppModel {
     /// Every one of these is answered with the state afterwards rather than an
     /// acknowledgement, because a player may ignore a command, clamp a seek, or
     /// stop of its own accord — and only reading it back says which.
+    ///
+    /// Whether the command landed is the core's rule, asked of it rather than
+    /// decided here. Waiting for the whole state to differ was wrong in both
+    /// directions: a playing track's position moves between any two readings, so
+    /// every command looked like it had landed, while a paused one never changed
+    /// at all and nothing ever looked like it had.
     @discardableResult
     func media(_ peer: FfiPeer, _ verb: String, player: String = "", value: Int64 = 0) async -> Bool {
         let before = catalog[peer.deviceId].media
+        let beforeAt = catalog[peer.deviceId].mediaAt
         await send(
             peer,
             cap: capMedia(),
             ty: verb,
             body: encodeMediaCommand(player: player, value: value)
         )
-        // The answer replaces the state, so waiting for it to differ is waiting
-        // for the command to have landed.
-        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        let deadline = ContinuousClock.now.advanced(by: .milliseconds(Int(mediaCommandBudgetMs())))
         while ContinuousClock.now < deadline {
-            if catalog[peer.deviceId].media != before { return true }
+            let features = catalog[peer.deviceId]
+            // `mediaAt` moves on every reading, so this is "something arrived",
+            // which a comparison of the readings themselves cannot tell us.
+            if features.mediaAt != beforeAt, let now = features.media {
+                guard let before else { return true }
+                switch mediaCommandLanded(
+                    verb: verb, player: player, value: value, before: before, now: now
+                ) {
+                case true: return true
+                // A reading cannot answer this one — a seek moves a position
+                // that also moves on its own — so the reading is the answer.
+                case nil: return true
+                // Not yet. Keep waiting rather than answering: the two-second
+                // poll can land between the command and its reply, and it would
+                // be showing the state we started from.
+                case false: break
+                }
+            }
             try? await Task.sleep(for: .milliseconds(120))
         }
         return false
