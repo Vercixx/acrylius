@@ -177,6 +177,23 @@ impl Plugin for SharePlugin {
                     return Err(PluginError::BadBody);
                 }
                 let transfer = TransferId(offer.transfer);
+                // A transfer id is chosen by whoever offered it, and every
+                // device numbers its own from one — so two peers offering at the
+                // same time collide, and this map, the daemon's and the phone's
+                // are all keyed by it. Letting the second overwrite the first
+                // meant the wrong offer was answered, and one device's bytes
+                // could be written into another device's file.
+                //
+                // Refused rather than renumbered. Making the id local is the
+                // proper fix, but it would have to travel through the accept,
+                // the listener's opening hello and both hosts' tables; until it
+                // does, a refusal the sender can retry is the honest answer. Its
+                // own counter has already moved on, so a retry does not collide.
+                if let Some(existing) = self.offered.get(&transfer)
+                    && existing.peer != *peer
+                {
+                    return Err(PluginError::NotAllowed);
+                }
                 self.offered.insert(
                     transfer,
                     Incoming {
@@ -482,6 +499,40 @@ mod tests {
                     .unwrap_err(),
                 PluginError::NotAllowed
             );
+        });
+    }
+
+    #[test]
+    fn a_second_device_cannot_take_over_an_outstanding_offer_id() {
+        // Every device numbers its transfers from one, so "transfer 1" exists
+        // for all of them at once. The second offer used to replace the first in
+        // a map keyed by that number alone — so the wrong offer was answered,
+        // and the accept went to the wrong device.
+        let mut p = SharePlugin::default();
+        let first = peer();
+        let second = DeviceId::of(&[6u8; 32]);
+
+        let body = offer(10);
+        run(0, |cx| {
+            p.on_message(cx, &first, &envelope(1, CAP, "offer", &body))
+                .unwrap();
+        });
+        run(0, |cx| {
+            assert_eq!(
+                p.on_message(cx, &second, &envelope(2, CAP, "offer", &body))
+                    .unwrap_err(),
+                PluginError::NotAllowed,
+                "the id is taken, and a silent swap is worse than a refusal"
+            );
+        });
+
+        let (_, who, _) = p.pending().next().expect("the first offer stands");
+        assert_eq!(who, &first, "and it is still the device that made it");
+
+        // The same peer re-offering its own id is not a collision.
+        run(0, |cx| {
+            p.on_message(cx, &first, &envelope(3, CAP, "offer", &body))
+                .unwrap();
         });
     }
 
