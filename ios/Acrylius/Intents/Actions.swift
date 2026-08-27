@@ -58,7 +58,7 @@ enum IntentRunner {
         let runtime = try CoreRuntime.bootstrap(name: "Acrylius", store: store)
         // Retained for the whole call: `setUi` holds it weakly.
         let sink = IntentSink()
-        runtime.setUi(sink)
+        await runtime.setUi(sink)
         await runtime.add(transport: NWTransport(serviceType: serviceType(),
                                                  port: defaultPort()))
         await runtime.start()
@@ -242,7 +242,7 @@ struct RunCommandIntent: AppIntent {
             return nil
         }
         let dialog: IntentDialog
-        switch outcome??.code {
+        switch outcome?.code {
         case .some(0): dialog = "Ran \(command)."
         case .some(let code): dialog = "\(command) failed on \(pc.name) with code \(code)."
         case nil: dialog = "No answer from \(pc.name)."
