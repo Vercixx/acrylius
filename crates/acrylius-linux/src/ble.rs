@@ -169,6 +169,9 @@ struct Shared {
     /// link record to catch — and the desktop stays silently off the air. This
     /// is how [`supervise`] finds that case.
     last_central: Mutex<Option<String>>,
+    /// When the advertisement was last put back, so that bursts of departure
+    /// signals collapse into one attempt. See [`ADVERT_COOLDOWN`].
+    last_advert: Mutex<Option<std::time::Instant>>,
 }
 
 impl Shared {
@@ -251,6 +254,35 @@ async fn readvertise(conn: &zbus::Connection, shared: &Shared) -> bool {
     {
         return false;
     }
+
+    // Never over a live central. Unregistering an advertisement while a phone
+    // is connected can take the connection down with it, and a Noise handshake
+    // interrupted half way through fails on the next message with a decrypt
+    // error — which is a long way from anything that would make a person
+    // suspect the radio. Being off the air *is* the correct state while a
+    // central is connected.
+    if shared.link.lock().await.is_some() {
+        return false;
+    }
+
+    // At most one attempt per cooldown, from however many callers.
+    //
+    // Departures arrive in bursts and from several watchers at once, and each
+    // attempt sleeps 500ms before registering. Without this the bursts queued
+    // and drained into a re-registration every half second — the advertisement
+    // taken down and put back continuously, which is worse than the fault it
+    // was added to repair, and which bluetoothd eventually refused outright
+    // with "Failed to complete registration".
+    {
+        let mut last = shared.last_advert.lock().await;
+        if let Some(at) = *last
+            && at.elapsed() < ADVERT_COOLDOWN
+        {
+            return false;
+        }
+        *last = Some(std::time::Instant::now());
+    }
+
     let Ok(builder) = LeAdvertisingManagerProxy::builder(conn).path(ADAPTER) else {
         return false;
     };
@@ -282,6 +314,30 @@ async fn readvertise(conn: &zbus::Connection, shared: &Shared) -> bool {
 /// Shared by every path that can learn a central went away, because the core
 /// must be told exactly once and the transport must not keep a link nobody is
 /// on the other end of.
+/// Whether this device path is one this transport was talking to.
+///
+/// The signal watchers see *every* device on the adapter — a headset pausing,
+/// a mouse sleeping, anything at all. Acting on those was a mistake with real
+/// consequences: each one triggered a re-registration, so an unrelated pair of
+/// headphones could take the desktop's advertisement off the air.
+async fn is_ours(shared: &Shared, path: &str) -> bool {
+    if shared
+        .link
+        .lock()
+        .await
+        .as_ref()
+        .is_some_and(|l| l.device == path)
+    {
+        return true;
+    }
+    shared
+        .last_central
+        .lock()
+        .await
+        .as_deref()
+        .is_some_and(|d| d == path)
+}
+
 async fn drop_link_for(shared: &Shared, path: &str, why: &'static str) {
     let mut guard = shared.link.lock().await;
     if !guard.as_ref().is_some_and(|l| l.device == path) {
@@ -308,6 +364,12 @@ async fn drop_link_for(shared: &Shared, path: &str, why: &'static str) {
 /// bluetoothd without the cache, and bluetoothd does not drop a device object
 /// in the middle of a live connection.
 const SUPERVISE_EVERY: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The shortest gap between two attempts to put the advertisement back.
+///
+/// Slightly under [`SUPERVISE_EVERY`], so a genuine retry on the next tick is
+/// never swallowed, while a burst of departure signals collapses to one.
+const ADVERT_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(4);
 
 /// Reconcile what this transport believes with what bluetoothd reports.
 ///
@@ -857,6 +919,7 @@ impl Transport for BleTransport {
             identity: Mutex::new(Vec::new()),
             advertising: std::sync::atomic::AtomicBool::new(false),
             last_central: Mutex::new(None),
+            last_advert: Mutex::new(None),
         });
 
         // The whole tree first, then the ObjectManager over it, then register.
@@ -967,11 +1030,15 @@ impl Transport for BleTransport {
                     if still_connected != Some(false) {
                         continue;
                     }
+                    // Only for a device this transport was talking to. A
+                    // connection that failed before it ever held a link still
+                    // counts — `last_central` is set from the first callback
+                    // that names a device, well before any link exists — but a
+                    // headset disconnecting does not.
+                    if !is_ours(&shared, &path).await {
+                        continue;
+                    }
                     drop_link_for(&shared, &path, "the central disconnected").await;
-                    // Whether or not that device held our link. A connection
-                    // that failed before it ever got one still took the
-                    // advertisement down with it, which is precisely the case
-                    // that left the desktop invisible.
                     readvertise(&conn, &shared).await;
                 }
             });
@@ -1002,6 +1069,9 @@ impl Transport for BleTransport {
                         continue;
                     };
                     if !ifaces.iter().any(|i| i == "org.bluez.Device1") {
+                        continue;
+                    }
+                    if !is_ours(&shared, path.as_str()).await {
                         continue;
                     }
                     drop_link_for(&shared, path.as_str(), "bluetoothd forgot the device").await;
@@ -1173,6 +1243,7 @@ mod tests {
                 identity: Mutex::new(Vec::new()),
                 advertising: std::sync::atomic::AtomicBool::new(false),
                 last_central: Mutex::new(None),
+                last_advert: Mutex::new(None),
             }),
         };
         assert!(adv.discoverable(), "or no Flags element is emitted at all");
@@ -1237,6 +1308,7 @@ mod tests {
                 identity: Mutex::new(Vec::new()),
                 advertising: std::sync::atomic::AtomicBool::new(false),
                 last_central: Mutex::new(None),
+                last_advert: Mutex::new(None),
             })
         };
         let flags = [
@@ -1278,6 +1350,7 @@ mod tests {
             identity: Mutex::new(Vec::new()),
             advertising: std::sync::atomic::AtomicBool::new(false),
             last_central: Mutex::new(None),
+            last_advert: Mutex::new(None),
         });
         let link = shared.next_link();
         *shared.link.try_lock().unwrap() = Some(Link {
@@ -1310,6 +1383,35 @@ mod tests {
         // must not be told a link died twice.
         drop_link_for(&shared, "/org/bluez/hci0/dev_75_C3_D4_C8_ED_AB", "gone").await;
         assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn an_unrelated_bluetooth_device_is_not_mistaken_for_the_phone() {
+        // The signal watchers see every device on the adapter, and acting on
+        // all of them was expensive: a pair of headphones disconnecting
+        // re-registered the advertisement, and re-registering drops whichever
+        // central is connected. Measured on hardware as seventeen
+        // re-registrations in eight seconds over a live link, which took the
+        // phone's session down mid-handshake and surfaced on the phone as a
+        // Noise decrypt error — about as far from the cause as a symptom gets.
+        let (shared, _rx) = holding("/org/bluez/hci0/dev_4B_FD_BC_CC_54_FD");
+        assert!(is_ours(&shared, "/org/bluez/hci0/dev_4B_FD_BC_CC_54_FD").await);
+        assert!(!is_ours(&shared, "/org/bluez/hci0/dev_AD_03_00_00_36_33").await);
+    }
+
+    #[tokio::test]
+    async fn a_central_that_never_wrote_still_counts_as_ours() {
+        // A phone that connects, reads `identity` and is force-quit before it
+        // writes anything holds no link at all — but its connection still took
+        // the advertisement off the air, so its departure is still the one that
+        // has to put it back.
+        let (shared, _rx) = holding("/org/bluez/hci0/dev_4B_FD_BC_CC_54_FD");
+        *shared.link.lock().await = None;
+        *shared.last_central.lock().await =
+            Some("/org/bluez/hci0/dev_7E_46_81_5F_49_2D".to_string());
+
+        assert!(is_ours(&shared, "/org/bluez/hci0/dev_7E_46_81_5F_49_2D").await);
+        assert!(!is_ours(&shared, "/org/bluez/hci0/dev_AD_03_00_00_36_33").await);
     }
 
     #[tokio::test]
@@ -1352,6 +1454,7 @@ mod tests {
             identity: Mutex::new(Vec::new()),
             advertising: std::sync::atomic::AtomicBool::new(false),
             last_central: Mutex::new(None),
+            last_advert: Mutex::new(None),
         });
         let mut tx = TxChr {
             value: Vec::new(),
@@ -1384,6 +1487,7 @@ mod tests {
             identity: Mutex::new(Vec::new()),
             advertising: std::sync::atomic::AtomicBool::new(false),
             last_central: Mutex::new(None),
+            last_advert: Mutex::new(None),
         };
         let first = s.next_link();
         assert_eq!(first.transport(), TransportId(2));
