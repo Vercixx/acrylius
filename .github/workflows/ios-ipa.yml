@@ -77,7 +77,42 @@ jobs:
           cd ios && "$xcodegen" generate
 
       - name: Show what the project offers
-        run: xcodebuild -project ios/Acrylius.xcodeproj -list
+        run: |
+          xcodebuild -project ios/Acrylius.xcodeproj -list
+          # What Xcode accepted for caching, at the values it will build with.
+          # An unrecognised build setting is not an error — it is carried along
+          # and ignored — so this is the only place a wrong name shows up.
+          xcodebuild -project ios/Acrylius.xcodeproj -scheme Acrylius \
+            -configuration Release -sdk iphoneos \
+            COMPILATION_CACHE_ENABLE_CACHING=YES -showBuildSettings 2>/dev/null \
+            | grep -iE "COMPILATION_CACHE|COMPILE_CACHE|EXPLICIT_MODULES" \
+            || echo "no compilation-cache settings reported"
+
+      # The only kind of incremental build a fresh runner can actually use.
+      # Xcode 26 keys each compile job by a hash of its inputs — sources,
+      # flags, toolchain — and stores the result in a content-addressed store,
+      # so what carries over is decided by content and not by where the files
+      # came from. Caching DerivedData instead does nothing here: llbuild calls
+      # a file unchanged only if mtime and inode still match, and both are new
+      # for every file actions/checkout writes, so a restored build directory
+      # rebuilds everything and only costs the download.
+      #
+      # Pinned Xcode in the key, next to the Xcode_26.6 selected above. Objects
+      # from another toolchain would never be read — the toolchain is part of
+      # every hash — and this is what stops a bump from dragging them along.
+      #
+      # The run id makes every run save what it restored plus whatever it
+      # compiled that was new; the restore keys walk back to the newest run on
+      # this commit, then this branch. Caches are branch-scoped, so a tag build
+      # sees only the default branch's and should be expected to come up cold.
+      - name: Cache the Xcode compilation cache
+        uses: actions/cache@v4
+        with:
+          path: ~/Library/Developer/Xcode/CompilationCache.noindex
+          key: xcode-cas-${{ runner.os }}-26.6-${{ github.sha }}-${{ github.run_id }}
+          restore-keys: |
+            xcode-cas-${{ runner.os }}-26.6-${{ github.sha }}-
+            xcode-cas-${{ runner.os }}-26.6-
 
       - name: Build
         run: |
@@ -93,6 +128,7 @@ jobs:
           xcodebuild -project ios/Acrylius.xcodeproj -scheme Acrylius \
             -configuration Release -sdk iphoneos -derivedDataPath build \
             ONLY_ACTIVE_ARCH=NO \
+            COMPILATION_CACHE_ENABLE_CACHING=YES \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
             build 2>&1 | tee raw.log | "${pretty[@]}" || {
               echo "--- errors ---"
@@ -101,6 +137,21 @@ jobs:
               tail -200 raw.log
               exit 1
             }
+
+      - name: Say whether the cache filled
+        if: always()
+        run: |
+          cas="$HOME/Library/Developer/Xcode/CompilationCache.noindex"
+          # Warns, never fails: a cold cache still produces a correct IPA, and
+          # failing the build over it would trade a shipped artifact for a
+          # performance note. It is here because the alternative is silence —
+          # a setting Xcode ignored and a project too small to benefit look
+          # identical from the outside, and both look like success.
+          if [ -d "$cas" ]; then
+            echo "$(du -sh "$cas" | cut -f1) across $(find "$cas" -type f | wc -l | tr -d ' ') files"
+          else
+            echo "::warning::nothing at $cas — either COMPILATION_CACHE_ENABLE_CACHING was ignored or 26.6 keeps the store somewhere else; see the build settings printed above"
+          fi
 
       - name: Ad-hoc sign
         run: |
