@@ -233,6 +233,9 @@ pub enum FfiEvent {
     Connect {
         peer: String,
     },
+    /// The network changed; try every peer again. See
+    /// [`acrylius_core::vocab::LocalCommand::ReconsiderRoutes`].
+    ReconsiderRoutes,
     Disconnect {
         peer: String,
     },
@@ -364,6 +367,7 @@ impl TryFrom<FfiEvent> for cv::Event {
                 addr,
             }),
             FfiEvent::Connect { peer: p } => Self::Local(L::Connect { peer: peer(&p)? }),
+            FfiEvent::ReconsiderRoutes => Self::Local(L::ReconsiderRoutes),
             FfiEvent::Disconnect { peer: p } => Self::Local(L::Disconnect { peer: peer(&p)? }),
             FfiEvent::Revoke { peer: p } => Self::Local(L::Revoke { peer: peer(&p)? }),
             FfiEvent::PluginCommand {

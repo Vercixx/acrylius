@@ -1775,6 +1775,16 @@ impl Core {
                 }
             }
             LocalCommand::Connect { peer } => self.connect_peer(now_ms, peer, out, true),
+            LocalCommand::ReconsiderRoutes => {
+                // Not `by_hand`, deliberately. Nobody pressed anything, so a
+                // peer that cannot be reached is state and not news — and it is
+                // the automatic path that is allowed to improve on a route
+                // already carrying, which is the whole point of asking.
+                let known: Vec<DeviceId> = self.peers.keys().cloned().collect();
+                for peer in known {
+                    self.connect_peer(now_ms, peer, out, false);
+                }
+            }
             LocalCommand::Disconnect { peer } => {
                 let links: Vec<LinkId> = self
                     .links

@@ -97,6 +97,18 @@ public actor CoreRuntime {
         }
     }
 
+    /// Ask every transport to start discovery over.
+    ///
+    /// Also on the way back to the foreground, and for the same reason as
+    /// `revalidateLinks`: a suspended process notices nothing. A browse that
+    /// failed while the app was away is still failed when it comes back, and
+    /// nothing else would ever replace it — see `Transport.rediscover`.
+    public func rediscover() async {
+        for t in transports.values {
+            await t.rediscover()
+        }
+    }
+
     public func start() {
         guard pump == nil else { return }
         let (stream, continuation) = AsyncStream<FfiEvent>.makeStream(bufferingPolicy: .unbounded)

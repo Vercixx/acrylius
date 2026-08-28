@@ -39,10 +39,24 @@ public protocol Transport: AnyObject, Sendable {
     /// cannot be asked answers by doing nothing, which is why this has a
     /// default.
     func revalidate() async
+
+    /// Start discovery over, whatever state it was in.
+    ///
+    /// Discovery is set up once and then left alone, which assumes it survives
+    /// everything that happens to a phone. It does not: a browse whose network
+    /// went away can fail outright, and a failed browse stays failed. Nothing
+    /// is reported after that — so the desktop is never seen again, and since
+    /// a sighting is the only thing that moves a session from Bluetooth up to
+    /// Wi-Fi, the app sits on the slower radio with a working network in the
+    /// room.
+    ///
+    /// A transport with nothing to restart answers by doing nothing.
+    func rediscover() async
 }
 
 public extension Transport {
     func revalidate() async {}
+    func rediscover() async {}
 }
 
 /// The platform half of a plugin.

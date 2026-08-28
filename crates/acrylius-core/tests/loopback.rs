@@ -2073,6 +2073,76 @@ fn a_better_transport_is_dialled_once_while_a_worse_one_carries() {
 }
 
 #[test]
+fn the_network_coming_back_moves_a_peer_off_the_worse_radio() {
+    // Bluetooth to Wi-Fi, which is the direction with no natural trigger.
+    //
+    // Wi-Fi dying is announced — the socket fails, the path goes unviable — and
+    // the peer becomes unreachable, which every retry path already watches for.
+    // Wi-Fi *returning* announces nothing to the core at all: the peer never
+    // stopped being reachable, it is simply reachable over a radio that cannot
+    // carry a file. Only a fresh sighting moved it, and mDNS resolves a service
+    // once and then goes quiet, so a phone could sit on Bluetooth indefinitely
+    // with a working network in the room.
+    let (mut net, _a_id, b_id) = paired();
+    net.ble_transport = Some(SLOWER);
+
+    // On Bluetooth, with Wi-Fi not answering.
+    discover_via(&mut net, Side::A, Side::B, TRANSPORT, "not-listening");
+    discover_via(&mut net, Side::A, Side::B, SLOWER, "B");
+    assert_eq!(net.a.transport_for(&b_id), Some(TransportKind::BleGatt));
+
+    // Wi-Fi comes back at the address already on file. Nothing tells the core:
+    // no sighting, no link event, and the peer was reachable throughout.
+    net.local(
+        Side::A,
+        LocalCommand::SetPeerAddress {
+            peer: b_id.clone(),
+            transport: TRANSPORT,
+            addr: "B".to_string(),
+        },
+    );
+    net.dialed.clear();
+    net.wall += 1_000;
+
+    net.local(Side::A, LocalCommand::ReconsiderRoutes);
+
+    assert_eq!(
+        net.dialed,
+        vec![(TRANSPORT, "B".to_string())],
+        "the better transport was never tried"
+    );
+    assert_eq!(
+        net.a.transport_for(&b_id),
+        Some(TransportKind::UnixLoopback),
+        "Wi-Fi came back and the session stayed on Bluetooth"
+    );
+    // The Bluetooth link is left alone rather than torn down: the better link
+    // takes over by existing, and the worse one stays as the fallback it was.
+    assert_eq!(net.a.peer_state(&b_id), PeerState::Reachable);
+}
+
+#[test]
+fn reconsidering_routes_leaves_a_peer_already_on_the_best_one_alone() {
+    // The other half, and the reason this is a command rather than a timer: it
+    // fires on every network change, and a peer that has nothing better to move
+    // to must not be dialled again each time.
+    let (mut net, _a_id, b_id) = paired();
+    discover_via(&mut net, Side::A, Side::B, TRANSPORT, "B");
+    assert_eq!(net.a.peer_state(&b_id), PeerState::Reachable);
+
+    net.dialed.clear();
+    net.local(Side::A, LocalCommand::ReconsiderRoutes);
+    net.local(Side::A, LocalCommand::ReconsiderRoutes);
+
+    assert!(
+        net.dialed.is_empty(),
+        "a peer on the best route it has was dialled anyway: {:?}",
+        net.dialed
+    );
+    assert_eq!(net.a.peer_state(&b_id), PeerState::Reachable);
+}
+
+#[test]
 fn a_peer_that_could_not_be_reached_records_why_without_announcing_it() {
     // The Connect button is gone, so every dial is now automatic. That makes
     // the reason a dial failed something a screen has to be able to *ask* for,

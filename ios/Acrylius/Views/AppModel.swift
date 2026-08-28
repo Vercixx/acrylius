@@ -153,6 +153,13 @@ final class AppModel {
     /// unreachable, and the reconnect heartbeat picks it up from there.
     func cameToForeground() async {
         await runtime?.revalidateLinks()
+        // And discovery, which suspends no better than the links do. A browse
+        // that failed while the app was away stays failed, and a sighting is
+        // the only thing that moves a session from Bluetooth up to Wi-Fi.
+        await runtime?.rediscover()
+        // Then ask the core to use what it already knows. The addresses are on
+        // file; what was missing was anything to prompt a second look at them.
+        await runtime?.submit(.reconsiderRoutes)
         await refresh()
     }
 

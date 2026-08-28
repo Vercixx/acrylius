@@ -28,6 +28,11 @@ public final class NWTransport: Transport, @unchecked Sendable {
     private var dialled: [UInt64: UInt64] = [:]
     private var nextLink: UInt64 = 1
     private var browser: NWBrowser?
+    /// Watches for this phone being on a local network again. See `watchPath`.
+    private var pathWatch: NWPathMonitor?
+    /// Whether the last path we were told about was a local network, so that
+    /// only changes are acted on rather than every interface update.
+    private var onLan = false
     private let queue = DispatchQueue(label: "org.acrylius.transport")
 
     public static let maxFrame: UInt32 = 1 << 20
@@ -250,25 +255,107 @@ public final class NWTransport: Transport, @unchecked Sendable {
 
     public func discover(enable: Bool) async {
         guard enable else {
-            browser?.cancel()
-            browser = nil
+            stopWatchingPath()
+            stopBrowse()
             return
         }
-        guard browser == nil else { return }
+        startBrowse()
+        watchPath()
+    }
+
+    public func rediscover() async {
+        stopBrowse()
+        startBrowse()
+    }
+
+    /// Notice when this phone is back on a network, and act on it.
+    ///
+    /// The moment Wi-Fi returns is knowable — iOS reports the path becoming
+    /// satisfied — and it is the only signal there is for going *back up* to
+    /// the better transport. Losing Wi-Fi announces itself: the socket dies and
+    /// the peer becomes unreachable, which every retry path already watches.
+    /// Regaining it announces nothing at all, because from the core's point of
+    /// view nothing broke — the peer is reachable, just over a radio that
+    /// cannot carry a file.
+    ///
+    /// So both halves happen here: the browse is replaced, because a browse
+    /// that lived through the outage may have failed and a failed one stays
+    /// failed; and the core is asked to look again, because the address it
+    /// needs is already on file and waiting for a sighting that mDNS has no
+    /// reason to send.
+    private func watchPath() {
+        lock.lock()
+        guard pathWatch == nil else { lock.unlock(); return }
+        let m = NWPathMonitor()
+        pathWatch = m
+        lock.unlock()
+
+        m.pathUpdateHandler = { [weak self] path in
+            guard let self else { return }
+            // A local network, not merely a route to the internet. Cellular
+            // satisfies a path and reaches nothing on this one.
+            let lan = path.status == .satisfied
+                && (path.usesInterfaceType(.wifi) || path.usesInterfaceType(.wiredEthernet))
+            // Edges only. This fires on every interface change, and dialling
+            // every peer each time would be a radio a phone in a pocket cannot
+            // afford. The first callback after launch counts as an edge, which
+            // costs one browse restart and buys a route check at start-up.
+            guard self.noteLan(lan), lan else { return }
+            self.stopBrowse()
+            self.startBrowse()
+            self.fire(.reconsiderRoutes)
+        }
+        m.start(queue: queue)
+    }
+
+    /// Whether this is a change, rather than the same answer again.
+    private func noteLan(_ now: Bool) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if onLan == now { return false }
+        onLan = now
+        return true
+    }
+
+    private func stopWatchingPath() {
+        lock.lock(); let m = pathWatch; pathWatch = nil; lock.unlock()
+        m?.cancel()
+    }
+
+    private func stopBrowse() {
+        lock.lock(); let b = browser; browser = nil; lock.unlock()
+        b?.cancel()
+    }
+
+    private func startBrowse() {
+        lock.lock()
+        guard browser == nil else { lock.unlock(); return }
         let params = NWParameters()
         params.includePeerToPeer = false
         let b = NWBrowser(for: .bonjourWithTXTRecord(type: serviceType, domain: nil), using: params)
+        browser = b
+        lock.unlock()
 
         b.stateUpdateHandler = { [weak self] state in
+            switch state {
             // `.waiting` on a Bonjour browse almost always means Local Network
             // permission was declined. There is no API to query it, so this is
             // the signal we have. Say so plainly rather than reporting a
             // generic failure the user cannot act on.
-            if case let .waiting(error) = state {
+            case let .waiting(error):
                 self?.fire(.dialFailed(
                     dial: 0,
                     reason: "local network permission appears to be denied (\(error))"
                 ))
+            case .failed:
+                // Dropped, not restarted here. A browse that failed because
+                // there is no network will fail again immediately, and a
+                // handler that reacts to its own failure by trying again is a
+                // spin. Letting go is enough: the path watch above builds a new
+                // one when there is a network to build it on, and so does
+                // coming back to the foreground.
+                self?.stopBrowse()
+            default:
+                break
             }
         }
         b.browseResultsChangedHandler = { [weak self] results, _ in
@@ -290,7 +377,6 @@ public final class NWTransport: Transport, @unchecked Sendable {
                 ))
             }
         }
-        browser = b
         b.start(queue: queue)
     }
 

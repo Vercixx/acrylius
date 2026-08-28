@@ -196,6 +196,21 @@ pub enum LocalCommand {
     Connect {
         peer: DeviceId,
     },
+    /// The network changed; try every peer again from the addresses on file.
+    ///
+    /// Distinct from `Connect` in what it is allowed to do: this may dial a
+    /// peer that is *already reachable*, when a better transport has become
+    /// possible. Going the other way — Bluetooth to Wi-Fi — depends on a fresh
+    /// sighting, and a host has no way to make one happen; mDNS resolves a
+    /// service once and then says nothing. So a phone that lost Wi-Fi and got
+    /// it back stayed on Bluetooth, which cannot carry a file, with a perfectly
+    /// good network in the room.
+    ///
+    /// Host-driven rather than a heartbeat, because the moment is knowable —
+    /// iOS reports a path becoming satisfied — and dialling Wi-Fi every few
+    /// seconds on the chance it has come back is a radio a phone in a pocket
+    /// cannot afford.
+    ReconsiderRoutes,
     Disconnect {
         peer: DeviceId,
     },
