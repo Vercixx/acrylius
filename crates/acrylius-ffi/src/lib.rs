@@ -111,13 +111,25 @@ pub struct FfiPeer {
     pub name: String,
     pub platform: String,
     pub fingerprint: String,
-    pub reachable: bool,
+    /// Reachable, being reached, or not.
+    ///
+    /// Three states rather than a bool, because nothing presses Connect any
+    /// more: a peer that is mid-handshake and a peer that has given up look
+    /// identical through `reachable`, and only one of them is worth explaining
+    /// to the person holding the phone.
+    pub state: FfiPeerState,
     /// What is carrying the session, when one is up.
     ///
     /// `None` means unreachable, not unknown. Worth showing because the whole
     /// point of a second transport is that it takes over silently, and silence
     /// is indistinguishable from a thing not working.
     pub transport: Option<FfiTransportKind>,
+    /// Why the last attempt to reach it ended without a session.
+    ///
+    /// Only ever set alongside `Unreachable`; a peer still being dialled has
+    /// nothing to explain yet. Read at draw time rather than delivered as an
+    /// event, so a device coming up normally does not flicker an error.
+    pub trouble: Option<String>,
 }
 
 #[derive(uniffi::Object)]
@@ -275,8 +287,13 @@ impl AcryliusCore {
                     name: p.name.clone(),
                     platform: p.platform.clone(),
                     fingerprint: p.fingerprint()?.to_string(),
-                    reachable: core.peer_state(&id) == PeerState::Reachable,
+                    state: core.peer_state(&id).into(),
                     transport: core.transport_for(&id).map(Into::into),
+                    // Paired with the state deliberately: a reason kept past
+                    // the reconnection it explains is worse than none.
+                    trouble: (core.peer_state(&id) == PeerState::Unreachable)
+                        .then(|| core.dial_trouble(&id).map(str::to_string))
+                        .flatten(),
                 })
             })
             .collect()

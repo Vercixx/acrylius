@@ -196,6 +196,18 @@ pub struct Core {
     /// The flag is whether a person asked, which decides whether failing to
     /// reach them is worth saying out loud.
     pending_peer_dials: BTreeMap<DialToken, PeerDial>,
+    /// Why the last attempt to reach a peer ended without a session.
+    ///
+    /// State, deliberately, and not a `UiEvent`. An automatic dial runs on
+    /// every sighting, so announcing each exhausted attempt would make a device
+    /// that is coming up perfectly normally flicker an error — the same reason
+    /// `try_next_route` only says "unreachable" out loud when a person asked.
+    /// A screen showing a peer as not connected wants to say *why* at the
+    /// moment it draws, which is a question about the present, not news.
+    ///
+    /// Bounded by the number of paired peers, and dropped when one is reached
+    /// or forgotten.
+    dial_trouble: BTreeMap<DeviceId, String>,
     plugins: Vec<Box<dyn Plugin>>,
     /// Which plugin asked for an outstanding effect.
     effect_owner: BTreeMap<EffectToken, usize>,
@@ -279,6 +291,16 @@ impl Core {
             .map(|a| a.sas.as_str())
     }
 
+    /// Why the last attempt to reach this peer ended without a session, if it
+    /// has not been reached since.
+    ///
+    /// Only meaningful alongside [`PeerState::Unreachable`]. A peer that is
+    /// connecting has an attempt in flight and nothing to explain yet.
+    #[must_use]
+    pub fn dial_trouble(&self, peer: &DeviceId) -> Option<&str> {
+        self.dial_trouble.get(peer).map(String::as_str)
+    }
+
     #[must_use]
     pub fn peer_state(&self, peer: &DeviceId) -> PeerState {
         for st in self.links.values() {
@@ -309,7 +331,7 @@ impl Core {
             Event::DialFailed { dial, reason } => {
                 self.pending_pair_dials.remove(&dial);
                 if let Some(pending) = self.pending_peer_dials.remove(&dial) {
-                    self.try_next_route(pending, &mut out);
+                    self.try_next_route(pending, &reason, &mut out);
                 } else {
                     out.ui(UiEvent::PairingFailed { reason });
                 }
@@ -852,6 +874,10 @@ impl Core {
                 can_recv,
             })),
         );
+        // Whatever went wrong getting here is history the moment it works.
+        // Leaving it would have a connected peer explain a failure it no
+        // longer has.
+        self.dial_trouble.remove(&peer);
         out.ui(UiEvent::PeerReachable {
             peer: peer.clone(),
             name,
@@ -1273,7 +1299,7 @@ impl Core {
     /// time. The second used to go nowhere at all — the routes were dropped the
     /// moment the socket opened, on the assumption that a connected socket was a
     /// reached peer.
-    fn try_next_route(&mut self, pending: PeerDial, out: &mut Outcome) {
+    fn try_next_route(&mut self, pending: PeerDial, why: &str, out: &mut Outcome) {
         let (peer, mut routes, by_hand) = pending;
         // Something else got there while this was failing. Neither a further
         // dial nor a death notice would be true.
@@ -1284,6 +1310,11 @@ impl Core {
         // because the first failed would be wrong, and wrong in the direction a
         // user cannot diagnose.
         if routes.is_empty() {
+            // Every route is spent, so this is the answer for now and worth
+            // keeping. Recorded whoever asked: a screen that draws a peer as
+            // not connected wants a reason regardless of what started the
+            // attempt, and there is no longer a button to press to produce one.
+            self.dial_trouble.insert(peer.clone(), why.to_string());
             // Only when a person asked. An automatic attempt runs on every
             // sighting, and one route can easily be seen before a working one
             // is — announcing that would make a device flicker "unreachable"
@@ -1357,21 +1388,24 @@ impl Core {
         // Best first; the rest stay behind it for `DialFailed` to walk.
         let first = (!routes.is_empty()).then(|| routes.remove(0));
         let Some((transport, addr)) = first else {
+            // "Unreachable" would be true but useless. Not knowing where a
+            // device is differs from failing to reach it, and only one of
+            // those the user can do something about.
+            //
+            // No mention of a command-line flag: this reaches a phone screen as
+            // often as a terminal, and advice about `--addr` there is advice
+            // about a thing that is not on the device reading it.
+            const NOWHERE: &str = "Nothing has found it yet — it may be switched off, on \
+                                   another network, or a device that only ever dials out, \
+                                   which is never discovered at all.";
+            // Kept whoever asked. This is the most common reason a peer sits
+            // there not connecting, and the screen saying so is the only place
+            // it now gets explained.
+            self.dial_trouble.insert(peer.clone(), NOWHERE.to_string());
             if by_hand {
-                // "Unreachable" would be true but useless. Not knowing where a
-                // device is differs from failing to reach it, and only one of
-                // those the user can do something about.
                 out.ui(UiEvent::Error {
                     code: ErrorCode::NotAllowed,
-                    detail: format!(
-                        // No mention of a command-line flag: this reaches a
-                        // phone screen as often as a terminal, and advice about
-                        // `--addr` there is advice about a thing that is not on
-                        // the device reading it.
-                        "no address known for {peer}. Nothing has found it yet — it may \
-                         be switched off, on another network, or a device that only ever \
-                         dials out, which is never discovered at all."
-                    ),
+                    detail: format!("no address known for {peer}. {NOWHERE}"),
                 });
                 out.ui(UiEvent::PeerUnreachable { peer });
             }
@@ -1690,6 +1724,7 @@ impl Core {
         // peer we have decided to forget.
         self.peers.remove(peer);
         self.addrs.remove(peer);
+        self.dial_trouble.remove(peer);
         out.push(Action::Persist {
             key: format!("peer/{peer}"),
             value: None,
@@ -1814,7 +1849,7 @@ impl Core {
             if let Some(LinkState::Handshaking(h)) = was
                 && let Some(pending) = h.fallback
             {
-                self.try_next_route(pending, out);
+                self.try_next_route(pending, "it answered, then stopped part way", out);
             }
         }
 
@@ -1842,7 +1877,7 @@ impl Core {
             // with the alternatives still untried and nobody told.
             Some(LinkState::Handshaking(h)) => {
                 if let Some(pending) = h.fallback {
-                    self.try_next_route(pending, out);
+                    self.try_next_route(pending, "the connection closed before it opened", out);
                 }
                 return;
             }
@@ -2055,6 +2090,7 @@ impl CoreBuilder {
             pairing: None,
             pending_pair_dials: BTreeMap::new(),
             pending_peer_dials: BTreeMap::new(),
+            dial_trouble: BTreeMap::new(),
             plugins,
             effect_owner: BTreeMap::new(),
             bulk_owner: BTreeMap::new(),

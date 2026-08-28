@@ -24,6 +24,33 @@ pub enum FfiTransportKind {
     Custom { name: String },
 }
 
+// ----------------------------------------------------------------- peer state
+
+/// Whether a peer can be reached, is being reached, or cannot be.
+///
+/// The core has modelled all three since M0; the FFI used to flatten them to
+/// `reachable: bool` and throw `Connecting` away. That was survivable while a
+/// Connect button existed, because a person who pressed it knew an attempt was
+/// running. With dialling entirely automatic, the difference between "trying"
+/// and "gave up" is the whole of what a screen has to say.
+#[derive(uniffi::Enum, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FfiPeerState {
+    Unreachable,
+    Connecting,
+    Reachable,
+}
+
+impl From<acrylius_core::peer::PeerState> for FfiPeerState {
+    fn from(s: acrylius_core::peer::PeerState) -> Self {
+        use acrylius_core::peer::PeerState as P;
+        match s {
+            P::Unreachable => Self::Unreachable,
+            P::Connecting => Self::Connecting,
+            P::Reachable => Self::Reachable,
+        }
+    }
+}
+
 /// The direction the core does not need but a UI does: what is carrying a
 /// session, so a person can see which one took over.
 impl From<cl::TransportKind> for FfiTransportKind {

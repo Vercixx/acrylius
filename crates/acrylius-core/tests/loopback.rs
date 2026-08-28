@@ -1646,6 +1646,69 @@ fn a_peer_with_no_address_explains_itself() {
             if detail.contains("no address known"))),
         "it should say it does not know where the device is, not merely that it is unreachable"
     );
+    assert!(
+        net.b
+            .dial_trouble(&a_id)
+            .is_some_and(|w| w.contains("Nothing has found it yet")),
+        "and a screen drawing that peer must be able to read the same reason"
+    );
+}
+
+#[test]
+fn a_peer_that_could_not_be_reached_records_why_without_announcing_it() {
+    // The Connect button is gone, so every dial is now automatic. That makes
+    // the reason a dial failed something a screen has to be able to *ask* for,
+    // rather than something it hears about: an automatic attempt runs on every
+    // sighting, and announcing each exhausted one would flicker an error at a
+    // device that is coming up perfectly normally.
+    let (mut net, _a_id, b_id) = paired();
+
+    // Seen, but not where the harness answers. One route, and it fails.
+    discover_via(&mut net, Side::A, Side::B, TRANSPORT, "nowhere");
+
+    assert_eq!(net.a.peer_state(&b_id), PeerState::Unreachable);
+    assert!(
+        net.a
+            .dial_trouble(&b_id)
+            .is_some_and(|w| w.contains("nothing is listening at nowhere")),
+        "the reason the dial failed is what the screen has to show"
+    );
+    assert!(
+        !net.saw(Side::A, |e| matches!(e, UiEvent::PeerUnreachable { .. })),
+        "nobody asked for this attempt, so it is state and not news"
+    );
+}
+
+#[test]
+fn reaching_a_peer_forgets_what_went_wrong_before() {
+    let (mut net, _a_id, b_id) = paired();
+    discover_via(&mut net, Side::A, Side::B, TRANSPORT, "nowhere");
+    assert!(net.a.dial_trouble(&b_id).is_some(), "the failure is recorded");
+
+    // And now it turns up somewhere that answers.
+    discover(&mut net, Side::A, Side::B);
+
+    assert_eq!(net.a.peer_state(&b_id), PeerState::Reachable);
+    assert_eq!(
+        net.a.dial_trouble(&b_id),
+        None,
+        "a connected peer must not go on explaining a failure it no longer has"
+    );
+}
+
+#[test]
+fn forgetting_a_peer_forgets_why_it_would_not_connect() {
+    let (mut net, _a_id, b_id) = paired();
+    discover_via(&mut net, Side::A, Side::B, TRANSPORT, "nowhere");
+    assert!(net.a.dial_trouble(&b_id).is_some());
+
+    net.local(Side::A, LocalCommand::Revoke { peer: b_id.clone() });
+
+    assert_eq!(
+        net.a.dial_trouble(&b_id),
+        None,
+        "a forgotten peer leaves nothing behind, including why it would not connect"
+    );
 }
 
 #[test]
