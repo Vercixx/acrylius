@@ -152,14 +152,23 @@ public final class NWTransport: Transport, @unchecked Sendable {
     /// which keepalive alone does not notice because the connection is not
     /// idle.
     private static var tcp: NWParameters {
-        let options = NWProtocolTCP.Options()
+        // `NWParameters.tcp` and then reach into its stack, rather than
+        // building parameters from scratch. Constructing them fresh means
+        // opting out of every default the convenience carries — interface
+        // selection, path policy, how a Bonjour endpoint is resolved — and
+        // those defaults are why dialling worked. Losing them stopped the app
+        // connecting over Wi-Fi at all.
+        let params = NWParameters.tcp
+        guard let options = params.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options
+        else {
+            return params
+        }
         let budget = Int(deadPeerMs() / 1000)
         options.enableKeepalive = true
-        options.keepaliveIdle = budget / 2
+        options.keepaliveIdle = max(budget / 2, 1)
         options.keepaliveInterval = max(budget / 4, 1)
         options.keepaliveCount = 2
-        options.connectionDropTime = budget
-        return NWParameters(tls: nil, tcp: options)
+        return params
     }
 
     public func send(link: UInt64, msg: Data) async {
@@ -185,11 +194,24 @@ public final class NWTransport: Transport, @unchecked Sendable {
             lock.lock(); defer { lock.unlock() }
             return connections.map { ($0.key, $0.value) }
         }()
-        for (link, c) in held where c.state != .ready {
-            // `retire` is the claim: only the caller who removes it reports,
-            // so this cannot race the state handler into a double report.
-            retire(link, .transport(detail: "the connection did not survive being backgrounded"))?
-                .cancel()
+        for (link, c) in held {
+            // Only the states that are over.
+            //
+            // `!= .ready` was too much: `.preparing` is a dial in flight and
+            // `.waiting` is one the system intends to retry, and retiring
+            // those killed connections that were about to work — including,
+            // at launch, the very first one. A connection that is still trying
+            // is not a link that died while the app was away.
+            switch c.state {
+            case .failed, .cancelled:
+                // `retire` is the claim: only the caller who removes it
+                // reports, so this cannot race the state handler into
+                // reporting the same link twice.
+                retire(link, .transport(detail: "the connection did not survive the background"))?
+                    .cancel()
+            default:
+                break
+            }
         }
     }
 

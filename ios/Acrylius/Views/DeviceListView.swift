@@ -43,7 +43,16 @@ struct DeviceListView: View {
                                 PeerRow(peer: peer)
                             }
                             .swipeActions {
-                                Button("Forget", role: .destructive) { forgetting = peer }
+                                Button("Forget", role: .destructive) {
+                                    // Next runloop, not this one. Presenting a
+                                    // modal in the same frame as the swipe
+                                    // action makes the row snap shut instead
+                                    // of sliding — the swipe's own close
+                                    // animation is cut off by the
+                                    // presentation. Letting the row finish
+                                    // first costs nothing anybody can measure.
+                                    Task { @MainActor in forgetting = peer }
+                                }
                             }
                         }
                     }
