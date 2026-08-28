@@ -15,6 +15,31 @@
 import PhotosUI
 import SwiftUI
 
+/// A photo or video as the picker hands it over, name and all.
+///
+/// Loading it as `Data` gives bytes and nothing else, so a name had to be
+/// invented — every photo went out as `photo.<ext>`, with the extension guessed
+/// from `supportedContentTypes.first`. Generic, and not reliably even right: the
+/// picker may hand over something other than the original, so a photo could
+/// arrive called `.heic` with JPEG inside it, and the far end decides what a
+/// file is by its extension.
+///
+/// A file representation keeps the two together. The name is the one the item
+/// actually has — `IMG_0123.HEIC`, `IMG_0124.MOV` — and the bytes are the ones
+/// that name describes.
+private struct PickedMedia: Transferable {
+    let file: FileOutbox.Outgoing
+
+    static var transferRepresentation: some TransferRepresentation {
+        FileRepresentation(importedContentType: .item) { received in
+            // Copied here rather than after returning: the received file is
+            // removed as soon as this closure ends, and a transfer outlives the
+            // tap that started it by however long the file takes.
+            PickedMedia(file: try FileOutbox.fromPicked(received.file))
+        }
+    }
+}
+
 struct SendFileSection: View {
     @Environment(AppModel.self) private var model
     let peer: FfiPeer
@@ -53,16 +78,13 @@ struct SendFileSection: View {
         .onChange(of: photo) { _, item in
             guard let item else { return }
             Task {
-                // A photo is not a file until it is written out, and the picker
-                // hands over bytes rather than somewhere to read them from.
-                guard let data = try? await item.loadTransferable(type: Data.self) else {
+                guard let picked = try? await item.loadTransferable(type: PickedMedia.self)
+                else {
                     model.lastError = "That photo could not be read."
                     photo = nil
                     return
                 }
-                let name = item.supportedContentTypes.first?.preferredFilenameExtension
-                    .map { "photo.\($0)" } ?? "photo.jpg"
-                offer { try FileOutbox.fromData(data, suggestedName: name) }
+                offer { picked.file }
                 photo = nil
             }
         }

@@ -92,23 +92,12 @@ public actor FileOutbox {
             temporary: true)
     }
 
-    /// Write bytes a photo picker handed over, which are not a file yet.
-    public nonisolated static func fromData(
-        _ data: Data, suggestedName: String
-    ) throws -> Outgoing {
-        let copy = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: copy, withIntermediateDirectories: true)
-        let destination = copy.appendingPathComponent(
-            suggestedName.isEmpty ? "photo.jpg" : suggestedName)
-        try data.write(to: destination, options: .atomic)
-        return Outgoing(
-            url: destination,
-            name: destination.lastPathComponent,
-            size: UInt64(data.count),
-            mime: mimeType(for: destination),
-            temporary: true)
-    }
+    // `fromData` used to live here, taking bytes and a name made up by the
+    // caller because the photo picker had handed over one and not the other.
+    // Every photo went out as `photo.<ext>`. A picker item can be loaded as a
+    // file instead, which arrives with its own name, so there is nothing left
+    // that needs to invent one — and a function that takes a name on trust is
+    // an invitation to invent one again.
 }
 
 /// A content type for the offer, from the file's own extension.
