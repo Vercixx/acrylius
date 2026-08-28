@@ -1532,6 +1532,9 @@ impl Core {
                 self.bulk_wait.insert(transfer, now_ms + BULK_DIAL_WAIT_MS);
                 out.push(Action::BulkListen {
                     transfer,
+                    // `numbered` is the offerer's, which for a listen is the
+                    // peer's — the same number the dialer will greet us with.
+                    offered_as: numbered,
                     key,
                     expect_bytes,
                 });

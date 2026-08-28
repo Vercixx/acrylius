@@ -29,6 +29,9 @@ struct Incoming {
     /// transfer is already being read.
     listening: Option<Listening>,
     connected: Option<Accepted>,
+    /// The number the sender greets us with, which is not the one this map is
+    /// keyed by. See `Action::BulkListen`.
+    offered_as: u64,
 }
 
 pub struct FileBulk {
@@ -170,6 +173,7 @@ impl BulkHost for FileBulk {
     async fn listen(
         &self,
         transfer: TransferId,
+        offered_as: u64,
         key: Vec<u8>,
         expect_bytes: u64,
     ) -> anyhow::Result<String> {
@@ -194,6 +198,7 @@ impl BulkHost for FileBulk {
                 key,
                 listening: Some(listening),
                 connected: None,
+                offered_as,
             },
         );
         Ok(endpoint)
@@ -202,17 +207,23 @@ impl BulkHost for FileBulk {
     async fn accept(&self, transfer: TransferId) -> anyhow::Result<()> {
         // Taken out of the map, because a listener can only be accepted on
         // once and leaving it there would let a second call wait forever.
-        let listening = {
+        let (listening, offered_as) = {
             let mut map = self.incoming.lock().expect("poisoned");
-            map.get_mut(&transfer)
-                .ok_or_else(|| anyhow::anyhow!("nothing listening for {}", transfer.0))?
+            let entry = map
+                .get_mut(&transfer)
+                .ok_or_else(|| anyhow::anyhow!("nothing listening for {}", transfer.0))?;
+            let offered_as = entry.offered_as;
+            let listening = entry
                 .listening
                 .take()
-                .ok_or_else(|| anyhow::anyhow!("already accepted {}", transfer.0))?
+                .ok_or_else(|| anyhow::anyhow!("already accepted {}", transfer.0))?;
+            (listening, offered_as)
         };
         // Awaited with nothing locked. This is the wait that lasts, and holding
         // the map across it would stop every other transfer on the machine.
-        let accepted = listening.accept(transfer.0).await?;
+        // Against the sender's number, never ours: the greeting is written by
+        // the dialer, and a dialer knows only its own numbering.
+        let accepted = listening.accept(offered_as).await?;
         let mut map = self.incoming.lock().expect("poisoned");
         map.get_mut(&transfer)
             .ok_or_else(|| anyhow::anyhow!("{} was cancelled while waiting", transfer.0))?
@@ -382,7 +393,11 @@ mod tests {
     async fn listening_for_an_offer_nobody_made_is_refused() {
         // A key without an offer is a transfer this device never agreed to.
         let b = bulk_in("acr-files-c");
-        assert!(b.listen(TransferId(42), vec![0u8; 32], 10).await.is_err());
+        assert!(
+            b.listen(TransferId(42), 42, vec![0u8; 32], 10)
+                .await
+                .is_err()
+        );
         let _ = std::fs::remove_dir_all(b.dir());
     }
 
@@ -401,16 +416,27 @@ mod tests {
                 mime: String::new(),
             },
         );
+        // Numbered 7 here and 3 by the sender, which is the ordinary case: a
+        // receiver mints its own id, and the greeting on the socket carries the
+        // sender's. Checking the greeting against ours instead rejected the one
+        // connection this listener was waiting for, and the sender saw the
+        // socket close on it — every file, both directions. Under matching
+        // numbers this test passes either way, which is how it got out.
         let key = vec![7u8; 32];
-        let endpoint = b.listen(TransferId(7), key.clone(), 4).await.unwrap();
+        let endpoint = b.listen(TransferId(7), 3, key.clone(), 4).await.unwrap();
         assert_eq!(b.pending().len(), 1, "waiting on a decision");
 
         let source = b.dir().join("source.bin");
         std::fs::write(&source, b"data").unwrap();
-        let sending = tokio::spawn(async move { bulk::send(7, &endpoint, &key, &source).await });
+        let sending = tokio::spawn(async move { bulk::send(3, &endpoint, &key, &source).await });
         b.accept(TransferId(7)).await.unwrap();
         b.receive(TransferId(7)).await.unwrap();
         sending.await.unwrap().unwrap();
+        assert_eq!(
+            std::fs::read(b.landed(TransferId(7)).expect("it landed")).unwrap(),
+            b"data",
+            "the bytes have to arrive, not merely the negotiation"
+        );
 
         assert!(b.pending().is_empty(), "answered, so no longer waiting");
         let _ = std::fs::remove_dir_all(b.dir());
@@ -428,7 +454,7 @@ mod tests {
                 mime: String::new(),
             },
         );
-        b.listen(TransferId(1), vec![0u8; 32], 4).await.unwrap();
+        b.listen(TransferId(1), 1, vec![0u8; 32], 4).await.unwrap();
         let dest = b.destination(TransferId(1)).unwrap();
         assert_eq!(dest.parent(), Some(b.dir()), "inside the directory, always");
         assert_eq!(dest.file_name().unwrap(), "escape.txt");

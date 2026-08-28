@@ -34,9 +34,15 @@ pub type UiSink = mpsc::UnboundedSender<UiEvent>;
 #[async_trait::async_trait]
 pub trait BulkHost: Send + Sync + 'static {
     /// Somewhere for the far end to connect, for this transfer.
+    ///
+    /// `offered_as` is the number the *sender* uses, and the only one it will
+    /// put in its greeting. Keep the listener under `transfer`, which is what
+    /// everything else here is keyed by, and check the greeting against
+    /// `offered_as`.
     async fn listen(
         &self,
         transfer: TransferId,
+        offered_as: u64,
         key: Vec<u8>,
         expect_bytes: u64,
     ) -> anyhow::Result<String>;
@@ -295,6 +301,7 @@ impl Runtime {
             }
             Action::BulkListen {
                 transfer,
+                offered_as,
                 key,
                 expect_bytes,
             } => {
@@ -304,7 +311,7 @@ impl Runtime {
                 };
                 let back = self.events_tx.clone();
                 let task = tokio::spawn(async move {
-                    match bulk.listen(transfer, key, expect_bytes).await {
+                    match bulk.listen(transfer, offered_as, key, expect_bytes).await {
                         Ok(endpoint) => {
                             let _ = back.send(Event::BulkListening { transfer, endpoint });
                             // Accepting blocks until the far end connects, so it

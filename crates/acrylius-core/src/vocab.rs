@@ -438,6 +438,14 @@ pub enum Action {
     /// silent.
     BulkListen {
         transfer: TransferId,
+        /// What the *sender* calls this transfer, which is a different number.
+        ///
+        /// The greeting on the bulk socket is written by the dialer, and a
+        /// dialer only knows its own numbering — so this, not `transfer`, is
+        /// what a listener must check that greeting against. Getting it wrong
+        /// does not fail politely: the listener rejects the one connection it
+        /// was waiting for, and the sender sees the socket close on it.
+        offered_as: u64,
         /// Derived from the session. The core is the only thing that knows the
         /// session secret; the host gets a scoped, single-use key and nothing
         /// else.

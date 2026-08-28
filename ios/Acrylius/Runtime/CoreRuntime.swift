@@ -228,7 +228,7 @@ public actor CoreRuntime {
                 await outbox.forget(transfer)
             }
 
-        case let .bulkListen(transfer, key, expectBytes):
+        case let .bulkListen(transfer, offeredAs, key, expectBytes):
             // Somebody on this phone has accepted a file. Bind first and answer
             // with the endpoint, then block on the socket in a task of its own
             // — the same shape as sending, and for the same reason: a transfer
@@ -270,7 +270,9 @@ public actor CoreRuntime {
                     // when the computer actually dialled, and the core needs
                     // that: it gives up on a sender that never arrives, and must
                     // never give up on a file that is still coming.
-                    try listener.accept(transfer: transfer)
+                    // The sender's number, not ours: it writes the greeting and
+                    // knows only its own numbering.
+                    try listener.accept(transfer: offeredAs)
                     await self?.submit(.bulkStarted(transfer: transfer))
                     let got = try listener.receive(
                         key: key, expectBytes: expectBytes, path: path)

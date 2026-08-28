@@ -627,6 +627,10 @@ pub enum FfiAction {
     /// decide whether it wants it before a byte of it exists on disk.
     BulkListen {
         transfer: u64,
+        /// What the sender calls this transfer, and the only number it will put
+        /// in its greeting. Keep the listener under `transfer`; check the
+        /// greeting against this.
+        offered_as: u64,
         key: Vec<u8>,
         expect_bytes: u64,
     },
@@ -709,10 +713,12 @@ impl From<cv::Action> for FfiAction {
             // the effect, which is the check that keeps the two in step.
             cv::Action::BulkListen {
                 transfer,
+                offered_as,
                 key,
                 expect_bytes,
             } => Self::BulkListen {
                 transfer: transfer.0,
+                offered_as,
                 key,
                 expect_bytes,
             },
