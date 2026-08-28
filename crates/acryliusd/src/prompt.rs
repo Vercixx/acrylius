@@ -69,7 +69,7 @@ impl Prompter {
             // No buttons on this desktop, so the notification has to say what
             // to type instead of pretending to be answerable.
             format!(
-                "{} · {}\nRun: acryliusctl accept {}",
+                "{} · {}\nRun: acryliusctl file accept {}",
                 offer.name,
                 human(offer.size),
                 offer.transfer
@@ -181,7 +181,7 @@ impl Prompter {
             detail: String::new(),
         })
         .unwrap_or_default();
-        // The same request `acryliusctl accept` makes. A button and a command
+        // The same request `acryliusctl file accept` makes. A button and a command
         // are two ways to say one thing, not two things.
         let _ = self.events.send(Event::Local(LocalCommand::Plugin {
             peer: acrylius_core::proto::ids::DeviceId::parse(&peer)

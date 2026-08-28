@@ -61,7 +61,7 @@ impl TransferId {
     /// [`MINTED_HERE`] is there so an id minted by the core cannot collide with
     /// one a host numbered itself, which matters because a transfer is keyed by
     /// this alone — a collision cancels the wrong one. It is also nineteen
-    /// digits, and `acryliusctl accept` is a number a person reads off a screen
+    /// digits, and `acryliusctl file accept` is a number a person reads off a screen
     /// and retypes. Which half of the range an id came from is not something
     /// they need to know, so it is not shown.
     #[must_use]

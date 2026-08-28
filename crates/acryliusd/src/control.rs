@@ -14,132 +14,12 @@ use std::path::{Path, PathBuf};
 
 use acrylius_core::proto::ids::DeviceId;
 use acrylius_core::vocab::{Event, LocalCommand, UiEvent};
-use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, mpsc};
 
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "cmd", rename_all = "kebab-case")]
-pub enum Request {
-    Status,
-    /// Open a pairing window. Reachable only here.
-    Pair {
-        code: Option<String>,
-    },
-    Approve,
-    Deny,
-    Devices,
-    Revoke {
-        device: String,
-    },
-    Connect {
-        device: String,
-        addr: Option<String>,
-    },
-    Ping {
-        device: String,
-    },
-    /// Dial someone else's open pairing window.
-    PairWith {
-        addr: String,
-        code: String,
-    },
-    /// Ask a peer to lock, unlock, or describe its session.
-    Session {
-        device: String,
-        action: String,
-    },
-    /// Read a peer's clipboard, or push ours to it.
-    Clipboard {
-        device: String,
-        push: Option<String>,
-    },
-    Media {
-        device: String,
-        action: String,
-        player: Option<String>,
-        value: Option<i64>,
-    },
-    /// What a peer is willing to run.
-    Commands {
-        device: String,
-    },
-    /// Run one of them.
-    Run {
-        device: String,
-        id: String,
-    },
-    /// Offer a file to a peer.
-    Send {
-        device: String,
-        path: String,
-    },
-    /// Offers made to this machine that nobody has answered.
-    Offers,
-    /// Answer one.
-    Answer {
-        transfer: u64,
-        accept: bool,
-    },
-    /// Ask a peer to wake a third machine.
-    Wake {
-        device: String,
-        mac: String,
-    },
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub struct Status {
-    pub name: String,
-    pub device_id: String,
-    pub fingerprint: String,
-    pub port: u16,
-    pub peers: usize,
-    pub caps_in: Vec<String>,
-    pub caps_out: Vec<String>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub struct Device {
-    pub device_id: String,
-    pub name: String,
-    pub platform: String,
-    pub fingerprint: String,
-    pub reachable: bool,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "kebab-case")]
-pub enum Response {
-    Ok,
-    Status(Status),
-    /// A struct variant, not `Devices(Vec<Device>)`. serde's internally-tagged
-    /// representation cannot encode a newtype variant wrapping a sequence, and
-    /// it fails at serialisation time, so the wrapper form compiled fine and
-    /// silently closed the connection with no reply.
-    Devices {
-        devices: Vec<Device>,
-    },
-    /// Anything the core wanted a human to see, forwarded verbatim.
-    Event {
-        text: String,
-    },
-    /// A device is waiting on a human. Sent instead of `Event` for the short
-    /// authentication string, because it is the one event that needs an answer
-    /// — the client can then put up its own prompt rather than print prose and
-    /// leave the operator to work out what to run next.
-    Confirm {
-        name: String,
-        fingerprint: String,
-        sas: String,
-    },
-    Error {
-        message: String,
-    },
-}
+// One definition, shared with the CLI. See `crate::ipc`.
+pub use acryliusd::ipc::{Command, Device, Player, Report, Request, Response, Status};
 
 /// A live control socket. Unlinked on drop, but only if we are the instance
 /// that bound it.
@@ -212,7 +92,7 @@ fn render(e: &UiEvent) -> String {
             fingerprint,
             sas,
         } => format!(
-            "{name} wants to pair\n  fingerprint {fingerprint}\n  code on both screens: {sas}\n  run `acryliusctl approve` if they match"
+            "{name} wants to pair\n  fingerprint {fingerprint}\n  code on both screens: {sas}\n  run `acryliusctl pair approve` if they match"
         ),
         UiEvent::PairingComplete { peer, name } => format!("paired with {name} ({peer})"),
         UiEvent::PairingFailed { reason } => format!("pairing failed: {reason}"),
@@ -892,8 +772,8 @@ async fn plugin_request(
         Ok(Some(Answer::Reply(ty, body))) => {
             write(
                 wr,
-                &Response::Event {
-                    text: describe(cap, &ty, &body),
+                &Response::Report {
+                    report: report(cap, &ty, &body),
                 },
             )
             .await
@@ -924,130 +804,120 @@ async fn plugin_request(
 ///
 /// The core keeps bodies opaque, which is the right call for routing and the
 /// wrong one for a terminal, so decoding happens here at the edge.
-fn describe(cap: &str, ty: &str, body: &[u8]) -> String {
+/// Decode a peer's answer into data. Wording it is the CLI's job.
+///
+/// This used to return a finished `String`, which is exactly why there was no
+/// `--json` to add: the numbers were decoded here and thrown away one process
+/// before anything could have used them.
+fn report(cap: &str, ty: &str, body: &[u8]) -> Report {
     use acrylius_core::plugins::{clipboard, command, media, session};
     use acrylius_core::proto::envelope::ErrorBody;
 
     if ty == "err" {
         return match minicbor::decode::<ErrorBody>(body) {
-            Ok(e) => format!("refused: {} ({})", e.message, e.code),
-            Err(_) => "refused".to_string(),
+            Ok(e) => Report::Refused {
+                code: e.code.to_string(),
+                message: e.message.to_string(),
+            },
+            Err(_) => Report::Refused {
+                code: "unknown".to_string(),
+                message: "refused".to_string(),
+            },
         };
     }
     if cap == session::CAP {
         if let Ok(s) = minicbor::decode::<session::SessionState>(body) {
-            return format!(
-                "session {} ({}) is {}",
-                s.session_id,
-                s.kind,
-                if s.locked { "locked" } else { "unlocked" }
-            );
+            return Report::Session {
+                session_id: s.session_id.to_string(),
+                kind: s.kind.to_string(),
+                locked: s.locked,
+            };
         }
         if let Ok(o) = minicbor::decode::<session::SessionOutcome>(body) {
-            return format!(
-                "session {} was {} and is now {}",
-                o.session_id,
-                if o.was_locked { "locked" } else { "unlocked" },
-                if o.locked { "locked" } else { "unlocked" }
-            );
+            return Report::SessionChanged {
+                session_id: o.session_id.to_string(),
+                was_locked: o.was_locked,
+                locked: o.locked,
+            };
         }
     }
     if cap == clipboard::CAP
         && let Ok(c) = minicbor::decode::<clipboard::ClipboardSet>(body)
     {
-        return String::from_utf8_lossy(&c.data).into_owned();
+        return Report::Clipboard {
+            text: String::from_utf8_lossy(&c.data).into_owned(),
+        };
     }
     if cap == acrylius_core::plugins::share::CAP {
         use acrylius_core::plugins::share::{Finished, Offer};
         if let Ok(o) = minicbor::decode::<Offer>(body) {
-            return format!("{} offers {} ({})", ty, o.name, human(o.size));
+            return Report::Offer {
+                ty: ty.to_string(),
+                name: o.name.to_string(),
+                size: o.size,
+            };
         }
         if let Ok(f) = minicbor::decode::<Finished>(body) {
             // The same number the offer was listed under. Reporting the stored
             // one instead would end a transfer under a different name from the
             // one it was accepted by.
-            let n = acrylius_core::vocab::TransferId(f.transfer).short();
-            return if f.ok {
-                format!("transfer {n} finished")
-            } else if f.detail.is_empty() {
-                format!("transfer {n} was refused")
-            } else {
-                format!("transfer {n} failed: {}", f.detail)
+            return Report::Transfer {
+                transfer: f.transfer,
+                ok: f.ok,
+                detail: f.detail.to_string(),
             };
         }
     }
     if cap == media::CAP
         && let Ok(s) = minicbor::decode::<media::MediaState>(body)
     {
-        if s.players.is_empty() {
-            // The volume is still worth saying. It is a property of the
-            // machine and it can be turned down whether or not anything is
-            // playing through it.
-            return match s.system_volume {
-                Some(v) => format!("nothing is playing (output volume {v}%)"),
-                None => "nothing is playing".to_string(),
-            };
-        }
-        return s
-            .players
-            .iter()
-            .map(|p| {
-                // The active one is marked, because a command with no player
-                // named goes there and a person should be able to see which.
-                let mark = if p.id == s.active { "*" } else { " " };
-                let mut line = format!("{mark} {:<12} {:<8} {}", p.id, p.status, p.title);
-                if !p.artist.is_empty() {
-                    line.push_str(&format!(" — {}", p.artist));
-                }
-                if p.length_ms > 0 {
-                    line.push_str(&format!(
-                        "  [{}/{}]",
-                        clock(p.position_ms),
-                        clock(p.length_ms)
-                    ));
-                }
-                if let Some(v) = p.volume_percent {
-                    line.push_str(&format!("  vol {v}%"));
-                }
-                if !p.can_control {
-                    line.push_str("  (reports only)");
-                }
-                line
-            })
-            .chain(
-                // Last, and separate: this is the machine's, not a player's,
-                // and it is what a `volume` with no --player moves.
-                s.system_volume
-                    .map(|v| format!("  {:<12} {:<8} output volume {v}%", "system", "")),
-            )
-            .collect::<Vec<_>>()
-            .join("\n");
+        return Report::Media {
+            active: s.active.to_string(),
+            players: s
+                .players
+                .iter()
+                .map(|p| Player {
+                    id: p.id.to_string(),
+                    status: p.status.to_string(),
+                    title: p.title.to_string(),
+                    artist: p.artist.to_string(),
+                    position_ms: p.position_ms,
+                    length_ms: p.length_ms,
+                    volume_percent: p.volume_percent,
+                    can_control: p.can_control,
+                    // Resolved here, where `active` is in hand, so nothing
+                    // downstream has to re-derive which player a command with
+                    // no player named would reach.
+                    active: p.id == s.active,
+                })
+                .collect(),
+            system_volume: s.system_volume,
+        };
     }
     if cap == command::CAP {
         if let Ok(l) = minicbor::decode::<command::CommandList>(body) {
-            if l.commands.is_empty() {
-                return "no commands offered".to_string();
-            }
-            return l
-                .commands
-                .iter()
-                .map(|c| format!("{}  {}", c.id, c.name))
-                .collect::<Vec<_>>()
-                .join("\n");
+            return Report::Commands {
+                commands: l
+                    .commands
+                    .iter()
+                    .map(|c| Command {
+                        id: c.id.to_string(),
+                        name: c.name.to_string(),
+                    })
+                    .collect(),
+            };
         }
         if let Ok(e) = minicbor::decode::<command::Exited>(body) {
-            return format!(
-                "exit {}{}",
-                e.code,
-                if e.truncated {
-                    " (output truncated)"
-                } else {
-                    ""
-                }
-            );
+            return Report::Exited {
+                code: e.code,
+                truncated: e.truncated,
+            };
         }
     }
-    format!("{ty} ({} bytes)", body.len())
+    Report::Opaque {
+        ty: ty.to_string(),
+        bytes: body.len(),
+    }
 }
 
 /// Relay pairing events until the window resolves one way or the other.
@@ -1113,11 +983,7 @@ fn human(bytes: u64) -> String {
     }
 }
 
-/// Milliseconds as m:ss, for a line a person reads.
-fn clock(ms: u64) -> String {
-    let secs = ms / 1000;
-    format!("{}:{:02}", secs / 60, secs % 60)
-}
+// `clock` moved to `ipc`, beside the rendering that is now its only caller.
 
 #[must_use]
 pub fn random_code() -> String {

@@ -60,7 +60,7 @@ echo
 echo "### 2. bravo opens a pairing window; alpha dials it"
 "$BIN/acryliusctl" --state $D/b pair --code ABCD1234 > $D/b.pair 2>&1 &
 sleep 0.5
-"$BIN/acryliusctl" --state $D/a pair-with 127.0.0.1:$PORT_B ABCD1234 > $D/a.pair 2>&1 &
+"$BIN/acryliusctl" --state $D/a pair with 127.0.0.1:$PORT_B ABCD1234 > $D/a.pair 2>&1 &
 sleep 1.5
 
 echo "--- what bravo shows ---"; cat $D/b.pair
@@ -76,24 +76,24 @@ else
 fi
 
 echo
-echo "### 4. approve at both ends"
-"$BIN/acryliusctl" --state $D/a approve
-"$BIN/acryliusctl" --state $D/b approve
+echo "### 4. pair approve at both ends"
+"$BIN/acryliusctl" --state $D/a pair approve
+"$BIN/acryliusctl" --state $D/b pair approve
 sleep 1
 cat $D/a.pair | tail -2; cat $D/b.pair | tail -2
 
 echo
 echo "### 5. paired devices"
-"$BIN/acryliusctl" --state $D/a devices
-"$BIN/acryliusctl" --state $D/b devices
+"$BIN/acryliusctl" --state $D/a device list
+"$BIN/acryliusctl" --state $D/b device list
 
 echo
 echo "### 6. alpha opens a session to bravo and pings"
 # Deliberately no --addr. Passing one used to hide the fact that nothing
 # recorded the address a successful pairing had just proved, so a freshly
 # paired device reported itself unreachable.
-"$BIN/acryliusctl" --state $D/a connect "$B_ID"
-"$BIN/acryliusctl" --state $D/a ping "$B_ID"
+"$BIN/acryliusctl" --state $D/a device connect "$B_ID"
+"$BIN/acryliusctl" --state $D/a device ping "$B_ID"
 RC=$?
 
 echo
@@ -102,6 +102,6 @@ pkill -f "acryliusd --state $D/a" 2>/dev/null
 sleep 1
 "$BIN/acryliusd" --state $D/a --port $PORT_A --name alpha >> $D/a.log 2>&1 &
 ready $D/a || { echo "alpha did not restart"; tail -5 $D/a.log; exit 1; }
-"$BIN/acryliusctl" --state $D/a devices
+"$BIN/acryliusctl" --state $D/a device list
 
 exit $RC
