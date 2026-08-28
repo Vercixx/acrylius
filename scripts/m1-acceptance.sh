@@ -152,6 +152,49 @@ echo "$OUT" | grep -qE 'nothing is playing|[a-z]'; check $? "bravo answered abou
 OUT=$("$BIN/acryliusctl" --state $D/a play volume "$B_ID" 500 2>&1); echo "  $OUT"
 echo "$OUT" | grep -q "refused"; check $? "a volume out of range is refused, and promptly"
 
+# Seeking, which nothing exercised until a phone tried it in M3 and found that
+# `mpris:trackid` had only ever been read as a string. Every player that types
+# it as an object path — which is what the specification asks for — was
+# answered "reports no track id", and the verb had been unusable since M2
+# without anything noticing.
+#
+# Only when something is actually playing and says it can seek: a machine with
+# nothing open is a normal state, not a failure.
+# Pinned to one player by id, not to whichever is active. "Active" is a
+# property of the machine and it moves: a notification sound or a video
+# starting mid-run changes it, and the seek then lands somewhere the check is
+# not looking.
+SEEKABLE=$("$BIN/acryliusctl" --state $D/a play status "$B_ID" 2>&1 \
+  | grep -E '^\*' | awk '{print $2}' || true)
+if [ -z "$SEEKABLE" ]; then
+  echo "  skip  nothing is playing; open a player to test seeking"
+else
+  echo "  seeking $SEEKABLE"
+  # The position *afterwards*, not the reply. `landed` returns None for a
+  # seek — there is nothing to compare a position against, since it moves on
+  # its own — so the confirm loop has nothing to wait for and answers with a
+  # reading taken before the player acted. Asserting on that reply would be
+  # asserting the announcement rather than the state, which is the mistake
+  # this project keeps relearning.
+  for MS in 30000 0; do
+    "$BIN/acryliusctl" --state $D/a play position "$B_ID" $MS \
+      --player "$SEEKABLE" >/dev/null 2>&1
+    sleep 1
+    AT=$("$BIN/acryliusctl" --state $D/a play status "$B_ID" 2>&1 \
+      | grep -F "$SEEKABLE" | grep -oE '\[[0-9]+:[0-9]{2}/' | tr -d '[/')
+    # Seconds, with room to move. A playing track advances while this is being
+    # read, so an exact match would be a test of how fast the machine is.
+    NOW=$(( $(echo "${AT:-0:00}" | cut -d: -f1) * 60 + $(echo "${AT:-0:00}" | cut -d: -f2 | sed 's/^0//;s/^$/0/') ))
+    WANT=$((MS / 1000))
+    DRIFT=$((NOW - WANT)); [ $DRIFT -lt 0 ] && DRIFT=$((-DRIFT))
+    echo "  asked for ${WANT}s, player is at ${NOW}s"
+    # Zero is in this list on purpose: it is the one a phone could not reach,
+    # and "back to the start" is the most ordinary thing to ask for.
+    # Chromium ignores SetPosition(track, 0) outright — see media.rs.
+    [ $DRIFT -le 3 ]; check $? "a seek to ${MS}ms moves the track there"
+  done
+fi
+
 # A volume command with no player named moves the machine, not a player. MPRIS
 # gives every player a writable `Volume` that a great many ignore — Chromium
 # accepts the write and does nothing, while reporting CanControl true — so the

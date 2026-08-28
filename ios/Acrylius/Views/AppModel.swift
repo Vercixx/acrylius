@@ -230,11 +230,32 @@ final class AppModel {
         pairingSas = nil
     }
 
-    // No `connect(_:)`. Nothing in the app asks any more: the core dials the
-    // moment discovery names a paired device, and a second request while a
-    // dial is outstanding is dropped anyway. The App Intent still submits
-    // `.connect` directly, which is right — that one *is* a person asking, and
-    // it is the remaining caller that wants to be told when it fails.
+    /// Ask for a computer now, rather than waiting for the next heartbeat.
+    ///
+    /// Dialling is automatic and has been since Stage B, but "Not connected"
+    /// reads as *gave up* — reasonably, since the state right next to it is
+    /// "Connecting". So there is a button again. It is not the old Connect
+    /// button: that one submitted a request and reported success without
+    /// looking. This waits for the peer to actually become reachable and says
+    /// so, and a request a person made is the one kind the core reports the
+    /// failure of out loud.
+    ///
+    /// Returns whether a session opened.
+    @discardableResult
+    func retry(_ peer: FfiPeer) async -> Bool {
+        await runtime?.submit(.connect(peer: peer.deviceId))
+        // Generous: a dial walks every route it knows, and a handshake over
+        // Bluetooth is not quick.
+        let deadline = ContinuousClock.now.advanced(by: .seconds(12))
+        while ContinuousClock.now < deadline {
+            await refresh()
+            if peers.first(where: { $0.deviceId == peer.deviceId })?.reachable == true {
+                return true
+            }
+            try? await Task.sleep(for: .milliseconds(400))
+        }
+        return false
+    }
 
     func ping(_ peer: FfiPeer) async {
         await send(peer, cap: capPing(), ty: "ping", body: Data("hello".utf8))

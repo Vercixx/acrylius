@@ -56,6 +56,15 @@ struct DeviceView: View {
                     }
                 case .unreachable:
                     LabeledContent("Status", value: "Not connected")
+                    // A button again, and for a reason the first one did not
+                    // have. Dialling is automatic, but "Not connected" sitting
+                    // next to a state called "Connecting" reads as *gave up* —
+                    // so either the screen says it is still trying, or it
+                    // offers to try now. This does both: the footer says the
+                    // retries continue, and this asks for one immediately and
+                    // reports what actually happened rather than that a
+                    // request was sent.
+                    TaskButton("Try again") { await model.retry(peer) }
                 }
                 // Which radio is carrying this. A second transport is only
                 // useful if it takes over quietly, and something that takes
@@ -69,8 +78,15 @@ struct DeviceView: View {
                 // dialled has nothing to explain yet, and saying so while it
                 // came up normally is the flicker this whole arrangement
                 // exists to avoid.
-                if peer.state == .unreachable, let trouble = peer.trouble {
-                    Text(trouble)
+                if peer.state == .unreachable {
+                    VStack(alignment: .leading, spacing: 4) {
+                        if let trouble = peer.trouble {
+                            Text(trouble)
+                        }
+                        // Said plainly, because the absence of a spinner is
+                        // otherwise indistinguishable from having stopped.
+                        Text("Still trying every few seconds.")
+                    }
                 }
             }
 

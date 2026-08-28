@@ -282,7 +282,26 @@ impl MediaEffector {
                 let track = as_track_id(metadata.get("mpris:trackid"))
                     .ok_or_else(|| anyhow::anyhow!("{} reports no track id", found.name))?;
                 let us = i64::try_from(ms.saturating_mul(1000)).unwrap_or(i64::MAX);
-                proxy.set_position(&track, us).await?;
+                if us == 0 {
+                    // Back to the start, the other way round.
+                    //
+                    // `SetPosition(track, 0)` is ignored by Chromium, verified
+                    // over the bus: `SetPosition(track, 1000)` moves the track
+                    // and `SetPosition(track, 0)` does nothing at all. So the
+                    // most ordinary request a person makes of a timeline — drag
+                    // it to the left edge — was the one position that silently
+                    // did not work.
+                    //
+                    // `Seek` is better specified for exactly this: MPRIS says a
+                    // relative seek landing before the beginning sets the
+                    // position to zero. Asking to go back further than the
+                    // track is long is therefore a defined way to say "the
+                    // start", and it needs no agreement about where zero is.
+                    let here = proxy.position().await.unwrap_or(0);
+                    proxy.seek(-(here.saturating_add(1_000_000))).await?;
+                } else {
+                    proxy.set_position(&track, us).await?;
+                }
             }
             MediaAction::SetVolume { percent } => {
                 proxy.set_volume(f64::from(percent) / 100.0).await?;
