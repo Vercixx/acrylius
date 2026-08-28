@@ -20,6 +20,12 @@ on:
 env:
   # Outside target/, which Swatinem/rust-cache prunes as its own.
   XCODEGEN_CACHE: ${{ github.workspace }}/.xcodegen
+  # Xcode derives the compilation cache's location from the DerivedData root,
+  # so `-derivedDataPath build` drags it into the workspace and out again on
+  # the next run. Named outright instead: the cache step, the build and the
+  # check then agree by construction rather than by matching guesses about
+  # where 26.6 would have put it.
+  XCODE_CAS: ${{ github.workspace }}/.xcode-cas
 
 jobs:
   ipa:
@@ -82,9 +88,15 @@ jobs:
           # What Xcode accepted for caching, at the values it will build with.
           # An unrecognised build setting is not an error — it is carried along
           # and ignored — so this is the only place a wrong name shows up.
+          #
+          # Every flag the Build step passes is repeated here, -derivedDataPath
+          # included. Reading these settings without it reports the store under
+          # the default DerivedData root and not where this build will keep it,
+          # which is a wrong answer that looks like a right one.
           xcodebuild -project ios/Acrylius.xcodeproj -scheme Acrylius \
-            -configuration Release -sdk iphoneos \
-            COMPILATION_CACHE_ENABLE_CACHING=YES -showBuildSettings 2>/dev/null \
+            -configuration Release -sdk iphoneos -derivedDataPath build \
+            COMPILATION_CACHE_ENABLE_CACHING=YES \
+            COMPILATION_CACHE_CAS_PATH="$XCODE_CAS" -showBuildSettings 2>/dev/null \
             | grep -iE "COMPILATION_CACHE|COMPILE_CACHE|EXPLICIT_MODULES" \
             || echo "no compilation-cache settings reported"
 
@@ -108,7 +120,10 @@ jobs:
       - name: Cache the Xcode compilation cache
         uses: actions/cache@v4
         with:
-          path: ~/Library/Developer/Xcode/CompilationCache.noindex
+          # Spelled out rather than ${{ env.XCODE_CAS }}, as with XcodeGen
+          # above: it must agree with the env, and the build setting the Build
+          # step passes, and this is the one place a context is not worth it.
+          path: ${{ github.workspace }}/.xcode-cas
           key: xcode-cas-${{ runner.os }}-26.6-${{ github.sha }}-${{ github.run_id }}
           restore-keys: |
             xcode-cas-${{ runner.os }}-26.6-${{ github.sha }}-
@@ -129,6 +144,7 @@ jobs:
             -configuration Release -sdk iphoneos -derivedDataPath build \
             ONLY_ACTIVE_ARCH=NO \
             COMPILATION_CACHE_ENABLE_CACHING=YES \
+            COMPILATION_CACHE_CAS_PATH="$XCODE_CAS" \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
             build 2>&1 | tee raw.log | "${pretty[@]}" || {
               echo "--- errors ---"
@@ -141,16 +157,26 @@ jobs:
       - name: Say whether the cache filled
         if: always()
         run: |
-          cas="$HOME/Library/Developer/Xcode/CompilationCache.noindex"
           # Warns, never fails: a cold cache still produces a correct IPA, and
           # failing the build over it would trade a shipped artifact for a
           # performance note. It is here because the alternative is silence —
           # a setting Xcode ignored and a project too small to benefit look
           # identical from the outside, and both look like success.
-          if [ -d "$cas" ]; then
-            echo "$(du -sh "$cas" | cut -f1) across $(find "$cas" -type f | wc -l | tr -d ' ') files"
+          if [ -d "$XCODE_CAS" ]; then
+            files="$(find "$XCODE_CAS" -type f | wc -l | tr -d ' ')"
+            echo "$(du -sh "$XCODE_CAS" | cut -f1) across $files files"
           else
-            echo "::warning::nothing at $cas — either COMPILATION_CACHE_ENABLE_CACHING was ignored or 26.6 keeps the store somewhere else; see the build settings printed above"
+            echo "::warning::nothing at $XCODE_CAS — COMPILATION_CACHE_CAS_PATH was not honoured"
+            # Name the store that does exist. The first version of this step
+            # reported only the directory it expected, which said a cache had
+            # not been written when one had, somewhere else entirely.
+            for other in build/CompilationCache.noindex \
+                         "$HOME/Library/Developer/Xcode/DerivedData/CompilationCache.noindex" \
+                         "$HOME/Library/Developer/Xcode/CompilationCache.noindex"; do
+              if [ -d "$other" ]; then
+                echo "  a store exists at $other — point the cache step there"
+              fi
+            done
           fi
 
       - name: Ad-hoc sign
