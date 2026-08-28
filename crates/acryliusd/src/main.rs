@@ -651,9 +651,19 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // SIGTERM as well as SIGINT, because systemd stops a service with SIGTERM
+    // and never sends SIGINT at all. Until now the shutdown below ran only when
+    // the daemon had been started by hand in a terminal: every `systemctl
+    // restart` killed it outright, and the BLE advertisement it had registered
+    // stayed registered with bluetoothd. One leaked instance per restart,
+    // against the three this adapter supports, and nothing short of restarting
+    // bluetoothd takes them back — which is what "restarting makes it appear,
+    // then it disappears again" turned out to be.
+    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     tokio::select! {
         () = rt.run() => {}
         _ = tokio::signal::ctrl_c() => tracing::info!("shutting down"),
+        _ = term.recv() => tracing::info!("shutting down"),
     }
     Ok(())
 }
