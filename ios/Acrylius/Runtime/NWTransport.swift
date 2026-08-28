@@ -174,6 +174,25 @@ public final class NWTransport: Transport, @unchecked Sendable {
         release(link)?.cancel()
     }
 
+    /// Report every connection that is no longer usable.
+    ///
+    /// `.ready` is the only state that can carry a frame. Anything else here is
+    /// a link the core still believes in and would go on choosing — and TCP
+    /// outranks Bluetooth, so a dead Wi-Fi socket does not merely fail, it
+    /// keeps a working Bluetooth link from ever being picked.
+    public func revalidate() async {
+        let held: [(UInt64, NWConnection)] = {
+            lock.lock(); defer { lock.unlock() }
+            return connections.map { ($0.key, $0.value) }
+        }()
+        for (link, c) in held where c.state != .ready {
+            // `retire` is the claim: only the caller who removes it reports,
+            // so this cannot race the state handler into a double report.
+            retire(link, .transport(detail: "the connection did not survive being backgrounded"))?
+                .cancel()
+        }
+    }
+
     public func advertise(enable: Bool, txt: [FfiTxt]) async {
         // Advertising is deliberately unimplemented on iOS.
         //

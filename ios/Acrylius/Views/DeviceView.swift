@@ -167,11 +167,10 @@ struct DeviceView: View {
             await model.refreshSession(peer)
             await model.refreshMedia(peer)
         }
-        .confirmationDialog(
-            "Forget \(peer.name)?",
-            isPresented: $confirmingForget,
-            titleVisibility: .visible
-        ) {
+        // An alert, for the reason spelled out in `DeviceListView`: a
+        // confirmation dialog wants something to anchor to and this one had
+        // nothing to point at.
+        .alert("Forget \(peer.name)?", isPresented: $confirmingForget) {
             Button("Forget", role: .destructive) {
                 Task {
                     await model.forget(peer)

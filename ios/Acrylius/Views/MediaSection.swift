@@ -68,7 +68,7 @@ struct MediaSection: View {
             // running at that rate with the phone in a pocket, because a `.task`
             // on a view that is merely off screen is not cancelled.
             .task(id: pollKey) {
-                guard scenePhase == .active else { return }
+                guard scenePhase == .active, scrubbing == nil else { return }
                 while !Task.isCancelled {
                     await model.refreshMedia(peer)
                     try? await Task.sleep(for: .milliseconds(Int(interval)))
@@ -301,8 +301,17 @@ struct MediaSection: View {
     /// rate adaptive: `.task(id:)` cancels and begins again, so a track that
     /// starts playing moves to the fast rate without waiting out a slow sleep,
     /// and backgrounding the app stops it entirely.
+    ///
+    /// `scrubbing` is in here because a poll landing mid-drag is what stopped
+    /// seeking from working at all. Every reply replaces `features.media`,
+    /// which replaces `player`, which rebuilds this section — and a `Slider`
+    /// rebuilt under a finger loses the gesture, so the drag ended without
+    /// `onEditingChanged(false)` ever arriving and the knob sprang back to the
+    /// last reported position. Nothing is asked of the computer while somebody
+    /// is holding the knob; the reading that matters is the one after the seek
+    /// anyway.
     private var pollKey: String {
-        "\(peer.deviceId)|\(interval)|\(scenePhase == .active)"
+        "\(peer.deviceId)|\(interval)|\(scenePhase == .active)|\(scrubbing == nil)"
     }
 
     private func clock(_ ms: UInt64) -> String {

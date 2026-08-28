@@ -23,6 +23,26 @@ public protocol Transport: AnyObject, Sendable {
     func close(link: UInt64) async
     func advertise(enable: Bool, txt: [FfiTxt]) async
     func discover(enable: Bool) async
+
+    /// Check the links this transport is holding, and report any that have
+    /// died without saying so.
+    ///
+    /// iOS suspends an app that is not on screen. Its sockets do not survive
+    /// that in any dependable way, and nothing runs to notice: the state
+    /// handler that would have reported the failure fires in a process that is
+    /// stopped. The app came back believing it still had a session, sent into a
+    /// socket that was not there, and — when the far end had meanwhile been
+    /// re-dialled — met a frame it could not decrypt, which is a hostile
+    /// handshake as far as the core is concerned.
+    ///
+    /// So the app asks, on the way back to the foreground. A transport that
+    /// cannot be asked answers by doing nothing, which is why this has a
+    /// default.
+    func revalidate() async
+}
+
+public extension Transport {
+    func revalidate() async {}
 }
 
 /// The platform half of a plugin.

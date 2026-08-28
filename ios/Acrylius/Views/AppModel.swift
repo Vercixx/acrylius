@@ -58,10 +58,9 @@ final class AppModel {
 
     private(set) var lastErrorAt: Date?
 
-    /// How long an unacknowledged error stays on screen. Long enough to read a
-    /// sentence twice, short enough that it is gone before it starts lying
-    /// about the present.
-    static let errorLifetime: TimeInterval = 30
+    // No lifetime any more. An error is an alert now, and an alert that closed
+    // itself on a timer would be one you could miss by looking away — the
+    // expiry existed because a banner had no other way to leave.
 
     func dismissError() {
         lastError = nil
@@ -142,6 +141,21 @@ final class AppModel {
     /// nothing on screen to explain it is one people refuse — which only Settings
     /// undoes. Once allowed, `start()` brings it up on every launch without
     /// anyone visiting this screen again.
+    /// Come back from the background properly.
+    ///
+    /// Two things, in this order. The links this process woke up believing in
+    /// are questioned — a suspended app notices nothing, so a socket that died
+    /// while it was away is still in the table and, because TCP outranks
+    /// Bluetooth, is still the route everything is sent down. Then the peers
+    /// are re-read, because whatever was retired has changed their state.
+    ///
+    /// The dialling itself is the core's: retiring a link makes the peer
+    /// unreachable, and the reconnect heartbeat picks it up from there.
+    func cameToForeground() async {
+        await runtime?.revalidateLinks()
+        await refresh()
+    }
+
     func startBluetooth() {
         #if canImport(CoreBluetooth)
             bluetooth?.startManager()

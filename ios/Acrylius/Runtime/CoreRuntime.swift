@@ -84,6 +84,19 @@ public actor CoreRuntime {
         events?.yield(event)
     }
 
+    /// Ask every transport to check the links it is holding.
+    ///
+    /// Called when the app comes back to the foreground. See
+    /// `Transport.revalidate`: a suspended process notices nothing, so the
+    /// links it wakes up believing in have to be questioned rather than
+    /// trusted. Whatever is retired here becomes a `LinkDown`, and the core's
+    /// reconnect heartbeat dials again.
+    public func revalidateLinks() async {
+        for t in transports.values {
+            await t.revalidate()
+        }
+    }
+
     public func start() {
         guard pump == nil else { return }
         let (stream, continuation) = AsyncStream<FfiEvent>.makeStream(bufferingPolicy: .unbounded)

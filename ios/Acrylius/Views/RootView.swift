@@ -23,6 +23,11 @@ struct RootView: View {
     /// computer's screen without the user finding it in the list.
     @State private var devicePath: [String] = []
 
+    /// The error being shown, held apart from the model on purpose. See the
+    /// alert below.
+    @State private var showingError = false
+    @State private var shownError = ""
+
     /// Not called `Tab`: the iOS 26 SDK has a `SwiftUI.Tab` of its own, and a
     /// nested type with that name would shadow it inside this file for no
     /// reason.
@@ -52,30 +57,22 @@ struct RootView: View {
         .sheet(isPresented: .constant(model.pairingSas != nil)) { ConfirmPairingView() }
         // A system alert, not a banner drawn by hand.
         //
-        // It was a glass capsule floating over the tab bar, which looked like
-        // something the app had invented — because it was. An alert is the
-        // control iOS uses to say this, so it inherits the platform's shape,
-        // its dimming, its Dynamic Type and its VoiceOver behaviour, none of
-        // which the banner had.
-        .alert(
-            "Something went wrong",
-            isPresented: Binding(
-                get: { model.lastError != nil },
-                set: { if !$0 { model.dismissError() } }
-            ),
-            presenting: model.lastError
-        ) { _ in
+        // Presented from this view's own state rather than straight off the
+        // model. Binding `isPresented` to `model.lastError != nil` put the
+        // alert's lifetime in the hands of an `@Observable` that changes
+        // several times a second while media is playing: every one of those
+        // re-evaluated the binding, and the alert dismissed itself after about
+        // a second. What is on screen is a snapshot, taken once when the error
+        // arrives, and it stays until somebody presses OK.
+        .alert("Something went wrong", isPresented: $showingError) {
             Button("OK", role: .cancel) { model.dismissError() }
-        } message: { text in
-            Text(text)
+        } message: {
+            Text(shownError)
         }
-        // Restarted whenever a new error arrives, so the clock is always the
-        // current error's. Nothing used to clear these at all.
-        .task(id: model.lastErrorAt) {
-            guard model.lastError != nil else { return }
-            try? await Task.sleep(for: .seconds(AppModel.errorLifetime))
-            guard !Task.isCancelled else { return }
-            model.dismissError()
+        .onChange(of: model.lastErrorAt) {
+            guard let text = model.lastError else { return }
+            shownError = text
+            showingError = true
         }
         .onOpenURL { url in
             // acrylius://peer/<device-id>, which is what a widget carries.

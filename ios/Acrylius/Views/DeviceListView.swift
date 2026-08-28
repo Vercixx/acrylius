@@ -84,14 +84,20 @@ struct DeviceListView: View {
             .toolbar {
                 Button("Pair", systemImage: "plus") { showPair = true }
             }
-            // On the List, which survives a row going away.
-            .confirmationDialog(
+            // An alert, and on the List rather than the row.
+            //
+            // A `confirmationDialog` is anchored: an action sheet on a phone, a
+            // popover on an iPad, and it wants something to point at. Asked
+            // from a swipe — where the thing it would point at is sliding
+            // away — it has nothing, and it read as a panel floating in the
+            // middle of the screen for no reason. A destructive confirmation
+            // is what `alert` is for, and an alert is meant to be centred.
+            .alert(
                 forgetting.map { "Forget \($0.name)?" } ?? "",
                 isPresented: Binding(
                     get: { forgetting != nil },
                     set: { if !$0 { forgetting = nil } }
                 ),
-                titleVisibility: .visible,
                 presenting: forgetting
             ) { peer in
                 Button("Forget", role: .destructive) {
