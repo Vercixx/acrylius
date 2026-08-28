@@ -100,7 +100,7 @@ impl ClipboardPlugin {
             return Err(PluginError::TooLarge);
         }
         let h = hash(body);
-        if self.is_echo(&h) {
+        if self.take_echo(&h) {
             return Ok(());
         }
         self.last_local = Some(h.clone());
@@ -126,9 +126,24 @@ impl ClipboardPlugin {
         }
     }
 
-    /// Whether a locally observed value is worth telling anyone about.
-    fn is_echo(&self, h: &[u8]) -> bool {
-        self.last_remote.as_deref() == Some(h) || self.last_local.as_deref() == Some(h)
+    /// Whether a locally observed value is the echo of one we just handled.
+    ///
+    /// The remote slot is one shot, and that is the point of it. It exists to
+    /// swallow the single change the clipboard watcher reports right after a
+    /// peer's value is put on this machine's clipboard — one observation, not
+    /// every future one. Kept, it meant anything that had *ever* arrived from a
+    /// peer could never be sent back: copy a link a colleague sent you an hour
+    /// ago and nothing happens, with no error and nothing to explain it.
+    ///
+    /// The local slot is not one shot and does not need to be, because every
+    /// offer that goes out overwrites it. Copying the same thing twice running
+    /// really is nothing to say.
+    fn take_echo(&mut self, h: &[u8]) -> bool {
+        if self.last_remote.as_deref() == Some(h) {
+            self.last_remote = None;
+            return true;
+        }
+        self.last_local.as_deref() == Some(h)
     }
 }
 
@@ -290,6 +305,67 @@ mod tests {
             hash: hash(text.as_bytes()),
         })
         .unwrap()
+    }
+
+    #[test]
+    fn a_value_a_peer_once_sent_can_still_be_sent_back_later() {
+        // The echo guard is for the one change the clipboard watcher reports
+        // straight after a peer's value lands here. Kept for good, it meant
+        // anything that had ever arrived from a peer was silently undeliverable
+        // for the rest of the process — copy it again and nothing happens.
+        let mut p = ClipboardPlugin::default();
+        run(0, |cx| p.on_peer_connected(cx, &peer()));
+
+        // A peer sends "hello"; the watcher reports it right back at us.
+        let body = set_message("hello");
+        let env = envelope(1, CAP, "set", &body);
+        run(0, |cx| p.on_message(cx, &peer(), &env).unwrap());
+        let echo = run(0, |cx| {
+            p.on_local(cx, &peer(), "changed", b"hello").unwrap()
+        });
+        assert!(
+            echo.sent("set").is_none(),
+            "the echo of what just arrived is swallowed"
+        );
+
+        // Someone copies something else, then copies "hello" again on purpose.
+        run(0, |cx| {
+            p.on_local(cx, &peer(), "changed", b"world").unwrap()
+        });
+        let again = run(0, |cx| {
+            p.on_local(cx, &peer(), "changed", b"hello").unwrap()
+        });
+        assert!(
+            again.sent("set").is_some(),
+            "copying it again is a person asking, not an echo"
+        );
+    }
+
+    #[test]
+    fn an_offer_skips_the_peer_that_left_and_reaches_the_one_that_stayed() {
+        // See the twin of this in `plugins::session`. Mutation testing found the
+        // same untested `retain` in all three plugins that keep a peer list:
+        // `!=` could become `==`, dropping every peer except the one that had
+        // just gone, and nothing objected.
+        let mut p = ClipboardPlugin::default();
+        let gone = peer();
+        let stayed = DeviceId::of(&[9u8; 32]);
+        run(0, |cx| p.on_peer_connected(cx, &gone));
+        run(0, |cx| p.on_peer_connected(cx, &stayed));
+        run(0, |cx| p.on_peer_disconnected(cx, &gone));
+
+        let r = run(0, |cx| p.on_local(cx, &gone, "push", b"hello").unwrap());
+        let told: Vec<&DeviceId> = r
+            .sends
+            .iter()
+            .filter(|s| s.ty == "set")
+            .map(|s| &s.peer)
+            .collect();
+        assert_eq!(
+            told,
+            vec![&stayed],
+            "a clipboard must not follow a peer that has gone"
+        );
     }
 
     #[test]

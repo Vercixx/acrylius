@@ -76,19 +76,18 @@ pub async fn listen(advertise_host: &str) -> anyhow::Result<Listening> {
     })
 }
 
+/// A connection that has arrived and said which transfer it is.
+///
+/// Separate from [`Listening`] so that waiting for a sender and reading from one
+/// are two things a caller can be in the middle of, rather than one. Nothing
+/// above here can bound the first without being able to see the difference.
+pub struct Accepted {
+    stream: TcpStream,
+}
+
 impl Listening {
-    /// Accept one connection and write what arrives to `dest`.
-    ///
-    /// Written to a temporary beside the destination and renamed at the end, so
-    /// an interrupted transfer never leaves something that looks like a
-    /// complete file. A short transfer is a failure and the temporary goes.
-    pub async fn receive(
-        self,
-        transfer: u64,
-        key: &[u8],
-        expect_bytes: u64,
-        dest: &Path,
-    ) -> anyhow::Result<u64> {
+    /// Wait for one connection, and check it is for the transfer expected.
+    pub async fn accept(self, transfer: u64) -> anyhow::Result<Accepted> {
         let (mut stream, from) = self.listener.accept().await?;
         tracing::debug!(%from, transfer, "bulk connection");
 
@@ -98,7 +97,18 @@ impl Listening {
         if named != transfer {
             anyhow::bail!("that connection is for transfer {named}, not {transfer}");
         }
+        Ok(Accepted { stream })
+    }
+}
 
+impl Accepted {
+    /// Write what arrives to `dest`.
+    ///
+    /// Written to a temporary beside the destination and renamed at the end, so
+    /// an interrupted transfer never leaves something that looks like a
+    /// complete file. A short transfer is a failure and the temporary goes.
+    pub async fn receive(self, key: &[u8], expect_bytes: u64, dest: &Path) -> anyhow::Result<u64> {
+        let mut stream = self.stream;
         let tmp = temp_beside(dest);
         let mut file = tokio::fs::File::create(&tmp).await?;
         let mut written: u64 = 0;
@@ -170,41 +180,38 @@ fn temp_beside(dest: &Path) -> PathBuf {
     dest.with_file_name(name)
 }
 
-/// A file name from a peer, made safe to use.
-///
-/// A peer chooses what to call its file and nothing else. Anything that could
-/// steer where the bytes land is removed rather than rejected, because a
-/// refusal over a stray slash helps nobody: `../../.bashrc` becomes `.bashrc`
-/// in the directory that was going to be used anyway.
-#[must_use]
-pub fn safe_name(offered: &str) -> String {
-    let base = offered
-        .rsplit(['/', '\\'])
-        .next()
-        .unwrap_or(offered)
-        .trim()
-        .trim_start_matches('.');
-    let cleaned: String = base
-        .chars()
-        .filter(|c| !c.is_control() && *c != '\0')
-        .take(120)
-        .collect();
-    if cleaned.is_empty() {
-        "received".to_string()
-    } else {
-        cleaned
-    }
-}
+// `safe_name` lives in `acrylius_proto::bulk` and is re-exported here, because
+// a phone receives files too and this is the rule that decides where a peer's
+// chosen name is allowed to put them. Two copies of that is exactly one too
+// many, and it is the copy that drifts which becomes the path traversal.
+pub use acrylius_proto::bulk::safe_name;
 
-/// A path in `dir` that is not already taken.
+/// A path in `dir` that is not already taken, **claimed** by creating it.
 ///
 /// A transfer never overwrites. Two photos with the same name is a normal thing
 /// to happen and losing the first one is not.
-#[must_use]
-pub fn free_path(dir: &Path, name: &str) -> PathBuf {
+///
+/// Creating the file is the whole point, and replaces a version that only
+/// looked. Looking is not a claim: two transfers of the same name offered at the
+/// same time both looked before either wrote, both were told `photo.jpg` was
+/// free, and both then wrote to it and to one `photo.jpg.part` between them.
+/// One file arrived, made of both. `create_new` is the only step here that is
+/// atomic against somebody else doing the same thing.
+///
+/// The empty file left behind is the reservation. Whoever finishes renames its
+/// `.part` over it; whoever fails should remove it.
+pub fn reserve_path(dir: &Path, name: &str) -> std::io::Result<PathBuf> {
+    let claim = |candidate: &Path| {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(candidate)
+    };
     let candidate = dir.join(name);
-    if !candidate.exists() {
-        return candidate;
+    match claim(&candidate) {
+        Ok(_) => return Ok(candidate),
+        Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => return Err(e),
+        Err(_) => {}
     }
     let (stem, ext) = match name.rsplit_once('.') {
         Some((s, e)) if !s.is_empty() => (s.to_string(), format!(".{e}")),
@@ -212,39 +219,24 @@ pub fn free_path(dir: &Path, name: &str) -> PathBuf {
     };
     for n in 2..10_000 {
         let candidate = dir.join(format!("{stem} ({n}){ext}"));
-        if !candidate.exists() {
-            return candidate;
+        match claim(&candidate) {
+            Ok(_) => return Ok(candidate),
+            Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => return Err(e),
+            Err(_) => {}
         }
     }
-    dir.join(name)
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        format!("ten thousand files are already called {name}"),
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn a_name_from_a_peer_cannot_choose_a_directory() {
-        assert_eq!(safe_name("../../.bashrc"), "bashrc");
-        assert_eq!(safe_name("/etc/passwd"), "passwd");
-        assert_eq!(safe_name(r"C:\windows\system32\x.dll"), "x.dll");
-        assert_eq!(safe_name("holiday.jpg"), "holiday.jpg");
-    }
-
-    #[test]
-    fn a_name_that_is_nothing_useful_still_gets_one() {
-        assert_eq!(safe_name(""), "received");
-        assert_eq!(safe_name("   "), "received");
-        assert_eq!(safe_name("../.."), "received");
-    }
-
-    #[test]
-    fn a_control_character_does_not_survive() {
-        // A name that rewrites the line it is printed on is a name nobody
-        // should have to think about again.
-        assert_eq!(safe_name("in\u{1b}[2Kvoice.pdf"), "in[2Kvoice.pdf");
-        assert!(!safe_name("a\nb.txt").contains('\n'));
-    }
+    // The `safe_name` tests moved with it, into `acrylius_proto::bulk`. What
+    // stays here is `free_path`, which is about a filesystem and so cannot.
 
     #[tokio::test]
     async fn a_file_goes_across_and_arrives_whole() {
@@ -263,7 +255,10 @@ mod tests {
         let endpoint = listening.endpoint.clone();
         let len = payload.len() as u64;
         let dest2 = dest.clone();
-        let recv = tokio::spawn(async move { listening.receive(1, &key, len, &dest2).await });
+        let recv =
+            tokio::spawn(
+                async move { listening.accept(1).await?.receive(&key, len, &dest2).await },
+            );
 
         send(1, &endpoint, &key, &src).await.unwrap();
         let got = recv.await.unwrap().unwrap();
@@ -284,7 +279,13 @@ mod tests {
         let listening = listen("127.0.0.1").await.unwrap();
         let endpoint = listening.endpoint.clone();
         let dest2 = dest.clone();
-        let recv = tokio::spawn(async move { listening.receive(1, &[1u8; 32], 13, &dest2).await });
+        let recv = tokio::spawn(async move {
+            listening
+                .accept(1)
+                .await?
+                .receive(&[1u8; 32], 13, &dest2)
+                .await
+        });
 
         // The dialer knows the port and the transfer id, and neither helps.
         let _ = send(1, &endpoint, &[2u8; 32], &src).await;
@@ -307,7 +308,13 @@ mod tests {
         let endpoint = listening.endpoint.clone();
         let dest2 = dest.clone();
         // Told to expect more than will arrive.
-        let recv = tokio::spawn(async move { listening.receive(1, &[3u8; 32], 999, &dest2).await });
+        let recv = tokio::spawn(async move {
+            listening
+                .accept(1)
+                .await?
+                .receive(&[3u8; 32], 999, &dest2)
+                .await
+        });
         let _ = send(1, &endpoint, &[3u8; 32], &src).await;
 
         assert!(recv.await.unwrap().is_err());
@@ -318,12 +325,29 @@ mod tests {
     #[test]
     fn a_second_file_of_the_same_name_does_not_replace_the_first() {
         let dir = std::env::temp_dir().join(format!("acr-free-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::create_dir_all(&dir);
-        let first = free_path(&dir, "photo.jpg");
+        let first = reserve_path(&dir, "photo.jpg").unwrap();
         std::fs::write(&first, b"one").unwrap();
-        let second = free_path(&dir, "photo.jpg");
+        let second = reserve_path(&dir, "photo.jpg").unwrap();
         assert_ne!(first, second);
         assert!(second.to_string_lossy().contains("photo (2).jpg"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn two_transfers_of_one_name_do_not_share_a_destination() {
+        // The reservation, which is the point of creating the file rather than
+        // looking at it. Both of these are decided before either writes a byte —
+        // which is exactly the order two offers accepted together arrive in.
+        let dir = std::env::temp_dir().join(format!("acr-claim-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::create_dir_all(&dir);
+        let a = reserve_path(&dir, "photo.jpg").unwrap();
+        let b = reserve_path(&dir, "photo.jpg").unwrap();
+        assert_ne!(a, b, "one file made of two transfers is the bug");
+        // And so do their temporaries, which is the other half of it.
+        assert_ne!(a.with_extension("jpg.part"), b.with_extension("jpg.part"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

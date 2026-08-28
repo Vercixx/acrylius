@@ -86,6 +86,15 @@ ready $D/b || { echo "bravo never came up"; cat $D/b.log; exit 1; }
 fail=0
 check() { if [ "$1" = 0 ]; then echo "  ok   $2"; else echo "  FAIL $2"; fail=1; fi; }
 
+# Built here rather than assumed, because nothing else in this script would
+# notice it was stale. A run against a binary from an earlier day reported a
+# failure that had been fixed hours before, and would just as happily report a
+# pass for a fix that is not in it.
+if ! cargo build --quiet; then
+  echo "  FAIL the workspace does not build; nothing to accept"
+  exit 1
+fi
+
 echo "### capabilities each side negotiated"
 "$BIN/acryliusctl" --state $D/a status | sed -n '5,6p'
 "$BIN/acryliusctl" --state $D/b status | sed -n '5,6p'

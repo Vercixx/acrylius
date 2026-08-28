@@ -37,7 +37,12 @@ public protocol Effector: AnyObject, Sendable {
 public protocol Store: AnyObject, Sendable {
     func put(key: String, value: Data?, sensitivity: FfiSensitivity) throws
     func loadPeers() -> [Data]
-    func identityKey() -> Data?
+    /// The stored identity, or `nil` only when this device has never had one.
+    ///
+    /// An implementation that cannot answer right now must throw rather than
+    /// return `nil`. A caller reads `nil` as "first run" and writes a fresh
+    /// identity over whatever was there.
+    func identityKey() throws -> Data?
     func setIdentityKey(_ key: Data) throws
 }
 

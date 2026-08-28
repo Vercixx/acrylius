@@ -19,6 +19,20 @@ import Foundation
 import UniformTypeIdentifiers
 #endif
 
+/// Why a chosen thing could not be turned into something sendable.
+public enum OutboxError: Error, LocalizedError, Sendable {
+    /// A bundle rather than a file: a Live Photo, or anything else iOS keeps as
+    /// a directory with an extension on it.
+    case notAFile(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case let .notAFile(name):
+            "\(name) is a bundle rather than a single file, so there is nothing to send."
+        }
+    }
+}
+
 public actor FileOutbox {
     public struct Outgoing: Sendable {
         public let url: URL
@@ -83,7 +97,18 @@ public actor FileOutbox {
         let destination = copy.appendingPathComponent(name.isEmpty ? "file" : name)
         try FileManager.default.copyItem(at: url, to: destination)
 
-        let size = (try? destination.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+        // A directory is not a file, and refusing one here is the difference
+        // between saying so and sending nothing.
+        //
+        // Not hypothetical: a Live Photo is a `.pvt` bundle — a directory
+        // holding a still and a movie — and `copyItem` copies it happily.
+        // `fileSizeKey` is absent for a directory, so it became an offer of
+        // zero bytes, and the far end got a zero-byte `.pvt`. Whatever else is
+        // wrong, an offer whose size was never read is not one to make.
+        let values = try destination.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
+        guard values.isRegularFile == true, let size = values.fileSize else {
+            throw OutboxError.notAFile(destination.lastPathComponent)
+        }
         return Outgoing(
             url: destination,
             name: destination.lastPathComponent,
@@ -92,23 +117,12 @@ public actor FileOutbox {
             temporary: true)
     }
 
-    /// Write bytes a photo picker handed over, which are not a file yet.
-    public nonisolated static func fromData(
-        _ data: Data, suggestedName: String
-    ) throws -> Outgoing {
-        let copy = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: copy, withIntermediateDirectories: true)
-        let destination = copy.appendingPathComponent(
-            suggestedName.isEmpty ? "photo.jpg" : suggestedName)
-        try data.write(to: destination, options: .atomic)
-        return Outgoing(
-            url: destination,
-            name: destination.lastPathComponent,
-            size: UInt64(data.count),
-            mime: mimeType(for: destination),
-            temporary: true)
-    }
+    // `fromData` used to live here, taking bytes and a name made up by the
+    // caller because the photo picker had handed over one and not the other.
+    // Every photo went out as `photo.<ext>`. A picker item can be loaded as a
+    // file instead, which arrives with its own name, so there is nothing left
+    // that needs to invent one — and a function that takes a name on trust is
+    // an invitation to invent one again.
 }
 
 /// A content type for the offer, from the file's own extension.

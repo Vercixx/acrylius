@@ -61,8 +61,18 @@ pub async fn set_volume(percent: u8) -> anyhow::Result<u8> {
     }
     // Unmute, or a slider dragged up from zero appears to do nothing. Failing
     // is fine: a sink that was not muted has nothing to undo.
+    //
+    // Both tools, for the same reason the set above tries both. `wpctl` is
+    // PipeWire's and does not exist on a PulseAudio-only machine, so this used
+    // to set a volume there and leave the sink muted — the number moved, the
+    // slider moved, and the room stayed silent.
     if percent > 0 {
-        let _ = run("wpctl", &["set-mute", "@DEFAULT_AUDIO_SINK@", "0"]).await;
+        let unmuted = run("wpctl", &["set-mute", "@DEFAULT_AUDIO_SINK@", "0"])
+            .await
+            .is_some();
+        if !unmuted {
+            let _ = run("pactl", &["set-sink-mute", "@DEFAULT_SINK@", "0"]).await;
+        }
     }
     let landed = volume()
         .await

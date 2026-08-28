@@ -89,6 +89,24 @@ impl CommandCatalog {
     }
 }
 
+/// Read a pipe to EOF, reporting whether it carried more than `cap`.
+///
+/// Nothing is stored. The bytes are not part of the answer — `Exited` says what
+/// the exit code was and whether there was more to say — but they still have to
+/// be taken off the pipe, or the process on the other end never finishes.
+async fn drain<R: tokio::io::AsyncRead + Unpin>(pipe: Option<R>, cap: usize) -> bool {
+    let Some(mut pipe) = pipe else { return false };
+    let mut buf = vec![0u8; 8192];
+    let mut seen: usize = 0;
+    loop {
+        let n = pipe.read(&mut buf).await.unwrap_or(0);
+        if n == 0 {
+            return seen > cap;
+        }
+        seen = seen.saturating_add(n);
+    }
+}
+
 pub async fn run(spec: &CommandSpec, run_id: u32) -> anyhow::Result<Exited> {
     // argv, never a shell string. There is no interpolation anywhere in this
     // path, so there is nothing to quote and nothing to escape.
@@ -100,7 +118,8 @@ pub async fn run(spec: &CommandSpec, run_id: u32) -> anyhow::Result<Exited> {
         .kill_on_drop(true)
         .spawn()?;
 
-    let mut stdout = child.stdout.take();
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
     let timeout = spec
         .timeout_secs
         .map_or(DEFAULT_TIMEOUT, Duration::from_secs);
@@ -112,24 +131,25 @@ pub async fn run(spec: &CommandSpec, run_id: u32) -> anyhow::Result<Exited> {
     // as it lives, so the timeout below would not be reached until the command
     // had already finished. Everything that can block belongs inside.
     let outcome = tokio::time::timeout(timeout, async {
-        let mut out = Vec::new();
-        let mut truncated = false;
-        if let Some(pipe) = stdout.as_mut() {
-            let mut buf = vec![0u8; 8192];
-            loop {
-                let n = pipe.read(&mut buf).await.unwrap_or(0);
-                if n == 0 {
-                    break;
-                }
-                if out.len() + n > DEFAULT_OUTPUT_CAP {
-                    truncated = true;
-                    break;
-                }
-                out.extend_from_slice(&buf[..n]);
-            }
-        }
+        // Both pipes, together, and each to the very end.
+        //
+        // stderr was piped and never read. A pipe holds about a buffer's worth
+        // and then blocks the writer, so any command chatty enough on stderr
+        // stopped dead — and because it never exited, stdout never reached EOF
+        // either. Both drains sat there until the timeout killed a process that
+        // had done its work and was only trying to talk. Every such command was
+        // reported as having timed out, however fast it really was.
+        //
+        // Reading past the cap rather than breaking out is the same rule said
+        // again: a reader that stops reading is a writer that stops running.
+        // Only what is *kept* is capped, and nothing is kept — `Exited` carries
+        // an exit code and whether there was more, never the bytes.
+        let (out_more, err_more) = tokio::join!(
+            drain(stdout, DEFAULT_OUTPUT_CAP),
+            drain(stderr, DEFAULT_OUTPUT_CAP)
+        );
         let status = child.wait().await;
-        (status, truncated)
+        (status, out_more || err_more)
     })
     .await;
 
@@ -176,6 +196,28 @@ mod tests {
                 .map(|(k, v)| ((*k).to_string(), v.clone()))
                 .collect(),
         )
+    }
+
+    #[tokio::test]
+    async fn a_command_with_a_lot_to_say_on_stderr_still_finishes() {
+        let mut s = spec("/bin/sh");
+        // Comfortably past a 64 KiB pipe buffer, on stderr, then exit cleanly.
+        s.args = vec![
+            "-c".to_string(),
+            "i=0; while [ $i -lt 4000 ]; do echo \
+             0123456789012345678901234567890123456789012345678901234567890123 >&2; \
+             i=$((i+1)); done; exit 0"
+                .to_string(),
+        ];
+        s.timeout_secs = Some(20);
+        let e = run(&s, 7).await.expect("the command runs");
+        assert_eq!(e.run_id, 7);
+        // Nobody read stderr, so the pipe filled and the command stopped dead
+        // on a write. It never exited, so stdout never reached EOF either, and
+        // the timeout killed a process that had already done its work. The code
+        // came back -1 and the phone was told the command had hung.
+        assert_eq!(e.code, 0, "it exited on its own rather than being killed");
+        assert!(e.truncated, "and it did have more to say than we keep");
     }
 
     #[test]

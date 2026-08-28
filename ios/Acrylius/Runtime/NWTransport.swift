@@ -24,6 +24,8 @@ public final class NWTransport: Transport, @unchecked Sendable {
     private let lock = NSLock()
     private var emit: (@Sendable (FfiEvent) -> Void)?
     private var connections: [UInt64: NWConnection] = [:]
+    /// Links opened for a dial that has not been answered yet. See `answerDial`.
+    private var dialled: [UInt64: UInt64] = [:]
     private var nextLink: UInt64 = 1
     private var browser: NWBrowser?
     private let queue = DispatchQueue(label: "org.acrylius.transport")
@@ -45,9 +47,12 @@ public final class NWTransport: Transport, @unchecked Sendable {
         lock.lock(); let f = emit; lock.unlock()
         f?(e)
     }
+    /// The counter is ours; the id is not. `linkId` namespaces it by transport,
+    /// because the core keys every link in one table and a second transport
+    /// counting from 1 would otherwise mint ids this one already handed out.
     private func claimLink(_ c: NWConnection) -> UInt64 {
         lock.lock(); defer { lock.unlock() }
-        let id = nextLink
+        let id = linkId(transport: transportId, counter: nextLink)
         nextLink += 1
         connections[id] = c
         return id
@@ -58,7 +63,50 @@ public final class NWTransport: Transport, @unchecked Sendable {
     }
     private func release(_ link: UInt64) -> NWConnection? {
         lock.lock(); defer { lock.unlock() }
+        // Both tables, or a link retired before it ever came up leaves its dial
+        // token behind for as long as the transport lives.
+        dialled.removeValue(forKey: link)
         return connections.removeValue(forKey: link)
+    }
+
+    /// Claim the dial this link was opened for, if it is still unanswered.
+    ///
+    /// A dial is answered once, by whichever comes first: the connection going
+    /// `.ready`, or it failing before it ever did. Removing the token is the
+    /// claim, the same trick `retire` uses, so the two cannot both report.
+    ///
+    /// This exists because the token used to be captured for the connection's
+    /// whole life. A link that came up and *then* died still had one, so it
+    /// reported `dialFailed` for a dial that had already succeeded — and the
+    /// core, which had recorded `LinkUp` and was routing over it, never heard
+    /// `LinkDown`. The link stayed up forever, the peer stayed reachable over a
+    /// route that carried nothing, and no plugin was ever told the peer had
+    /// gone. Wi-Fi outranks Bluetooth, so everything went into the dead one.
+    private func answerDial(_ link: UInt64) -> UInt64? {
+        lock.lock(); defer { lock.unlock() }
+        return dialled.removeValue(forKey: link)
+    }
+
+    private func noteDial(_ link: UInt64, _ dial: UInt64) {
+        lock.lock(); defer { lock.unlock() }
+        dialled[link] = dial
+    }
+
+    /// Tell the core a link died, exactly once.
+    ///
+    /// One dropped connection is noticed by several things at once — a read
+    /// that errors, a state change to `.failed`, then `.cancelled` behind it,
+    /// and the viability handler — and the core must hear about it once.
+    /// Removing it from the table is the claim, and only the caller who
+    /// succeeds in removing it gets to report.
+    /// Returns the connection it removed, so a caller that also wants to hang
+    /// up can do so without capturing it — a handler stored *on* a connection
+    /// that captures that connection never lets it go.
+    @discardableResult
+    private func retire(_ link: UInt64, _ reason: FfiLinkDown) -> NWConnection? {
+        guard let dead = release(link) else { return nil }
+        fire(.linkDown(link: link, reason: reason))
+        return dead
     }
 
     // MARK: - Transport
@@ -164,26 +212,56 @@ public final class NWTransport: Transport, @unchecked Sendable {
 
     private func attach(_ c: NWConnection, dial: UInt64?) {
         let link = claimLink(c)
+        if let dial { noteDial(link, dial) }
         c.stateUpdateHandler = { [weak self] state in
             guard let self else { return }
             switch state {
             case .ready:
+                // The dial is answered here and nowhere else. After this the
+                // connection is a link, and anything that happens to it is a
+                // link going down — never a dial that failed.
                 self.fire(.linkUp(link: link, attrs: tcpLanAttrs(transport: self.transportId),
-                                  dial: dial))
+                                  dial: self.answerDial(link)))
                 self.receiveHeader(c, link: link)
             case let .failed(error):
-                if let dial {
-                    self.fire(.dialFailed(dial: dial, reason: "\(error)"))
+                if let pending = self.answerDial(link) {
+                    _ = self.release(link)
+                    self.fire(.dialFailed(dial: pending, reason: "\(error)"))
                 } else {
-                    self.fire(.linkDown(link: link, reason: .transport(detail: "\(error)")))
+                    self.retire(link, .transport(detail: "\(error)"))
                 }
-                _ = self.release(link)
             case .cancelled:
-                self.fire(.linkDown(link: link, reason: .closed))
-                _ = self.release(link)
+                // A dial cancelled before it ever came up still has to be
+                // answered, or the core waits on it for as long as it lives.
+                if let pending = self.answerDial(link) {
+                    _ = self.release(link)
+                    self.fire(.dialFailed(dial: pending, reason: "cancelled"))
+                } else {
+                    self.retire(link, .closed)
+                }
             default:
                 break
             }
+        }
+        // The direct answer to "Wi-Fi was switched off".
+        //
+        // Turning Wi-Fi off does not fail an established connection — nothing
+        // is closed, the peer simply stops answering, and the socket sits
+        // `.ready` and silent while the kernel retransmits. The core ranks
+        // transports by id and Wi-Fi outranks Bluetooth, so until this link is
+        // retired every message is routed into a connection that cannot carry
+        // it, past a Bluetooth link that is up and working. The app says
+        // "connected", and nothing happens.
+        //
+        // iOS knows the moment it happens and will say so, which is far better
+        // than any timeout: viability going false means the path this
+        // connection runs over can no longer carry traffic. There is no waiting
+        // to see whether it recovers — the core re-dials when discovery finds
+        // the desktop again, and being wrong for a second costs a redial, while
+        // being right and slow costs every message in between.
+        c.viabilityUpdateHandler = { [weak self] viable in
+            guard let self, !viable else { return }
+            self.retire(link, .transport(detail: "the network went away"))?.cancel()
         }
         c.start(queue: queue)
     }
@@ -192,8 +270,7 @@ public final class NWTransport: Transport, @unchecked Sendable {
         c.receive(minimumIncompleteLength: 4, maximumLength: 4) { [weak self] data, _, done, error in
             guard let self else { return }
             if error != nil || done {
-                self.fire(.linkDown(link: link, reason: .closed))
-                _ = self.release(link)
+                self.retire(link, .closed)
                 return
             }
             guard let data, data.count == 4 else { return }
@@ -201,9 +278,7 @@ public final class NWTransport: Transport, @unchecked Sendable {
             guard n <= Self.maxFrame else {
                 // Refuse before allocating. A peer that claims more than the cap
                 // is hung up on rather than believed.
-                self.fire(.linkDown(link: link,
-                                    reason: .transport(detail: "frame of \(n) exceeds the cap")))
-                _ = self.release(link)
+                self.retire(link, .transport(detail: "frame of \(n) exceeds the cap"))
                 c.cancel()
                 return
             }
@@ -217,8 +292,7 @@ public final class NWTransport: Transport, @unchecked Sendable {
             [weak self] data, _, done, error in
             guard let self else { return }
             if error != nil || done {
-                self.fire(.linkDown(link: link, reason: .closed))
-                _ = self.release(link)
+                self.retire(link, .closed)
                 return
             }
             if let data, data.count == count {

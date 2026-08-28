@@ -112,6 +112,36 @@ that many bytes, capped at 1 MiB. A receiver enforces the cap before allocating,
 so a peer cannot announce a large length and make the receiver reserve it
 without sending anything.
 
+### 5.1 The BLE transport's framing
+
+A GATT characteristic carries a couple of hundred bytes at a time, so a message
+is split across several writes or notifications. Each fragment carries one
+header byte:
+
+```
+bit 0  MORE    more fragments belong to this message
+bit 1  START   this fragment begins a message
+2..7           reserved, must be zero
+```
+
+A message that fits one fragment is therefore `0x02`; a message in three is
+`0x03`, `0x01`, `0x00`. A receiver accumulates until it sees a fragment with
+`MORE` clear, and enforces the link's `max_message` *before* keeping the bytes,
+for the same reason the TCP transport checks its length prefix first.
+
+`START` is redundant on a link that neither loses nor reorders, which is what a
+BLE connection provides for as long as it lives. It is carried anyway because it
+costs nothing and makes two otherwise silent failures nameable: a continuation
+arriving with no message open, and a message beginning while one is unfinished.
+Both are errors, and both mean the link is no longer trustworthy.
+
+A fragment with a reserved bit set is refused rather than ignored. A peer that
+sets one is speaking a dialect this version does not have.
+
+The fragment size is whatever the link reports — on BlueZ the `mtu` handed to
+`WriteValue`/`StartNotify`, on iOS `maximumWriteValueLength(for:)`. It is never
+assumed.
+
 ## 6. Handshakes
 
 Both handshakes run with a prologue, which Noise mixes into the handshake hash.
@@ -603,13 +633,27 @@ that completed the session handshake can have:
 
 ```
 key = HKDF-SHA256(ikm = session handshake hash,
-                  info = "acrylius/bulk/v1" || transfer as u64be,
+                  info = "acrylius/bulk/v1"
+                         || len(offerer) as u8 || offerer
+                         || transfer as u64be,
                   salt = none)[0..32]
 ```
 
+`offerer` is the device id, as ASCII, of the side that made the offer — the side
+that allocated the transfer id and that dials the listener. Both ends know it
+without another round trip: the sender knows it offered, and the receiver knows
+the offer arrived from its peer.
+
+It is in the derivation because each end numbers its own transfers from one, so
+the first transfer in each direction of a session shares an id. Keyed on the id
+alone, those two derived the same key and both began at nonce zero — keystream
+reuse on a channel that is a plain TCP connection outside the session, taking
+the one-time Poly1305 key with it. The length prefix keeps `offerer || transfer`
+from being read two ways.
+
 The nonce is the chunk's sequence number, counting from zero, in the last eight
 bytes of the twelve. Sequence numbers are never reused under a key, because a
-key is used for exactly one transfer.
+key is used for exactly one transfer in one direction.
 
 The hello is in the clear and is only a demultiplexer: it says which transfer is
 arriving so the listener can pick a key. It authenticates nothing. A connection
@@ -673,6 +717,23 @@ device_id = MMq6cFxD0KKxxurgY8epBg
 "fo"            -> Zm8
 ff efbf         -> _--_
 ```
+
+### BLE fragments
+
+Section 5.1. Fragment sizes include the header byte, so a size of 4 carries
+three bytes of payload.
+
+```
+fragment("", 185)                -> 02
+fragment("hi", 185)              -> 0268 69
+fragment(000102030405060708, 4)  -> 03000102  01030405  00060708
+fragment(00010203040506070809, 4)-> 03000102  01030405  01060708  0009
+
+reassemble(03000102, 01030405, 00060708) -> 000102030405060708
+```
+
+A message that divides evenly across fragments emits no trailing empty fragment:
+the last one carries payload and clears `MORE`.
 
 ### Pairing
 

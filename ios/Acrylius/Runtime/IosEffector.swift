@@ -26,7 +26,17 @@ public final class IosEffector: Effector, @unchecked Sendable {
     ///
     /// Waking a paired computer is unaffected: that is the phone sending a
     /// datagram of its own accord, and needs no capability from anyone.
-    public static let kinds: [FfiEffectKind] = [.clipboard]
+    ///
+    /// `.share` *is* declared, and that is a change: it used to be left out
+    /// because a phone had nowhere to put a file, and the share plugin refuses
+    /// an offer outright without it — before a person is ever asked. Files now
+    /// land in this app's Documents directory, which the Files app shows, so
+    /// the capability is one the phone can actually keep.
+    ///
+    /// It still says nothing about the app being *open*. Nothing here can
+    /// receive in the background, and the screen that offers this says so
+    /// rather than leaving it to be discovered.
+    public static let kinds: [FfiEffectKind] = [.clipboard, .share]
 
     public func run(_ effect: FfiEffect) async -> FfiEffectResult {
         switch effect {

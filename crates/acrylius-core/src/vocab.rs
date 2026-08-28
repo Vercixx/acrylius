@@ -51,6 +51,37 @@ pub struct EffectToken(pub u64);
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct TransferId(pub u64);
 
+/// The half of the range the core mints from, leaving the rest to hosts that
+/// number their own sends. See [`crate::plugin::Cx::new_transfer`].
+pub const MINTED_HERE: u64 = 1 << 63;
+
+impl TransferId {
+    /// The number to show a person, and the one they will type back.
+    ///
+    /// [`MINTED_HERE`] is there so an id minted by the core cannot collide with
+    /// one a host numbered itself, which matters because a transfer is keyed by
+    /// this alone — a collision cancels the wrong one. It is also nineteen
+    /// digits, and `acryliusctl accept` is a number a person reads off a screen
+    /// and retypes. Which half of the range an id came from is not something
+    /// they need to know, so it is not shown.
+    #[must_use]
+    pub fn short(self) -> u64 {
+        self.0 & !MINTED_HERE
+    }
+
+    /// Whether `typed` is a way of writing this id.
+    ///
+    /// Both forms: a script that captured the full one keeps working, and a
+    /// person reading the short one is understood. Matched against the
+    /// transfers actually waiting rather than by putting the marker back
+    /// blindly, so a number that names nothing is refused instead of quietly
+    /// becoming something else.
+    #[must_use]
+    pub fn written_as(self, typed: u64) -> bool {
+        typed == self.0 || typed == self.short()
+    }
+}
+
 /// Correlates an [`Action::Dial`] with the link it eventually produces.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct DialToken(pub u64);
@@ -101,6 +132,18 @@ pub enum Event {
         transfer: TransferId,
         endpoint: String,
     },
+    /// The far end has connected, and bytes are on their way.
+    ///
+    /// The one fact about a transfer that only a host can report, and the core
+    /// cannot do without it. Waiting for a sender that never dials has to be
+    /// bounded — an accepted offer otherwise holds a port and a reserved
+    /// filename for the life of the process — while a file arriving must not be,
+    /// because nothing here knows how long a gigabyte should take. From the
+    /// outside those two are the same silence. This is what tells them apart.
+    ///
+    /// A host that never sends it gets the old behaviour for the transfer
+    /// itself and keeps the bound wait, which is the safe way round.
+    BulkStarted { transfer: TransferId },
     /// A bulk transfer ended, one way or the other. `detail` is empty on
     /// success.
     BulkFinished {
@@ -258,9 +301,14 @@ pub enum EffectKind {
     /// Receiving only, and that asymmetry is the point. A host that can pick a
     /// file can offer it — there is nothing to gate, because it starts the
     /// transfer and reads the bytes itself. Accepting one means a directory, a
-    /// listening socket and a person to ask, and a phone has none of the three.
-    /// So a phone sends files without declaring this and refuses to be sent
-    /// them, which is exactly what it can do.
+    /// listening socket and a person to ask, which is three things rather than
+    /// a capability, and any host that has all three may declare this.
+    ///
+    /// A phone does now, which it did not always: files land in the app's
+    /// Documents directory, it binds a port for one transfer, and a person taps
+    /// Accept. What it still cannot do is any of that with the app closed — but
+    /// that is a reason for the app to say so, not for the core to decide on
+    /// its behalf.
     Share,
     Custom,
 }
@@ -415,11 +463,20 @@ pub enum Action {
     /// Accept a bulk connection for `transfer`, and say where.
     ///
     /// The host answers with [`Event::BulkListening`] once it has somewhere,
-    /// and with [`Event::BulkFinished`] when the transfer ends. A host that
-    /// cannot listen reports that as a finished-and-failed transfer rather than
-    /// staying silent.
+    /// [`Event::BulkStarted`] when the far end actually connects, and
+    /// [`Event::BulkFinished`] when the transfer ends. A host that cannot listen
+    /// reports that as a finished-and-failed transfer rather than staying
+    /// silent.
     BulkListen {
         transfer: TransferId,
+        /// What the *sender* calls this transfer, which is a different number.
+        ///
+        /// The greeting on the bulk socket is written by the dialer, and a
+        /// dialer only knows its own numbering — so this, not `transfer`, is
+        /// what a listener must check that greeting against. Getting it wrong
+        /// does not fail politely: the listener rejects the one connection it
+        /// was waiting for, and the sender sees the socket close on it.
+        offered_as: u64,
         /// Derived from the session. The core is the only thing that knows the
         /// session secret; the host gets a scoped, single-use key and nothing
         /// else.

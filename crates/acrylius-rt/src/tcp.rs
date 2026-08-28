@@ -45,7 +45,7 @@ impl TcpTransport {
     }
 
     fn next_link(&self) -> LinkId {
-        LinkId(self.next_link.fetch_add(1, Ordering::Relaxed))
+        LinkId::new(self.id, self.next_link.fetch_add(1, Ordering::Relaxed))
     }
 }
 
@@ -68,6 +68,47 @@ async fn read_frame(stream: &mut tokio::net::tcp::OwnedReadHalf) -> std::io::Res
 }
 
 /// Pump one accepted or dialled connection until it ends.
+/// How long a peer may be silent, or leave data unacknowledged, before the
+/// socket is declared dead.
+///
+/// This is a *routing* deadline, not a network one. The core picks the best
+/// transport for a peer by transport id, and TCP outranks Bluetooth — so a Wi-Fi
+/// link that is dead but still believed carries every message into a hole, and
+/// the Bluetooth link sitting right beside it, connected and working, is never
+/// chosen. Twenty seconds is how long that can last.
+const DEAD_PEER: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// How long to wait after a failed `accept` before trying again.
+///
+/// Only so a descriptor exhaustion cannot spin the accept loop at full speed;
+/// short enough that a peer arriving a moment later is not kept waiting.
+const ACCEPT_RETRY: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Make a vanished peer show up as a broken socket in bounded time.
+///
+/// Switching Wi-Fi off on a phone does not close anything. The peer simply stops
+/// answering, and by default the kernel is extraordinarily patient about that:
+/// unacknowledged data is retransmitted for roughly fifteen minutes before the
+/// connection errors, and a connection with *nothing* outstanding is never
+/// questioned at all. Both were observed on this project — a desktop holding
+/// `ESTAB … Send-Q 4559` to a phone that had been off Wi-Fi for minutes, while
+/// the phone sat connected over Bluetooth wondering why nothing worked.
+///
+/// So both cases are bounded. Keepalive covers the idle socket; `TCP_USER_TIMEOUT`
+/// covers the one with bytes stuck in the send queue, which is the case
+/// keepalive alone does *not* answer. Failures to set either are ignored: this
+/// is an improvement to how quickly a fault is noticed, and a platform that will
+/// not have it should still carry messages.
+fn bound_the_wait_for_a_dead_peer(stream: &TcpStream) {
+    let sock = socket2::SockRef::from(stream);
+    let keepalive = socket2::TcpKeepalive::new()
+        .with_time(DEAD_PEER / 2)
+        .with_interval(DEAD_PEER / 4);
+    let _ = sock.set_tcp_keepalive(&keepalive);
+    #[cfg(target_os = "linux")]
+    let _ = sock.set_tcp_user_timeout(Some(DEAD_PEER));
+}
+
 async fn serve(
     link: LinkId,
     stream: TcpStream,
@@ -77,13 +118,14 @@ async fn serve(
     writers: Writers,
 ) {
     let _ = stream.set_nodelay(true);
+    bound_the_wait_for_a_dead_peer(&stream);
     let (mut rd, mut wr) = stream.into_split();
     let (tx, mut rx) = mpsc::unbounded_channel::<Option<Vec<u8>>>();
     writers.lock().await.insert(link, tx);
 
     let _ = sink.send(Event::LinkUp { link, attrs, dial });
 
-    let writer = tokio::spawn(async move {
+    let mut writer = tokio::spawn(async move {
         while let Some(Some(msg)) = rx.recv().await {
             let Ok(n) = u32::try_from(msg.len()) else {
                 break;
@@ -96,16 +138,30 @@ async fn serve(
     });
 
     let reason = loop {
-        match read_frame(&mut rd).await {
-            Ok(msg) => {
-                if sink.send(Event::LinkRecv { link, msg }).is_err() {
+        tokio::select! {
+            // The writer ends for exactly three reasons, and all of them mean
+            // this link is over: `Close` sent it `None`, the link was removed
+            // from `writers` so its sender dropped, or the socket stopped
+            // taking bytes.
+            //
+            // Without this arm a closed link left its read half parked in
+            // `read_frame`, holding the task and the descriptor until the peer
+            // sent a FIN of its own — and a peer that has gone silent rather
+            // than closed sends nothing, so it waited out the keepalive
+            // instead, near a minute per link. Shutting down our write half is
+            // a request, not an answer; nothing was waiting for the reply.
+            _ = &mut writer => break LinkDownReason::Closed,
+            frame = read_frame(&mut rd) => match frame {
+                Ok(msg) => {
+                    if sink.send(Event::LinkRecv { link, msg }).is_err() {
+                        break LinkDownReason::Closed;
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                     break LinkDownReason::Closed;
                 }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                break LinkDownReason::Closed;
-            }
-            Err(e) => break LinkDownReason::Transport(e.to_string()),
+                Err(e) => break LinkDownReason::Transport(e.to_string()),
+            },
         }
     };
 
@@ -152,9 +208,22 @@ impl Transport for TcpTransport {
                             accept_writers.clone(),
                         ));
                     }
+                    // One failed accept is not the end of the listener.
+                    //
+                    // Most of what lands here is about the *connection* that was
+                    // being accepted, not the socket doing the accepting:
+                    // ECONNABORTED for a peer that hung up during the handshake,
+                    // and EMFILE or ENFILE when the process is briefly out of
+                    // descriptors. Returning made the daemon stop answering TCP
+                    // for the rest of its life over a peer that changed its
+                    // mind, with one `warn` line to explain it and a phone that
+                    // could still see the mDNS advertisement.
+                    //
+                    // A descriptor exhaustion would also spin this loop at full
+                    // speed, so it pauses before trying again.
                     Err(e) => {
-                        tracing::warn!(error = %e, "accept failed");
-                        return;
+                        tracing::warn!(error = %e, "accept failed; still listening");
+                        tokio::time::sleep(ACCEPT_RETRY).await;
                     }
                 }
             }

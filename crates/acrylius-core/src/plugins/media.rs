@@ -28,6 +28,33 @@ use crate::vocab::{Effect, EffectKind, EffectResult, EffectToken, MediaAction, U
 
 pub const CAP: &str = "org.acrylius.media/1";
 
+/// How long a host may spend waiting for a command to show up in a reading
+/// before it answers with whatever it has.
+///
+/// A player acts on an MPRIS call asynchronously, so the first reading after one
+/// is routinely the state we started from. Short, because most players act in
+/// well under a tenth of a second, and a player that has not moved by now was
+/// probably never going to.
+pub const CONTROL_CONFIRM_MS: u64 = 1_500;
+
+/// How long a client waits for the answer to a media command.
+///
+/// The host's budget plus [`crate::plugin::REPLY_SLACK_MS`], for the reason
+/// spelled out on [`crate::plugins::session::LOCK_REPLY_BUDGET_MS`].
+pub const CONTROL_REPLY_BUDGET_MS: u64 = CONTROL_CONFIRM_MS + crate::plugin::REPLY_SLACK_MS;
+
+// The same rule as the session budgets, refused at compile time. See
+// `plugins::session` for the bug it exists to prevent.
+const _: () = assert!(CONTROL_REPLY_BUDGET_MS > CONTROL_CONFIRM_MS);
+
+/// The values [`MediaPlayer::status`] may take. A host lower-cases whatever its
+/// own player vocabulary is down to one of these.
+pub const PLAYING: &str = "playing";
+/// See [`PLAYING`].
+pub const PAUSED: &str = "paused";
+/// See [`PLAYING`].
+pub const STOPPED: &str = "stopped";
+
 /// One player, as the host found it.
 #[derive(Clone, PartialEq, Eq, Debug, Default, minicbor::Encode, minicbor::Decode)]
 pub struct MediaPlayer {
@@ -135,6 +162,66 @@ fn simple_action(ty: &str) -> Option<MediaAction> {
     })
 }
 
+/// Whether a reading taken after `action` shows the player having acted on it.
+///
+/// Here rather than in either host for the same reason `safe_name` is in
+/// `acrylius_proto`: both ends need this answer and they do not share a runtime.
+/// A desktop waits on it before it answers a command, and a phone uses it to
+/// decide whether the command it sent landed. A second implementation of "did it
+/// land" is how one of them ends up reporting success for something that did
+/// nothing — which is the failure this project keeps running into.
+///
+/// `player` is the id the command named, or empty for "whichever was active",
+/// which is resolved against `before` because that is the reading the command
+/// was aimed at.
+///
+/// `None` means a reading cannot answer the question, and a caller that gets it
+/// must stop waiting rather than guess. A seek moves a position that also moves
+/// on its own, so nothing in a later reading tells a seek that worked from one
+/// that was ignored; a volume set is confirmed by the host that wrote it,
+/// against the value it asked for, which is not something a reading shows.
+#[must_use]
+pub fn landed(
+    action: &MediaAction,
+    player: &str,
+    before: &MediaState,
+    now: &MediaState,
+) -> Option<bool> {
+    let target: &str = if player.is_empty() {
+        &before.active
+    } else {
+        player
+    };
+    let find = |s: &MediaState| s.players.iter().find(|p| p.id == target).cloned();
+    let was = find(before);
+    // A player that has gone away since is not going to report anything. It has
+    // certainly stopped; it has certainly not started.
+    let Some(now) = find(now) else {
+        return Some(matches!(action, MediaAction::Stop));
+    };
+    // What identifies a track, without the position, which moves on its own.
+    let track = |p: &MediaPlayer| {
+        (
+            p.title.clone(),
+            p.artist.clone(),
+            p.album.clone(),
+            p.length_ms,
+        )
+    };
+    match action {
+        MediaAction::Play => Some(now.status == PLAYING),
+        MediaAction::Pause => Some(now.status == PAUSED),
+        MediaAction::Stop => Some(now.status == STOPPED),
+        // Nothing absolute to compare against: the answer is whichever way it
+        // was pointing before.
+        MediaAction::PlayPause => was.map(|w| w.status != now.status),
+        MediaAction::Next | MediaAction::Previous => was.map(|w| track(&w) != track(&now)),
+        MediaAction::Seek { .. }
+        | MediaAction::SetPosition { .. }
+        | MediaAction::SetVolume { .. } => None,
+    }
+}
+
 /// Whether a new reading is worth telling anyone about.
 ///
 /// Everything except where the track has got to. A playing track's position
@@ -168,16 +255,33 @@ fn worth_announcing(before: Option<&MediaState>, now: &MediaState) -> bool {
 
 impl MediaPlugin {
     fn broadcast(&mut self, cx: &mut Cx, state: &MediaState) {
+        self.broadcast_except(cx, state, None);
+    }
+
+    /// Tell everyone except `already_told`, who is getting it as a reply.
+    fn broadcast_except(
+        &mut self,
+        cx: &mut Cx,
+        state: &MediaState,
+        already_told: Option<&DeviceId>,
+    ) {
         let Ok(body) = minicbor::to_vec(state) else {
             return;
         };
         for peer in &self.connected {
+            if Some(peer) == already_told {
+                continue;
+            }
             cx.send(peer, CAP, "state", body.clone());
         }
     }
 
     /// Turn a message into an effect, refusing what cannot be honoured.
-    fn action_for(ty: &str, cmd: &MediaCommand) -> Result<MediaAction, PluginError> {
+    ///
+    /// Free rather than private, because a client needs the same mapping to ask
+    /// [`landed`] whether the verb it sent has taken effect, and a second copy of
+    /// "what does `playpause` mean" is how the two ends come to disagree.
+    pub fn action_for(ty: &str, cmd: &MediaCommand) -> Result<MediaAction, PluginError> {
         if let Some(a) = simple_action(ty) {
             return Ok(a);
         }
@@ -349,6 +453,13 @@ impl Plugin for MediaPlugin {
                     }
                     return;
                 }
+                // A reply is not a broadcast, but it is a fresh reading, and it
+                // has already updated the dedupe cache above — so the next poll
+                // would find nothing changed and tell nobody. One phone pressing
+                // pause left every other device still showing it playing.
+                if changed {
+                    self.broadcast_except(cx, &state, Some(&p.peer));
+                }
                 match minicbor::to_vec(&state) {
                     Ok(body) => cx.send_reply(&p.peer, CAP, "state", body, p.request),
                     Err(_) => cx.send_error(&p.peer, CAP, p.request, "internal", "encode failed"),
@@ -408,6 +519,206 @@ mod tests {
             can_control: true,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn a_broadcast_skips_the_peer_that_left_and_reaches_the_one_that_stayed() {
+        // See the twin of this in `plugins::session`. The third of three
+        // identical untested `retain`s that mutation testing turned up.
+        let mut p = MediaPlugin::default();
+        let gone = peer();
+        let stayed = DeviceId::of(&[9u8; 32]);
+        run(0, |cx| p.on_peer_connected(cx, &gone));
+        run(0, |cx| p.on_peer_connected(cx, &stayed));
+        run(0, |cx| p.on_peer_disconnected(cx, &gone));
+
+        let r = run(0, |cx| p.on_local(cx, &gone, "notify", b"").unwrap());
+        let r2 = run(r.next_token, |cx| {
+            p.on_effect_result(
+                cx,
+                r.token(),
+                &EffectResult::Ok(minicbor::to_vec(state(PLAYING)).unwrap()),
+            );
+        });
+
+        let told: Vec<&DeviceId> = r2
+            .sends
+            .iter()
+            .filter(|s| s.ty == "state")
+            .map(|s| &s.peer)
+            .collect();
+        assert_eq!(told, vec![&stayed]);
+    }
+
+    #[test]
+    fn a_pause_has_landed_only_once_the_player_says_paused() {
+        // The whole point: a reading taken before the player acted looks exactly
+        // like a player that ignored the command, and answering the first one
+        // with "done" is how a phone ends up showing a running timeline on a
+        // track that is already paused.
+        let before = state(PLAYING);
+        assert_eq!(
+            landed(&MediaAction::Pause, "", &before, &state(PLAYING)),
+            Some(false),
+            "still playing: the command has not landed yet"
+        );
+        assert_eq!(
+            landed(&MediaAction::Pause, "", &before, &state(PAUSED)),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn a_position_that_moved_on_its_own_is_not_a_command_landing() {
+        // The bug this function exists to remove: comparing whole states makes a
+        // playing track answer "landed" for any command at all, because its
+        // position moves between any two readings.
+        let before = MediaState {
+            players: vec![player(PLAYING, 1_000)],
+            ..state(PLAYING)
+        };
+        let later = MediaState {
+            players: vec![player(PLAYING, 2_000)],
+            ..state(PLAYING)
+        };
+        assert_ne!(before, later, "the states do differ, which is the trap");
+        assert_eq!(
+            landed(&MediaAction::Pause, "", &before, &later),
+            Some(false),
+            "a moving position must not be mistaken for a pause"
+        );
+    }
+
+    #[test]
+    fn play_and_stop_are_answered_from_the_status_the_player_reports() {
+        // The other two absolute verbs, each needing both answers. A test that
+        // only checks the success case passes just as happily when the
+        // comparison has been inverted — which is how the pause arm ended up
+        // being the only one of the three that was really pinned.
+        let paused = state(PAUSED);
+        assert_eq!(
+            landed(&MediaAction::Play, "", &paused, &state(PAUSED)),
+            Some(false)
+        );
+        assert_eq!(
+            landed(&MediaAction::Play, "", &paused, &state(PLAYING)),
+            Some(true)
+        );
+
+        let playing = state(PLAYING);
+        assert_eq!(
+            landed(&MediaAction::Stop, "", &playing, &state(PLAYING)),
+            Some(false)
+        );
+        assert_eq!(
+            landed(&MediaAction::Stop, "", &playing, &state(STOPPED)),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn play_pause_is_answered_against_where_it_started() {
+        let playing = state(PLAYING);
+        let paused = state(PAUSED);
+        assert_eq!(
+            landed(&MediaAction::PlayPause, "", &playing, &paused),
+            Some(true)
+        );
+        assert_eq!(
+            landed(&MediaAction::PlayPause, "", &playing, &playing),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn a_skip_has_landed_when_the_track_changed_and_not_when_it_only_moved() {
+        let before = MediaState {
+            players: vec![player(PLAYING, 1_000)],
+            ..state(PLAYING)
+        };
+        let same_track_later = MediaState {
+            players: vec![player(PLAYING, 9_000)],
+            ..state(PLAYING)
+        };
+        assert_eq!(
+            landed(&MediaAction::Next, "", &before, &same_track_later),
+            Some(false),
+            "the same song further along is not the next song"
+        );
+
+        let next_track = MediaState {
+            players: vec![MediaPlayer {
+                title: "Another Song".to_string(),
+                ..player(PLAYING, 0)
+            }],
+            ..state(PLAYING)
+        };
+        assert_eq!(
+            landed(&MediaAction::Next, "", &before, &next_track),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn a_player_that_went_away_has_stopped_and_has_not_started() {
+        let before = state(PLAYING);
+        let gone = MediaState {
+            players: vec![],
+            active: String::new(),
+            system_volume: Some(40),
+        };
+        assert_eq!(landed(&MediaAction::Stop, "", &before, &gone), Some(true));
+        assert_eq!(landed(&MediaAction::Play, "", &before, &gone), Some(false));
+    }
+
+    #[test]
+    fn what_a_reading_cannot_answer_is_not_guessed_at() {
+        // A caller that gets `None` stops waiting. Returning `false` here would
+        // make every seek wait out its deadline and then report a failure.
+        let s = state(PLAYING);
+        for action in [
+            MediaAction::Seek { offset_ms: 30_000 },
+            MediaAction::SetPosition { ms: 0 },
+            MediaAction::SetVolume { percent: 50 },
+        ] {
+            assert_eq!(landed(&action, "", &s, &s), None, "{action:?}");
+        }
+    }
+
+    #[test]
+    fn a_named_player_is_answered_and_not_the_active_one() {
+        // A command that names a player must be judged on that player, or a
+        // second player happening to pause would answer for it.
+        let before = MediaState {
+            players: vec![
+                MediaPlayer {
+                    id: "vlc".to_string(),
+                    ..player(PLAYING, 0)
+                },
+                player(PLAYING, 0),
+            ],
+            active: "spotify".to_string(),
+            system_volume: None,
+        };
+        let vlc_paused = MediaState {
+            players: vec![
+                MediaPlayer {
+                    id: "vlc".to_string(),
+                    ..player(PAUSED, 0)
+                },
+                player(PLAYING, 0),
+            ],
+            ..before.clone()
+        };
+        assert_eq!(
+            landed(&MediaAction::Pause, "vlc", &before, &vlc_paused),
+            Some(true)
+        );
+        assert_eq!(
+            landed(&MediaAction::Pause, "", &before, &vlc_paused),
+            Some(false),
+            "the active player is spotify, which is still playing"
+        );
     }
 
     fn command(body: &MediaCommand) -> Vec<u8> {

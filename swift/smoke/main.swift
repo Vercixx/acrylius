@@ -1,5 +1,5 @@
 // A Linux smoke test of the FFI seam: exercise the same calls the iOS app will.
-let key = generateIdentity()
+let key = try! generateIdentity()
 print("identity bytes: \(key.count)")
 print("fingerprint:    \(try! fingerprintOf(identityKey: key))")
 

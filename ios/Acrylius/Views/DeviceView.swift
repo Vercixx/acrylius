@@ -1,6 +1,9 @@
 #if canImport(SwiftUI)
 
 import SwiftUI
+#if canImport(UIKit)
+import UIKit
+#endif
 
 /// One paired computer.
 ///
@@ -17,10 +20,30 @@ struct DeviceView: View {
 
     private var features: PeerFeatures { model.catalog[peer.deviceId] }
 
+    /// How a link kind reads to a person. `nil` when nothing is carrying the
+    /// session, since "Not connected" already says that and a second line
+    /// saying it again is noise.
+    private static func carrying(_ kind: FfiTransportKind?) -> String? {
+        switch kind {
+        case .tcpLan: "Wi-Fi"
+        case .bleGatt: "Bluetooth"
+        case .unixLoopback: "This device"
+        case let .custom(name): name
+        case nil: nil
+        }
+    }
+
     var body: some View {
         List {
             Section {
                 LabeledContent("Status", value: peer.reachable ? "Connected" : "Not connected")
+                // Which radio is carrying this. A second transport is only
+                // useful if it takes over quietly, and something that takes
+                // over quietly is indistinguishable from something broken
+                // unless it says so somewhere.
+                if let over = Self.carrying(peer.transport) {
+                    LabeledContent("Over", value: over)
+                }
                 if !peer.reachable {
                     TaskButton("Connect") { await model.connect(peer); return true }
                 }
@@ -35,8 +58,6 @@ struct DeviceView: View {
                         .disabled(!session.locked)
                 } header: {
                     Text("Session")
-                } footer: {
-                    Text("Unlocking asks for Face ID. Locking does not.")
                 }
             }
 
@@ -65,8 +86,7 @@ struct DeviceView: View {
                 } header: {
                     Text("Power")
                 } footer: {
-                    Text("Aims at the last known address first. Your router needs a "
-                         + "reservation and a static ARP entry for a sleeping machine.")
+                    Text("This will not work if your network blocks Wake on LAN.")
                 }
             }
 
@@ -78,8 +98,8 @@ struct DeviceView: View {
                 }
             }
 
-            Section("Clipboard") {
-                TaskButton("Get from \(peer.name)") { await model.fetchClipboard(peer); return true }
+            Section {
+                TaskButton("Get remote clipboard") { await model.fetchClipboard(peer); return true }
                 if let value = features.clipboard {
                     Text(value)
                         .font(.callout)
@@ -97,6 +117,10 @@ struct DeviceView: View {
                     Task { await model.pushClipboard(text, to: peer) }
                 }
                 .labelStyle(.titleAndIcon)
+            } header: {
+                Text("Clipboard")
+            } footer: {
+                Text("Pushes local clipboard to \(peer.name)")
             }
 
             if let error = features.lastError ?? model.lastError {
@@ -135,7 +159,7 @@ struct DeviceView: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Pairing has to be done again from both ends to undo this.")
+            Text("You'll need to pair \(peer.name) with this \(UIDevice.current.model) again.")
         }
     }
 }

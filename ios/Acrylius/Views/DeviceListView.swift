@@ -1,6 +1,9 @@
 #if canImport(SwiftUI)
 
 import SwiftUI
+#if canImport(UIKit)
+import UIKit
+#endif
 
 struct DeviceListView: View {
     @Environment(AppModel.self) private var model
@@ -12,12 +15,26 @@ struct DeviceListView: View {
     var body: some View {
         NavigationStack(path: $path) {
             List {
+                // First, because it is the only thing here waiting on you. A
+                // transfer holds the sending computer open until it is answered.
+                if !model.incoming.isEmpty {
+                    Section {
+                        ForEach(model.incoming) { offer in
+                            IncomingOfferRow(offer: offer)
+                        }
+                    } header: {
+                        Text("Offered to this \(UIDevice.current.model)")
+                    } footer: {
+                        Text("Accepted files go to Acrylius in the Files app.")
+                    }
+                }
+
                 Section {
                     if model.peers.isEmpty {
                         ContentUnavailableView(
                             "No devices",
                             systemImage: "desktopcomputer",
-                            description: Text("Run `acryliusctl pair` on your PC, then tap ＋.")
+                            description: Text("Tap ＋ to get started.")
                         )
                     } else {
                         ForEach(model.peers, id: \.deviceId) { peer in
@@ -28,7 +45,7 @@ struct DeviceListView: View {
                     }
                 }
 
-                Section("This device") {
+                Section("This \(UIDevice.current.model)") {
                     NavigationLink {
                         DeviceInfoView()
                     } label: {
@@ -51,7 +68,7 @@ struct DeviceListView: View {
                     ContentUnavailableView(
                         "Not paired",
                         systemImage: "desktopcomputer.trianglebadge.exclamationmark",
-                        description: Text("This computer is no longer paired with this phone.")
+                        description: Text("This device is no longer paired with this \(UIDevice.current.model).")
                     )
                 }
             }
@@ -68,6 +85,28 @@ struct DeviceListView: View {
             guard !deviceId.isEmpty else { return }
             path = [deviceId]
         }
+    }
+}
+
+/// One file a computer wants to send, and the two answers to it.
+private struct IncomingOfferRow: View {
+    @Environment(AppModel.self) private var model
+    let offer: AppModel.IncomingOffer
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(offer.name).font(.body)
+            Text(ByteCountFormatter.string(fromByteCount: Int64(offer.size), countStyle: .file))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            HStack {
+                TaskButton("Accept") { await model.accept(offer); return true }
+                    .buttonStyle(.borderedProminent)
+                TaskButton("Decline") { await model.decline(offer); return true }
+                    .buttonStyle(.bordered)
+            }
+        }
+        .padding(.vertical, 4)
     }
 }
 
@@ -99,7 +138,7 @@ private struct PeerRow: View {
             Button("Forget", role: .destructive) { Task { await model.forget(peer) } }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Pairing has to be done again from both ends to undo this.")
+            Text("You'll need to pair \(peer.name) with this \(UIDevice.current.model) again.")
         }
     }
 

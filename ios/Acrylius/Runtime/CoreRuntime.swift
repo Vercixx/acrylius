@@ -22,6 +22,7 @@ public actor CoreRuntime {
     /// Files this device has offered. It holds the paths so that nothing else
     /// has to: not the core, not a plugin, and certainly not a peer.
     public let outbox = FileOutbox()
+    public let inbox = FileInbox()
     private weak var ui: UiSink?
 
     private var transports: [UInt16: any Transport] = [:]
@@ -47,11 +48,15 @@ public actor CoreRuntime {
         effector: Effector = NullEffector(),
         effects: [FfiEffectKind] = []
     ) throws -> CoreRuntime {
+        // `try`, deliberately. A store that cannot read the identity right now
+        // must stop this bootstrap, not fall through to the generate branch:
+        // that branch overwrites, and on a locked phone the read fails for a
+        // reason that has nothing to do with whether an identity exists.
         let key: Data
-        if let existing = store.identityKey() {
+        if let existing = try store.identityKey() {
             key = existing
         } else {
-            key = generateIdentity()
+            key = try generateIdentity()
             try store.setIdentityKey(key)
         }
         let core = try AcryliusCore(
@@ -223,15 +228,71 @@ public actor CoreRuntime {
                 await outbox.forget(transfer)
             }
 
+        case let .bulkListen(transfer, offeredAs, key, expectBytes):
+            // Somebody on this phone has accepted a file. Bind first and answer
+            // with the endpoint, then block on the socket in a task of its own
+            // — the same shape as sending, and for the same reason: a transfer
+            // runs until it is done and the pump has other work.
+            //
+            // The address is looked up rather than assumed. A phone that is not
+            // on Wi-Fi has nowhere a computer could dial, and saying so now is
+            // much kinder than an endpoint that is never answered, which the
+            // far end cannot tell from a slow disk.
+            guard let host = LocalAddress.wifiIPv4() else {
+                submit(.bulkFinished(
+                    transfer: transfer, ok: false,
+                    detail: "this phone is not on Wi-Fi, so there is nowhere to send it"))
+                await inbox.forget(transfer)
+                return
+            }
+            guard let path = await inbox.destination(for: transfer) else {
+                submit(.bulkFinished(
+                    transfer: transfer, ok: false,
+                    detail: "there is no offer for that transfer"))
+                return
+            }
+            let listener: BulkListener
+            do {
+                listener = try BulkListener.bind(host: host)
+            } catch {
+                submit(.bulkFinished(
+                    transfer: transfer, ok: false, detail: "\(error)"))
+                await inbox.forget(transfer)
+                return
+            }
+            // Before the receive, not after: the sender cannot connect until it
+            // has been told where, and nothing is listening for it until this
+            // has gone back through the core.
+            submit(.bulkListening(transfer: transfer, endpoint: listener.endpoint()))
+            Task.detached { [weak self, inbox] in
+                do {
+                    // Waiting and receiving, told apart. Only this end knows
+                    // when the computer actually dialled, and the core needs
+                    // that: it gives up on a sender that never arrives, and must
+                    // never give up on a file that is still coming.
+                    // The sender's number, not ours: it writes the greeting and
+                    // knows only its own numbering.
+                    try listener.accept(transfer: offeredAs)
+                    await self?.submit(.bulkStarted(transfer: transfer))
+                    let got = try listener.receive(
+                        key: key, expectBytes: expectBytes, path: path)
+                    await self?.submit(.bulkFinished(
+                        transfer: transfer, ok: true, detail: "\(got) bytes"))
+                } catch {
+                    await self?.submit(.bulkFinished(
+                        transfer: transfer, ok: false, detail: "\(error)"))
+                }
+                await inbox.forget(transfer)
+            }
+
         case let .bulkUnsupported(transfer):
-            // Receiving. This phone has nowhere to put a file and no way to ask
-            // a person while its app is closed, so it says so immediately: a
-            // sender waiting for an endpoint that is never coming cannot tell
-            // that from a slow disk.
+            // Everything the core cannot ask this host to do. Answered rather
+            // than ignored: a peer waiting on a transfer that is never coming
+            // cannot tell that from one that is merely slow.
             submit(.bulkFinished(
                 transfer: transfer,
                 ok: false,
-                detail: "this device cannot receive files"
+                detail: "this device cannot carry out that transfer"
             ))
 
         case let .ui(event):

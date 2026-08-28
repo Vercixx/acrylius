@@ -124,7 +124,13 @@ mkdir -p "$DROPIN_DIR"
         [ -n "$p" ] || continue
         # A leading '-' so a directory that is not there yet is not a reason
         # for the whole service to refuse to start.
-        echo "ReadWritePaths=-$p"
+        #
+        # Quoted, because systemd splits this setting on whitespace: a share
+        # directory with a space in its name became two paths, neither of which
+        # exists, and the daemon could not write to the one directory it had
+        # been configured with. Quotes are removed before the list is parsed, so
+        # the '-' belongs inside them.
+        echo "ReadWritePaths=\"-$p\""
     done
 } > "$DROPIN_DIR/writable.conf"
 chmod 644 "$DROPIN_DIR/writable.conf"

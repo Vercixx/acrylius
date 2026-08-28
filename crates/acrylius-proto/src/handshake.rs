@@ -188,6 +188,39 @@ mod tests {
     }
 
     #[test]
+    fn a_clock_exactly_at_the_limit_is_still_within_it() {
+        // `MAX_SKEW_MS` is a bound, not the first value outside it. Nothing
+        // pinned that, so the check could quietly become `>=` and start refusing
+        // handshakes from a peer whose clock is exactly a minute out — which is
+        // a refusal to talk at all, on a machine that is behaving.
+        let now = 1_700_000_000_000;
+        assert!(
+            hello(now + MAX_SKEW_MS)
+                .check_freshness(now, GreatestSeen(0))
+                .is_ok()
+        );
+        assert!(
+            hello(now - MAX_SKEW_MS)
+                .check_freshness(now, GreatestSeen(0))
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_refusal_says_how_far_out_the_clock_was() {
+        // The number in the error is the overshoot, and it is what an operator
+        // reads to decide whether a clock is a minute out or a decade. Pinned at
+        // a value where subtracting and dividing give different answers: at
+        // exactly one millisecond over they agree, which is how the arithmetic
+        // here stayed untested.
+        let now = 1_700_000_000_000;
+        assert_eq!(
+            hello(now + MAX_SKEW_MS * 2).check_freshness(now, GreatestSeen(0)),
+            Err(FreshnessError::Skew(MAX_SKEW_MS))
+        );
+    }
+
+    #[test]
     fn the_watermark_survives_a_restart() {
         // The whole point of persisting it: a daemon that forgot would accept a
         // recorded opener again. Reloading the stored value must still refuse.

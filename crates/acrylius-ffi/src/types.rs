@@ -20,8 +20,23 @@ use acrylius_core::vocab as cv;
 pub enum FfiTransportKind {
     TcpLan,
     UnixLoopback,
-    BleL2cap,
+    BleGatt,
     Custom { name: String },
+}
+
+/// The direction the core does not need but a UI does: what is carrying a
+/// session, so a person can see which one took over.
+impl From<cl::TransportKind> for FfiTransportKind {
+    fn from(k: cl::TransportKind) -> Self {
+        match k {
+            cl::TransportKind::TcpLan => Self::TcpLan,
+            cl::TransportKind::UnixLoopback => Self::UnixLoopback,
+            cl::TransportKind::BleGatt => Self::BleGatt,
+            cl::TransportKind::Custom(name) => Self::Custom {
+                name: name.to_string(),
+            },
+        }
+    }
 }
 
 #[derive(uniffi::Enum, Clone, Copy, Debug)]
@@ -56,7 +71,7 @@ impl From<FfiLinkAttrs> for cl::LinkAttrs {
             kind: match a.kind {
                 FfiTransportKind::TcpLan => cl::TransportKind::TcpLan,
                 FfiTransportKind::UnixLoopback => cl::TransportKind::UnixLoopback,
-                FfiTransportKind::BleL2cap => cl::TransportKind::BleL2cap,
+                FfiTransportKind::BleGatt => cl::TransportKind::BleGatt,
                 // Leaked deliberately: the core's variant is `&'static str`, and
                 // a host-supplied name cannot be one. Hosts define a bounded set
                 // of transports at startup, so this does not grow without bound.
@@ -79,6 +94,38 @@ impl From<FfiLinkAttrs> for cl::LinkAttrs {
             },
         }
     }
+}
+
+/// The attributes of a Bluetooth LE link, so a Swift transport does not spell
+/// them out and get one wrong — `max_message` and `bulk` especially, since a
+/// BLE link that claimed a side channel would offer file transfers it cannot
+/// carry out.
+#[uniffi::export]
+#[must_use]
+pub fn ble_attrs(transport: u16) -> FfiLinkAttrs {
+    let a = cl::LinkAttrs::ble(cl::TransportId(transport));
+    FfiLinkAttrs {
+        transport,
+        kind: FfiTransportKind::BleGatt,
+        max_message: a.max_message,
+        reliable: a.reliable,
+        ordered: a.ordered,
+        latency: FfiLatency::Ble,
+        bulk: FfiBulk::None,
+    }
+}
+
+/// Mint a link id for a transport's own counter.
+///
+/// Exported rather than reimplemented in Swift for the same reason the bulk
+/// sealing lives in `acrylius-proto`: two hosts each carrying their own idea of
+/// how an id is built is two implementations of a rule the core depends on. A
+/// Swift transport calls this with `1, 2, 3…` and cannot collide with the Rust
+/// one, which is doing exactly the same thing.
+#[uniffi::export]
+#[must_use]
+pub fn link_id(transport: u16, counter: u64) -> u64 {
+    cl::LinkId::new(cl::TransportId(transport), counter).0
 }
 
 /// The attributes of an ordinary LAN TCP link, so a host does not have to spell
@@ -178,6 +225,11 @@ pub enum FfiEvent {
     BulkListening {
         transfer: u64,
         endpoint: String,
+    },
+    /// The far end connected. Sent between `BulkListener.accept` and its
+    /// `receive`, which is the only moment either is known.
+    BulkStarted {
+        transfer: u64,
     },
     BulkFinished {
         transfer: u64,
@@ -306,6 +358,9 @@ impl TryFrom<FfiEvent> for cv::Event {
                 transfer: cv::TransferId(transfer),
                 endpoint,
             },
+            FfiEvent::BulkStarted { transfer } => Self::BulkStarted {
+                transfer: cv::TransferId(transfer),
+            },
             FfiEvent::BulkFinished {
                 transfer,
                 ok,
@@ -330,6 +385,7 @@ pub enum FfiEffectKind {
     Command,
     Wol,
     Media,
+    Share,
     Custom,
 }
 
@@ -341,6 +397,7 @@ impl From<FfiEffectKind> for cv::EffectKind {
             FfiEffectKind::Command => Self::Command,
             FfiEffectKind::Wol => Self::Wol,
             FfiEffectKind::Media => Self::Media,
+            FfiEffectKind::Share => Self::Share,
             FfiEffectKind::Custom => Self::Custom,
         }
     }
@@ -563,6 +620,20 @@ pub enum FfiAction {
         endpoint: String,
         key: Vec<u8>,
     },
+    /// Accept a file. The host binds somewhere, answers with `BulkListening`
+    /// and the endpoint it bound, then writes what arrives.
+    ///
+    /// `expect_bytes` is what the far end says it is sending, so a host can
+    /// decide whether it wants it before a byte of it exists on disk.
+    BulkListen {
+        transfer: u64,
+        /// What the sender calls this transfer, and the only number it will put
+        /// in its greeting. Keep the listener under `transfer`; check the
+        /// greeting against this.
+        offered_as: u64,
+        key: Vec<u8>,
+        expect_bytes: u64,
+    },
     /// A bulk transfer this host has no way to carry out. The host answers with
     /// a failed `BulkFinished`, so the far end is told rather than left waiting.
     BulkUnsupported {
@@ -632,15 +703,24 @@ impl From<cv::Action> for FfiAction {
                 endpoint,
                 key,
             },
-            // Receiving still does not cross. A phone cannot accept a
-            // connection while its app is closed and has nowhere to put a file,
-            // so it refuses an offer outright rather than half-honouring one —
-            // and the share plugin refuses before this is ever reached, on a
-            // host that does not declare the effect. Mapped rather than ignored
-            // so the day a phone can receive, this is a compile error and not a
-            // silent gap.
-            cv::Action::BulkListen { transfer, .. } => Self::BulkUnsupported {
+            // Receiving crosses now. It used to be turned into "unsupported"
+            // here, because a phone had nowhere to put a file — and the note
+            // that stood in this place said that the day one could receive,
+            // this should be the thing that changes. It is.
+            //
+            // A host that still cannot receive does not reach this at all: the
+            // share plugin refuses an offer outright unless the host declares
+            // the effect, which is the check that keeps the two in step.
+            cv::Action::BulkListen {
+                transfer,
+                offered_as,
+                key,
+                expect_bytes,
+            } => Self::BulkListen {
                 transfer: transfer.0,
+                offered_as,
+                key,
+                expect_bytes,
             },
             cv::Action::BulkCancel { transfer } => Self::BulkUnsupported {
                 transfer: transfer.0,

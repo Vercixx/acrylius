@@ -19,6 +19,7 @@
 //! breaking the rule safe rather than corrupting, but a host that breaks it will
 //! still deadlock itself, so do not.
 
+pub mod ble;
 pub mod bodies;
 pub mod bulk;
 pub mod types;
@@ -76,12 +77,17 @@ pub fn default_config(name: String, platform: String) -> FfiConfig {
 /// the phone is locked, which would break every short-lived extension.
 /// Biometrics belong on the action, as a `LAContext` check before sending an
 /// unlock, not on the key. The old project learned that one the hard way.
+/// Fallible, because the empty vector it used to return on failure was stored
+/// as the identity. A caller reads "first run", writes what it is given, and a
+/// key that is not a key is then on disk for good — every launch after it loads
+/// the same empty bytes and fails the same way, with no path back but reinstall.
 #[uniffi::export]
-#[must_use]
-pub fn generate_identity() -> Vec<u8> {
+pub fn generate_identity() -> Result<Vec<u8>, FfiError> {
     Identity::generate()
         .map(|i| i.private().to_vec())
-        .unwrap_or_default()
+        .map_err(|e| FfiError::Effect {
+            detail: e.to_string(),
+        })
 }
 
 /// A device's public fingerprint, from its private key. Lets a host show its own
@@ -106,6 +112,12 @@ pub struct FfiPeer {
     pub platform: String,
     pub fingerprint: String,
     pub reachable: bool,
+    /// What is carrying the session, when one is up.
+    ///
+    /// `None` means unreachable, not unknown. Worth showing because the whole
+    /// point of a second transport is that it takes over silently, and silence
+    /// is indistinguishable from a thing not working.
+    pub transport: Option<FfiTransportKind>,
 }
 
 #[derive(uniffi::Object)]
@@ -264,6 +276,7 @@ impl AcryliusCore {
                     platform: p.platform.clone(),
                     fingerprint: p.fingerprint()?.to_string(),
                     reachable: core.peer_state(&id) == PeerState::Reachable,
+                    transport: core.transport_for(&id).map(Into::into),
                 })
             })
             .collect()
@@ -318,8 +331,100 @@ pub fn service_type() -> String {
     acrylius_proto::SERVICE_TYPE.to_string()
 }
 
+/// The BLE service the daemon advertises, for `scanForPeripherals(withServices:)`.
+///
+/// Exported for the same reason `service_type()` is: a UUID spelled out twice is
+/// a UUID that can differ by one hex digit, and the failure that produces is a
+/// phone which never finds a desktop with no error anywhere to say why. That is
+/// the exact shape of the bug this project's predecessor died on.
+#[uniffi::export]
+#[must_use]
+pub fn ble_service_uuid() -> String {
+    acrylius_proto::BLE_SERVICE_UUID.to_string()
+}
+
+/// Read after connecting to learn who a peripheral is: the same facts the mDNS
+/// TXT record carries, as `k=v` lines.
+#[uniffi::export]
+#[must_use]
+pub fn ble_identity_uuid() -> String {
+    acrylius_proto::BLE_IDENTITY_UUID.to_string()
+}
+
+/// Written to, one fragment at a time, without response.
+#[uniffi::export]
+#[must_use]
+pub fn ble_rx_uuid() -> String {
+    acrylius_proto::BLE_RX_UUID.to_string()
+}
+
+/// Subscribed to for fragments coming back.
+#[uniffi::export]
+#[must_use]
+pub fn ble_tx_uuid() -> String {
+    acrylius_proto::BLE_TX_UUID.to_string()
+}
+
 #[uniffi::export]
 #[must_use]
 pub fn default_port() -> u16 {
     acrylius_proto::DEFAULT_PORT
+}
+
+/// How long to wait for a lock to be answered before calling it a failure.
+///
+/// Exported rather than written down again on this side. A host spends up to its
+/// own confirm budget watching the screen locker before it answers, so a client
+/// that waits any less reports a failure that did not happen — which is what a
+/// pair of eight-second timeouts, one here and one in Swift, used to do.
+#[uniffi::export]
+#[must_use]
+pub fn session_lock_budget_ms() -> u64 {
+    acrylius_core::plugins::session::LOCK_REPLY_BUDGET_MS
+}
+
+/// See [`session_lock_budget_ms`].
+#[uniffi::export]
+#[must_use]
+pub fn session_unlock_budget_ms() -> u64 {
+    acrylius_core::plugins::session::UNLOCK_REPLY_BUDGET_MS
+}
+
+/// See [`session_lock_budget_ms`].
+#[uniffi::export]
+#[must_use]
+pub fn media_command_budget_ms() -> u64 {
+    acrylius_core::plugins::media::CONTROL_REPLY_BUDGET_MS
+}
+
+/// Whether a reading taken after a command shows the player having acted on it.
+///
+/// The same rule the desktop waits on, so the two ends cannot disagree about
+/// what "it worked" means. `None` — surfaced here as a null — means a reading
+/// cannot answer the question and the caller should stop waiting rather than
+/// guess: a seek moves a position that also moves on its own.
+///
+/// Comparing whole states instead is what this replaces, and it was wrong in
+/// both directions: a playing track's position moves between any two readings,
+/// so every command looked like it landed, while a paused one looked like
+/// nothing ever did.
+#[uniffi::export]
+#[must_use]
+pub fn media_command_landed(
+    verb: String,
+    player: String,
+    value: i64,
+    before: crate::bodies::FfiMediaState,
+    now: crate::bodies::FfiMediaState,
+) -> Option<bool> {
+    use acrylius_core::plugins::media;
+    let cmd = media::MediaCommand {
+        player: player.clone(),
+        value,
+    };
+    // A verb this build does not know is not a question a reading can answer.
+    let Ok(action) = media::MediaPlugin::action_for(&verb, &cmd) else {
+        return None;
+    };
+    media::landed(&action, &player, &before.into(), &now.into())
 }

@@ -12,7 +12,7 @@ struct PairView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("Code from your PC") {
+                Section("Pairing code") {
                     TextField("ABCD1234", text: $code)
                         .textInputAutocapitalization(.characters)
                         .autocorrectionDisabled()
@@ -24,12 +24,12 @@ struct PairView: View {
                         .autocorrectionDisabled()
                         .keyboardType(.URL)
                 } header: {
-                    Text("Where")
+                    Text("IP address")
                 } footer: {
-                    Text("Run `acryliusctl pair` on the PC first. It prints both.")
+                    Text("On PC, run `acryliusctl pair` first.")
                 }
             }
-            .navigationTitle("Pair a PC")
+            .navigationTitle("Pair another device")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
@@ -64,7 +64,7 @@ struct ConfirmPairingView: View {
                 .font(.system(.largeTitle, design: .monospaced))
                 .fontWeight(.semibold)
 
-            Text("Confirm this matches what your PC shows.")
+            Text("Confirm this matches what the other device shows.")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)

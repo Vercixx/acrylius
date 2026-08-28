@@ -31,6 +31,10 @@ use clap::Parser;
 use tokio::sync::{Mutex, broadcast};
 
 const TCP: TransportId = TransportId(1);
+/// Higher than TCP, and that is load-bearing rather than arbitrary: the core
+/// tries routes in ascending transport order, so Wi-Fi is preferred and BLE is
+/// what a peer falls back to.
+const BLE: TransportId = TransportId(2);
 
 #[derive(Parser, Debug)]
 #[command(name = "acryliusd", version, about = "The acrylius daemon")]
@@ -295,7 +299,22 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "acryliusd=info,acrylius_rt=info".into()),
+                // `acrylius_linux` is in the default set because a transport lives
+                // there now. Without it the BLE transport registered, advertised,
+                // took links up and down, and said none of it — which is how a
+                // whole transport ran unnoticed for an afternoon.
+                //
+                // `acrylius_core` for the same reason one level up, and it cost
+                // the same afternoon twice. The core decides which route every
+                // message takes and it was the one crate not admitted here, so a
+                // journal could show a Bluetooth link coming up and a desktop
+                // answering into a dead Wi-Fi socket and look identical to one
+                // where everything worked. Two wrong diagnoses were read off
+                // that silence, both of them from a log line that was never
+                // going to be printed.
+                .unwrap_or_else(|_| {
+                    "acryliusd=info,acrylius_rt=info,acrylius_linux=info,acrylius_core=info".into()
+                }),
         )
         .init();
 
@@ -446,6 +465,17 @@ async fn main() -> anyhow::Result<()> {
     rt.add_transport(
         Arc::new(TcpTransport::new(TCP, port, fingerprint, name.clone())) as Arc<dyn Transport>,
     );
+    // Registered unconditionally. A machine with no adapter, or one whose
+    // controller cannot be a peripheral, answers that in `run` and quietly does
+    // nothing — the same "the machine reports what it has" rule the effectors
+    // follow, rather than a `#[cfg]` or a config flag that lies on the wrong
+    // hardware.
+    if cfg.ble.enabled {
+        rt.add_transport(
+            Arc::new(acrylius_linux::ble::BleTransport::new(BLE, name.clone()))
+                as Arc<dyn Transport>,
+        );
+    }
 
     // The control socket sees UI events over a broadcast, so several `acryliusctl`
     // invocations can watch at once without stealing each other's events.
@@ -621,9 +651,19 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // SIGTERM as well as SIGINT, because systemd stops a service with SIGTERM
+    // and never sends SIGINT at all. Until now the shutdown below ran only when
+    // the daemon had been started by hand in a terminal: every `systemctl
+    // restart` killed it outright, and the BLE advertisement it had registered
+    // stayed registered with bluetoothd. One leaked instance per restart,
+    // against the three this adapter supports, and nothing short of restarting
+    // bluetoothd takes them back — which is what "restarting makes it appear,
+    // then it disappears again" turned out to be.
+    let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     tokio::select! {
         () = rt.run() => {}
         _ = tokio::signal::ctrl_c() => tracing::info!("shutting down"),
+        _ = term.recv() => tracing::info!("shutting down"),
     }
     Ok(())
 }

@@ -18,6 +18,8 @@ export LOGNAME="${LOGNAME:-${USER:-builder}}"
 export USER="${USER:-$LOGNAME}"
 
 VERSION=${XCODEGEN_VERSION:-2.44.1}
+# The commit that tag pointed at when it was pinned. See the check below.
+COMMIT=${XCODEGEN_COMMIT:-21ac9944b0ab546a07422dbed86f33dd2ebd76f8}
 CACHE=${XCODEGEN_CACHE:-target/xcodegen}
 BIN="$CACHE/.build/release/xcodegen"
 
@@ -25,6 +27,16 @@ if [ ! -x "$BIN" ]; then
     echo "building XcodeGen $VERSION (once)…"
     rm -rf "$CACHE"
     git clone --depth 1 --branch "$VERSION" https://github.com/yonaskolb/XcodeGen.git "$CACHE"
+    # A tag is a name somebody else can repoint, and this clone is built and run
+    # on every push and every pull request. Checking the commit it resolved to
+    # is what makes the version above mean one particular tree.
+    got="$(cd "$CACHE" && git rev-parse HEAD)"
+    if [ "$got" != "$COMMIT" ]; then
+        echo "XcodeGen $VERSION is $got, expected $COMMIT" >&2
+        echo "If the bump is deliberate, update XCODEGEN_COMMIT in this script." >&2
+        rm -rf "$CACHE"
+        exit 1
+    fi
     (cd "$CACHE" && swift build -c release)
 fi
 
@@ -88,8 +100,13 @@ membership() {
         *) echo "$((count / 2)) targets" ;;
     esac
 }
+# BLEProbe links CoreBluetooth. In the widget it would be a permission the
+# extension can never prompt for — its Info.plist carries no usage description
+# and an extension has no way to show one. BLEDiagnostics holds no CoreBluetooth
+# and is harmless in both, but there is nothing in the widget that reads it.
 for pair in "AcryliusWidget.swift:one target" "Shortcuts.swift:one target" \
-            "IosEffector.swift:one target" "PCEntity.swift:both targets" \
+            "IosEffector.swift:one target" "BLETransport.swift:one target" \
+            "PCEntity.swift:both targets" \
             "SharedContainer.swift:both targets"; do
     file=${pair%%:*}; want=${pair#*:}
     got=$(membership "$file")

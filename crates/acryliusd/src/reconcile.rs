@@ -147,6 +147,17 @@ const HINTS: &str = r#"
 #               done. Setting this hands out your session without a password, so
 #               it is off unless you turn it on.
 #
+# [ble]
+#   enabled     advertise over Bluetooth LE, so a paired phone reaches this
+#               machine with Wi-Fi off. A machine with no adapter, or one whose
+#               controller cannot act as a peripheral, offers nothing here
+#               whatever this says — capability is detected, not configured.
+#
+#               What it does turn off is the advertising itself, which is a radio
+#               announcing this machine continuously. Pairing is unaffected: it
+#               happens over the network, at this keyboard, and never over
+#               Bluetooth.
+#
 # [commands]
 #   Commands a paired device may run, keyed by the id that travels. The id is
 #   what goes over the network, never the command line, so a device cannot ask

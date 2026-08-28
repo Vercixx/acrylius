@@ -39,7 +39,10 @@ struct PCQuery: EntityQuery {
             return snapshot.peers.map { PCEntity(id: $0.deviceId, name: $0.name) }
         }
         let store = try KeychainStore()
-        guard let key = store.identityKey() else { return [] }
+        // A locked phone throws here rather than answering "no identity", and
+        // suggesting no computers is the right answer to that — inventing one
+        // is not. See `KeychainStore.identityKey`.
+        guard let key = try store.identityKey() else { return [] }
         let core = try AcryliusCore(
             config: defaultConfig(name: "Acrylius", platform: "ios"),
             identityKey: key,

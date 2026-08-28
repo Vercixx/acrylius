@@ -112,3 +112,34 @@ fn hello_vector() {
     );
     assert_eq!(minicbor::decode::<Hello>(&bytes).unwrap(), h);
 }
+
+#[test]
+fn ble_fragment_vectors() {
+    use acrylius_proto::ble;
+
+    let hexes = |msg: &[u8], size: usize| -> Vec<String> {
+        ble::fragment(msg, size).iter().map(|f| hex(f)).collect()
+    };
+
+    assert_eq!(hexes(b"", 185), vec!["02"]);
+    assert_eq!(hexes(b"hi", 185), vec!["026869"]);
+
+    let nine: Vec<u8> = (0..9u8).collect();
+    assert_eq!(
+        hexes(&nine, 4),
+        vec!["03000102", "01030405", "00060708"],
+        "a message that divides evenly emits no trailing empty fragment"
+    );
+
+    let ten: Vec<u8> = (0..10u8).collect();
+    assert_eq!(
+        hexes(&ten, 4),
+        vec!["03000102", "01030405", "01060708", "0009"]
+    );
+
+    // And the other direction, from the bytes the document lists.
+    let mut r = ble::Reassembler::new(1 << 20);
+    assert_eq!(r.push(&[0x03, 0x00, 0x01, 0x02]), Ok(None));
+    assert_eq!(r.push(&[0x01, 0x03, 0x04, 0x05]), Ok(None));
+    assert_eq!(r.push(&[0x00, 0x06, 0x07, 0x08]), Ok(Some(nine)));
+}

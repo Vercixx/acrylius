@@ -56,6 +56,14 @@ public struct PeerFeatures: Equatable, Sendable {
             ?? media.players.first
     }
 
+    /// How old a reading may be before its position stops being counted forward.
+    ///
+    /// The desktop broadcasts every two seconds and a screen asks again while it
+    /// is open, so anything older than a few of those means the readings have
+    /// stopped coming rather than that the track is long. Generous enough to ride
+    /// out a slow Bluetooth notification without the timeline stuttering.
+    static let staleReading: TimeInterval = 10
+
     /// Where the active track has got to, as of now.
     ///
     /// The reported position plus the time since it was reported, and only
@@ -70,6 +78,14 @@ public struct PeerFeatures: Equatable, Sendable {
         guard let player = activePlayer else { return 0 }
         guard player.status == "playing", let mediaAt else { return player.positionMs }
         let elapsed = max(0, now.timeIntervalSince(mediaAt))
+        // Only while the readings are still arriving. `position` is reported and
+        // never counted — the core says so twice, and gives the reason: a
+        // receiver that keeps counting goes on counting after the media stopped
+        // somewhere it cannot see. That is not hypothetical here. Readings come
+        // every couple of seconds while a screen is open, so one this old means
+        // nobody is refreshing any more: the peer went away, the link died, or
+        // the app was backgrounded. Freeze rather than invent.
+        guard elapsed <= Self.staleReading else { return player.positionMs }
         let estimate = player.positionMs + UInt64(elapsed * 1000)
         // Never past the end. A track that finished while nobody was asking
         // would otherwise show a time longer than itself.
@@ -98,6 +114,13 @@ public struct PeerCatalog: Equatable, Sendable {
                 // the machine is gone, and a command list does not change while
                 // nobody is looking.
                 byPeer[peer]?.session = nil
+                // The track stays; the clock under it does not. Dropping the
+                // timestamp is what `positionMs` already treats as "no idea when
+                // this was read", so the timeline freezes where it was last
+                // actually seen instead of running on for as long as the app is
+                // open. A stream reports no length, so nothing would have capped
+                // it either.
+                byPeer[peer]?.mediaAt = nil
                 return true
             }
             return false
@@ -109,7 +132,16 @@ public struct PeerCatalog: Equatable, Sendable {
         if ty == "err" {
             features.lastError = (try? decodeError(body: body)) ?? "refused"
             changed = true
-        } else if cap == capSession() {
+        } else if features.lastError != nil {
+            // Anything else arriving from this peer means it is answering again,
+            // and whatever went wrong before is over. Nothing ever cleared this,
+            // so one refusal — a file declined, a player that would not take a
+            // command — stayed on that device's screen for the life of the app,
+            // outliving the thing it described by hours.
+            features.lastError = nil
+            changed = true
+        }
+        if cap == capSession() {
             switch ty {
             case "state":
                 features.session = try? decodeSessionState(body: body)

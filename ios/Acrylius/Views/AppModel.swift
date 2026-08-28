@@ -40,7 +40,46 @@ final class AppModel {
     /// what is in flight rather than going quiet between the tap and the reply.
     var sending: [UInt64: String] = [:]
 
+    /// A file a computer has offered this phone, waiting on a person.
+    struct IncomingOffer: Identifiable, Sendable, Equatable {
+        var id: UInt64 { transfer }
+        let transfer: UInt64
+        let peer: String
+        let name: String
+        let size: UInt64
+    }
+
+    /// Offers nobody has answered yet.
+    ///
+    /// Deliberately not answered automatically. A paired computer can put a
+    /// file on this phone only because someone here said so, each time — the
+    /// same rule the desktop follows, and worth keeping on the device that
+    /// travels.
+    var incoming: [IncomingOffer] = []
+
+    /// What Bluetooth is doing. A projection like everything else here, filled
+    /// in by the probe; the model decides nothing about the radio itself.
+    let ble = BLEDiagnostics()
+
     private var runtime: CoreRuntime?
+    #if canImport(CoreBluetooth)
+        private var bluetooth: BLETransport?
+    #endif
+
+    /// Start scanning, raising the permission prompt if it has not been asked.
+    ///
+    /// Called when the Bluetooth screen appears rather than at launch, because
+    /// `CBCentralManager` prompts the moment it is constructed and a prompt with
+    /// nothing on screen to explain it is one people refuse — which only Settings
+    /// undoes. Once allowed, `start()` brings it up on every launch without
+    /// anyone visiting this screen again.
+    func startBluetooth() {
+        #if canImport(CoreBluetooth)
+            bluetooth?.startManager()
+        #else
+            ble.managerState = "no CoreBluetooth in this build"
+        #endif
+    }
 
     func start() async {
         guard runtime == nil else { return }
@@ -61,6 +100,26 @@ final class AppModel {
                 serviceType: serviceType(),
                 port: defaultPort()
             ))
+            #if canImport(CoreBluetooth)
+                // Transport 2, matching the daemon. The core tries routes in
+                // ascending transport order, so Wi-Fi is preferred and this is
+                // the fallback. Added before `start()`, which sends
+                // advertise/discover to whatever transports exist at that moment.
+                let ble = BLETransport(transportId: 2) { [weak self] update in
+                    Task { @MainActor in
+                        self?.ble.apply(update)
+                        // A Bluetooth problem with a fix worth naming does not
+                        // belong only on a debug screen someone has to go
+                        // looking for. It is the same channel every other
+                        // failure reports through.
+                        if case let .trouble(message) = update {
+                            self?.lastError = message
+                        }
+                    }
+                }
+                bluetooth = ble
+                await rt.add(transport: ble)
+            #endif
             await rt.start()
             runtime = rt
             deviceId = await rt.deviceId()
@@ -116,9 +175,7 @@ final class AppModel {
             // logind only emits a signal; acting on it is the screen locker's
             // choice, and several do not. Saying "unlocked" because the request
             // was delivered would be a lie the user cannot check from here.
-            lastError = "\(peer.name) did not unlock. Its screen locker has to "
-                + "act on logind's unlock signal, and not all of them do — "
-                + "set session.unlock_command on that machine."
+            lastError = "\(peer.name) did not unlock. Possible reason is that the locker does not support unlocking."
         }
         return ok
     }
@@ -127,8 +184,17 @@ final class AppModel {
     ///
     /// The answer comes from what the machine reports after re-reading its own
     /// state, never from the request having been delivered.
+    ///
+    /// How long to wait is not a number chosen here. The desktop watches its own
+    /// screen locker for up to its confirm window before it answers at all, so a
+    /// budget picked independently on this side can be shorter than the machine
+    /// is allowed to take — and then a lock that worked is reported as a failure,
+    /// intermittently, depending on how quick the locker is. It was eight seconds
+    /// against a host allowed eight, leaving nothing at all for the answer to
+    /// travel back over Bluetooth. The core hands out both numbers now.
     private func awaitScreen(_ peer: FfiPeer, locked: Bool) async -> Bool {
-        let deadline = ContinuousClock.now.advanced(by: .seconds(8))
+        let budget = locked ? sessionLockBudgetMs() : sessionUnlockBudgetMs()
+        let deadline = ContinuousClock.now.advanced(by: .milliseconds(Int(budget)))
         while ContinuousClock.now < deadline {
             if catalog[peer.deviceId].session?.locked == locked { return true }
             try? await Task.sleep(for: .milliseconds(150))
@@ -143,20 +209,41 @@ final class AppModel {
     /// Every one of these is answered with the state afterwards rather than an
     /// acknowledgement, because a player may ignore a command, clamp a seek, or
     /// stop of its own accord — and only reading it back says which.
+    ///
+    /// Whether the command landed is the core's rule, asked of it rather than
+    /// decided here. Waiting for the whole state to differ was wrong in both
+    /// directions: a playing track's position moves between any two readings, so
+    /// every command looked like it had landed, while a paused one never changed
+    /// at all and nothing ever looked like it had.
     @discardableResult
     func media(_ peer: FfiPeer, _ verb: String, player: String = "", value: Int64 = 0) async -> Bool {
         let before = catalog[peer.deviceId].media
+        let beforeAt = catalog[peer.deviceId].mediaAt
         await send(
             peer,
             cap: capMedia(),
             ty: verb,
             body: encodeMediaCommand(player: player, value: value)
         )
-        // The answer replaces the state, so waiting for it to differ is waiting
-        // for the command to have landed.
-        let deadline = ContinuousClock.now.advanced(by: .seconds(5))
+        let deadline = ContinuousClock.now.advanced(by: .milliseconds(Int(mediaCommandBudgetMs())))
         while ContinuousClock.now < deadline {
-            if catalog[peer.deviceId].media != before { return true }
+            let features = catalog[peer.deviceId]
+            // `mediaAt` moves on every reading, so this is "something arrived",
+            // which a comparison of the readings themselves cannot tell us.
+            if features.mediaAt != beforeAt, let now = features.media {
+                guard let before else { return true }
+                guard let landed = mediaCommandLanded(
+                    verb: verb, player: player, value: value, before: before, now: now
+                ) else {
+                    // A reading cannot answer this one — a seek moves a position
+                    // that also moves on its own — so the reading is the answer.
+                    return true
+                }
+                // Not yet is not no. Keep waiting rather than answering: the
+                // two-second poll can land between the command and its reply,
+                // and it would be showing the state we started from.
+                if landed { return true }
+            }
             try? await Task.sleep(for: .milliseconds(120))
         }
         return false
@@ -168,6 +255,28 @@ final class AppModel {
 
     func refreshSession(_ peer: FfiPeer) async {
         await send(peer, cap: capSession(), ty: "query", body: Data())
+    }
+
+    /// Ask a peer that has just come back where things stand.
+    ///
+    /// Losing a peer discards its session state — `PeerCatalog.ingest` clears it
+    /// on `peerUnreachable`, because a lock screen remembered from ten minutes
+    /// ago is worse than no answer. Nothing put it back. The device screen asks
+    /// once, in `.task` when it appears, and a peer that goes away and returns
+    /// while you are already looking at it never triggers that again — so the
+    /// Session controls vanished and stayed vanished until the screen was left
+    /// and re-entered.
+    ///
+    /// Watching a computer switch from Wi-Fi to Bluetooth is exactly when
+    /// somebody is looking at that screen. Media hid the same bug: its state is
+    /// broadcast whenever a track or position changes, so it refilled itself
+    /// within seconds and only looked briefly stale, while the session state —
+    /// which changes when someone locks their screen, and not otherwise — had
+    /// nothing to refill it.
+    private func reacquaint(with peerId: String) async {
+        guard let peer = peers.first(where: { $0.deviceId == peerId }) else { return }
+        await refreshSession(peer)
+        await refreshMedia(peer)
     }
 
     func run(_ command: FfiCommand, on peer: FfiPeer) async {
@@ -249,6 +358,30 @@ final class AppModel {
         status = "Offered \(offer.name)"
     }
 
+    /// Say yes to a file. This is what makes the phone bind a port and wait.
+    func accept(_ offer: IncomingOffer) async {
+        // Left in the list until the transfer actually ends, so the row does
+        // not vanish the instant it is tapped and leave nothing to look at
+        // while the bytes move.
+        await answer(offer, ty: "accept")
+        status = "Receiving \(offer.name)"
+    }
+
+    func decline(_ offer: IncomingOffer) async {
+        incoming.removeAll { $0.transfer == offer.transfer }
+        await answer(offer, ty: "reject")
+        status = "Declined \(offer.name)"
+    }
+
+    /// An answer to an offer is the transfer's id and nothing more; the plugin
+    /// looks the rest up from what it already holds.
+    private func answer(_ offer: IncomingOffer, ty: String) async {
+        let body = encodeShareEnd(
+            end: FfiTransferEnd(transfer: offer.transfer, ok: true, detail: ""))
+        await runtime?.submit(
+            .pluginCommand(peer: offer.peer, cap: capShare(), ty: ty, body: body))
+    }
+
     private func send(_ peer: FfiPeer, cap: String, ty: String, body: Data) async {
         await runtime?.submit(.pluginCommand(peer: peer.deviceId, cap: cap, ty: ty, body: body))
     }
@@ -260,7 +393,7 @@ final class AppModel {
         guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &error) else {
             // No passcode set. Refusing outright would make the app unusable on
             // a device its owner chose not to lock, so this proceeds and says so.
-            lastError = "This device has no passcode; unlocking was not confirmed."
+            lastError = "You cannot use session controls if your device has no passcode."
             return true
         }
         return (try? await context.evaluatePolicy(.deviceOwnerAuthentication,
@@ -335,19 +468,44 @@ final class AppModel {
             pairingSas = nil
             pairingCode = nil
             lastError = reason
-        case let .peerReachable(_, name):
+        case let .peerReachable(peer, name):
             status = "connected to \(name)"
-            Task { await refresh() }
+            Task {
+                await refresh()
+                await reacquaint(with: peer)
+            }
         case .peerUnreachable:
             status = "not connected"
             Task { await refresh() }
-        case let .plugin(_, cap, ty, body):
+        // The peer is bound now: answering an offer means naming who made it,
+        // and until this phone could receive a file there was nothing here that
+        // needed to know.
+        case let .plugin(peer, cap, ty, body):
             if ty == "pong" { status = "pong" }
+            // A computer wants to send this phone something. Recorded in two
+            // places at once: the inbox settles where it would land, so a name
+            // collision is resolved before anyone agrees to anything, and the
+            // list here is what a person is actually shown.
+            if cap == capShare(), ty == "offer",
+               let offer = try? decodeShareOffer(body: body) {
+                let from = peer
+                Task { [weak self] in
+                    await self?.runtime?.inbox.remember(
+                        transfer: offer.transfer, peer: from,
+                        name: offer.name, size: offer.size)
+                }
+                incoming.removeAll { $0.transfer == offer.transfer }
+                incoming.append(IncomingOffer(
+                    transfer: offer.transfer, peer: peer,
+                    name: bulkSafeName(offered: offer.name), size: offer.size))
+                status = "\(offer.name) offered"
+            }
             // Both ends report a transfer, because each knows only its own
             // half: this phone knows it finished writing, and only the computer
             // knows whether it kept the file.
             if cap == capShare(), ty == "finished" || ty == "reject",
                let end = try? decodeShareFinished(body: body) {
+                incoming.removeAll { $0.transfer == end.transfer }
                 let name = sending.removeValue(forKey: end.transfer) ?? "the file"
                 if ty == "reject" {
                     status = "\(name) was refused"

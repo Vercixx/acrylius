@@ -551,7 +551,14 @@ async fn handle_conn(stream: UnixStream, h: Handles) -> anyhow::Result<()> {
                     Some(bulk) => bulk
                         .pending()
                         .into_iter()
-                        .map(|o| format!("{:<6} {:<28} {}", o.transfer, o.name, human(o.size)))
+                        .map(|o| {
+                            format!(
+                                "{:<6} {:<28} {}",
+                                acrylius_core::vocab::TransferId(o.transfer).short(),
+                                o.name,
+                                human(o.size)
+                            )
+                        })
                         .collect(),
                     None => Vec::new(),
                 };
@@ -574,7 +581,14 @@ async fn handle_conn(stream: UnixStream, h: Handles) -> anyhow::Result<()> {
                     .await?;
                     continue;
                 };
-                let Some(peer) = bulk.peer_for(transfer) else {
+                // What a person typed is what they were shown, which is the id
+                // without the half-of-the-range marker on it. Resolved back to
+                // the real one here, once, so nothing below this deals in two
+                // spellings of the same transfer.
+                let Some(transfer) = bulk
+                    .resolve(transfer)
+                    .filter(|t| bulk.peer_for(*t).is_some())
+                else {
                     write(
                         &mut wr,
                         &Response::Error {
@@ -584,8 +598,9 @@ async fn handle_conn(stream: UnixStream, h: Handles) -> anyhow::Result<()> {
                     .await?;
                     continue;
                 };
+                let peer = bulk.peer_for(transfer).expect("just checked");
                 let body = minicbor::to_vec(acrylius_core::plugins::share::Finished {
-                    transfer,
+                    transfer: transfer.0,
                     ok: accept,
                     detail: String::new(),
                 })
@@ -594,7 +609,7 @@ async fn handle_conn(stream: UnixStream, h: Handles) -> anyhow::Result<()> {
                 if !accept {
                     // An accepted offer is dropped when the bytes stop moving.
                     // A refused one has no later moment, so it goes here.
-                    bulk.forget(acrylius_core::vocab::TransferId(transfer));
+                    bulk.forget(transfer);
                 }
                 plugin_request(
                     &mut wr,
@@ -887,12 +902,16 @@ fn describe(cap: &str, ty: &str, body: &[u8]) -> String {
             return format!("{} offers {} ({})", ty, o.name, human(o.size));
         }
         if let Ok(f) = minicbor::decode::<Finished>(body) {
+            // The same number the offer was listed under. Reporting the stored
+            // one instead would end a transfer under a different name from the
+            // one it was accepted by.
+            let n = acrylius_core::vocab::TransferId(f.transfer).short();
             return if f.ok {
-                format!("transfer {} finished", f.transfer)
+                format!("transfer {n} finished")
             } else if f.detail.is_empty() {
-                format!("transfer {} was refused", f.transfer)
+                format!("transfer {n} was refused")
             } else {
-                format!("transfer {} failed: {}", f.transfer, f.detail)
+                format!("transfer {n} failed: {}", f.detail)
             };
         }
     }

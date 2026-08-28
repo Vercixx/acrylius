@@ -7,7 +7,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::config::CoreConfig;
-use crate::link::{LinkAttrs, LinkDownReason, LinkId, TransportId};
+use crate::link::{
+    BulkSupport, LinkAttrs, LinkDownReason, LinkId, Routes, TransportId, TransportKind,
+};
 use crate::noise::{Handshake, Identity, Session};
 use crate::peer::{PeerRecord, PeerState};
 use crate::plugin::{BulkRequest, Cx, PendingSend, Plugin};
@@ -20,6 +22,45 @@ use crate::vocab::{
     Action, DialToken, EffectKind, EffectResult, EffectToken, Event, LocalCommand, Now, Outcome,
     Sensitivity, TransferId, UiEvent,
 };
+
+/// A dial in flight: who we are trying to reach, the routes not yet tried, and
+/// whether a person asked for it.
+type PeerDial = (DeviceId, Vec<(TransportId, String)>, bool);
+
+/// How many unpaired sightings to remember at once.
+///
+/// Far more than a home or an office has, and small enough that the map cannot
+/// become a leak on a daemon that runs for months across many networks.
+const MAX_SEEN: usize = 256;
+
+/// How long a host may hold a listener open for a sender that has not dialled.
+///
+/// The wait, never the transfer: [`Event::BulkStarted`] ends it the moment the
+/// far end connects, so a slow gigabyte is not this deadline's business.
+///
+/// What is being bounded is a sender that will never come — its session died
+/// between the accept and the dial, its app was killed, its Wi-Fi went away.
+/// Until this existed there was nothing to end that: a port stayed bound and a
+/// filename stayed reserved for the life of the process, and the person who had
+/// pressed Accept was shown a transfer that never moved and never failed.
+///
+/// Thirty seconds because the dial follows the endpoint immediately and over
+/// anything a session already runs on it is one round trip. Long enough that a
+/// loaded phone waking a socket is not cut off; short enough that a person
+/// watching it knows something is wrong before they ask.
+///
+/// Public because a host may want to say so in a UI, and because a second host
+/// must not invent its own answer — the shape of the lock-budget bug, which is
+/// written up on [`crate::plugins::session::LOCK_REPLY_BUDGET_MS`].
+pub const BULK_DIAL_WAIT_MS: u64 = 30_000;
+
+/// What a link we dialled brings with it into its handshake.
+struct Dialled {
+    attrs: LinkAttrs,
+    deadline: u64,
+    /// Routes not tried yet. See [`HandshakingLink::fallback`].
+    fallback: Option<PeerDial>,
+}
 
 /// A link that exists but has not said anything yet. We do not know whether it
 /// wants to pair or to resume until its first frame arrives.
@@ -43,6 +84,17 @@ struct HandshakingLink {
     /// throwing that away was the reason a freshly paired device reported
     /// itself unreachable until discovery happened to run again.
     via: Option<(TransportId, String)>,
+    /// The routes this dial had not tried yet, kept until the *session* is up
+    /// rather than until the socket is.
+    ///
+    /// A dial that connects has proved a socket, not a peer. If the handshake
+    /// then never finishes — something else listening on the port, a stale NAT
+    /// mapping, a peer that is not the one expected — there is no `DialFailed`
+    /// to walk the rest of the list, because the dial did not fail. Dropping
+    /// the alternatives the moment the link came up left a device with a
+    /// perfectly good second route unreachable until something else happened
+    /// to dial it, and told nobody.
+    fallback: Option<PeerDial>,
 }
 
 struct UpLink {
@@ -52,6 +104,33 @@ struct UpLink {
     /// session still needs — the cipher has its own state — but it is the one
     /// value both ends share and nobody else knows.
     handshake_hash: Vec<u8>,
+    /// The two promises `LinkAttrs` makes that the core is supposed to keep.
+    ///
+    /// Kept as the fields themselves rather than the whole `LinkAttrs`, which
+    /// would make this variant much larger than its siblings for no gain. Both
+    /// went unenforced until a second transport existed to notice.
+    bulk: BulkSupport,
+    max_message: u32,
+    /// When something last arrived over this link, on the host's monotonic
+    /// clock. The handshake counts, because it arrived here too.
+    ///
+    /// This is the only evidence a link is still carrying anything. Nothing
+    /// else in the core can tell a working socket from one whose far end has
+    /// vanished — that is a host's job, and the honest answer from a host takes
+    /// as long as a keepalive. See [`Core::best_link`], which routes by it.
+    last_recv_ms: u64,
+    /// Which transport is carrying this session, and how it reads to a person.
+    ///
+    /// The id is what orders them: preference is ascending, which is how the
+    /// hosts register them — Wi-Fi before Bluetooth. Kept on the link rather
+    /// than read back out of the `LinkId`'s high bits, because that would make
+    /// every routing decision depend on ids having been minted with the
+    /// namespacing rule, which is a convention a host can get wrong.
+    transport: TransportId,
+    /// The name for it. Not used to decide anything: it exists because "the
+    /// phone is on Bluetooth now" is invisible otherwise, and a transport that
+    /// silently changes under you is one nobody can tell is working.
+    kind: TransportKind,
     /// Our `caps_out` ∩ their `caps_in`, which is what we may send.
     can_send: Vec<String>,
     /// Their `caps_out` ∩ our `caps_in`, which is what we will accept.
@@ -61,7 +140,10 @@ struct UpLink {
 enum LinkState {
     Pending(PendingLink),
     Handshaking(Box<HandshakingLink>),
-    Up(UpLink),
+    /// Boxed for the same reason its sibling is: a live session is by far the
+    /// largest thing a link can be, and every pending or handshaking link would
+    /// otherwise pay for it.
+    Up(Box<UpLink>),
 }
 
 /// A pairing handshake that finished and is waiting on a human.
@@ -74,7 +156,16 @@ struct AwaitingConfirm {
 }
 
 struct PairingWindow {
-    psk: [u8; 32],
+    /// The code's key, or `None` for a window that answers no one.
+    ///
+    /// `None` is the side that *initiated*. It has no code to answer with — it
+    /// already sent one — and only needs somewhere to keep the confirmation it
+    /// is waiting on. It used to keep it in a window with an all-zero psk, which
+    /// is a constant anybody can type: for as long as a human was looking at the
+    /// SAS dialog, any device that could reach this one completed `XXpsk0`
+    /// against a known key, and the handshake it finished *replaced* the pending
+    /// confirmation. The human then compared a code and approved a stranger.
+    psk: Option<[u8; 32]>,
     deadline: u64,
     attempts: u8,
     awaiting: Option<AwaitingConfirm>,
@@ -87,7 +178,7 @@ pub struct Core {
     links: BTreeMap<LinkId, LinkState>,
     /// Last address discovery offered for a peer. Untrusted, and only ever used
     /// to decide where to dial, never to decide who answered.
-    addrs: BTreeMap<DeviceId, (TransportId, String)>,
+    addrs: BTreeMap<DeviceId, Routes>,
     /// Every address discovery has ever shown us, keyed by advertised
     /// fingerprint and kept regardless of whether that device is paired.
     ///
@@ -95,17 +186,29 @@ pub struct Core {
     /// about it changes, so an announcement that arrives before pairing is the
     /// only one there will be. Dropping it because the sender was not yet a
     /// peer meant the address was gone for good.
-    seen: BTreeMap<Fingerprint, (TransportId, String)>,
+    seen: BTreeMap<Fingerprint, Routes>,
     pairing: Option<PairingWindow>,
     /// Dials we started for pairing, and the PSK to use when they land.
     pending_pair_dials: BTreeMap<DialToken, ([u8; 32], (TransportId, String))>,
-    /// Dials we started to reach a known peer.
-    pending_peer_dials: BTreeMap<DialToken, DeviceId>,
+    /// Dials we started to reach a known peer, each with the routes not yet
+    /// tried. A dial that fails falls through to the next rather than reporting
+    /// the peer unreachable while a working route sits untried.
+    /// The flag is whether a person asked, which decides whether failing to
+    /// reach them is worth saying out loud.
+    pending_peer_dials: BTreeMap<DialToken, PeerDial>,
     plugins: Vec<Box<dyn Plugin>>,
     /// Which plugin asked for an outstanding effect.
     effect_owner: BTreeMap<EffectToken, usize>,
     /// Which plugin owns a bulk transfer, so its answer reaches the right one.
     bulk_owner: BTreeMap<TransferId, usize>,
+    /// This device's transfer numbering. See [`Cx::new_transfer`].
+    next_transfer: u64,
+    /// Transfers a host is listening for, and when to stop waiting.
+    ///
+    /// An entry lives from [`Action::BulkListen`] until the far end connects,
+    /// and no longer: [`Event::BulkStarted`] takes it out, so the deadline
+    /// bounds the wait and never the file. See [`BULK_DIAL_WAIT_MS`].
+    bulk_wait: BTreeMap<TransferId, u64>,
     caps_out: Vec<String>,
     caps_in: Vec<String>,
     /// The subset of `caps_in` this host can actually act on, rather than only
@@ -205,8 +308,8 @@ impl Core {
             Event::LinkDown { link, .. } => self.on_link_down(now_ms, link, &mut out),
             Event::DialFailed { dial, reason } => {
                 self.pending_pair_dials.remove(&dial);
-                if let Some(p) = self.pending_peer_dials.remove(&dial) {
-                    out.ui(UiEvent::PeerUnreachable { peer: p });
+                if let Some(pending) = self.pending_peer_dials.remove(&dial) {
+                    self.try_next_route(pending, &mut out);
                 } else {
                     out.ui(UiEvent::PairingFailed { reason });
                 }
@@ -218,14 +321,50 @@ impl Core {
                     // happens after the single resolution discovery will emit —
                     // so dropping this as "not a peer yet" threw away the only
                     // chance to learn where that device lives.
-                    self.seen.insert(fp.clone(), (transport, peer.addr.clone()));
+                    // Per transport, so a sighting on one never evicts what
+                    // another already knows.
+                    // Bounded, because nothing prunes it and every acrylius
+                    // device on every network this one ever joins leaves an
+                    // entry. A key and a couple of addresses is small, but the
+                    // map only ever grows, and a long-lived daemon on a busy
+                    // network is exactly where that stops being theoretical.
+                    //
+                    // Dropped rather than evicted cleverly: this is a cache of
+                    // where something was last seen, and anything discovery
+                    // still cares about will be advertised again within seconds.
+                    // A paired peer's address is kept in `addrs` below, which is
+                    // bounded by the number of peers and is the one that matters.
+                    if self.seen.len() >= MAX_SEEN && !self.seen.contains_key(&fp) {
+                        self.seen.clear();
+                    }
+                    self.seen
+                        .entry(fp.clone())
+                        .or_default()
+                        .set(transport, peer.addr.clone());
                     if let Some(rec) = self
                         .peers
                         .values()
                         .find(|r| r.fingerprint().as_ref() == Some(&fp))
                         && let Some(id) = rec.id()
                     {
-                        self.addrs.insert(id, (transport, peer.addr));
+                        self.addrs
+                            .entry(id.clone())
+                            .or_default()
+                            .set(transport, peer.addr);
+                        // And reach it. Seeing a device we have already paired
+                        // with, on an address we have just learned, is the whole
+                        // set of conditions for a session — waiting for someone
+                        // to press a button adds nothing, and it is why a phone
+                        // whose Bluetooth link dropped stayed dark until the app
+                        // was force-quit: the radio reconnected and announced
+                        // itself, and nothing acted on it.
+                        //
+                        // It is also what makes a better transport take over. A
+                        // peer already reachable over Bluetooth is skipped here,
+                        // so Wi-Fi coming back does not win until the Bluetooth
+                        // session actually ends — which is the conservative way
+                        // round, and the same order `dispatch_send` prefers.
+                        self.connect_peer(id, &mut out, false);
                     }
                 }
             }
@@ -233,6 +372,11 @@ impl Core {
                 self.dispatch_to_transfer_owner(now_ms, transfer, &mut out, |p, cx| {
                     p.on_bulk_listening(cx, transfer, &endpoint);
                 });
+            }
+            // Bytes are moving, so there is nothing left to time out. How long a
+            // file takes is the file's business.
+            Event::BulkStarted { transfer } => {
+                self.bulk_wait.remove(&transfer);
             }
             Event::BulkFinished {
                 transfer,
@@ -243,8 +387,9 @@ impl Core {
                     p.on_bulk_finished(cx, transfer, ok, &detail);
                 });
                 // The transfer is over either way, so nothing should still be
-                // holding a key for it.
+                // holding a key for it, or waiting on it.
                 self.bulk_owner.remove(&transfer);
+                self.bulk_wait.remove(&transfer);
             }
             Event::Tick => self.on_tick(now_ms, &mut out),
             Event::Local(cmd) => self.on_local(now_ms, cmd, &mut out),
@@ -261,6 +406,9 @@ impl Core {
         let mut consider = |d: u64| best = Some(best.map_or(d, |b: u64| b.min(d)));
         if let Some(p) = &self.pairing {
             consider(p.deadline);
+        }
+        for d in self.bulk_wait.values() {
+            consider(*d);
         }
         for st in self.links.values() {
             match st {
@@ -322,6 +470,9 @@ impl Core {
                                     expect: None,
                                     pairing_flow: true,
                                     via: Some(via),
+                                    // Pairing walks no route list: a person
+                                    // typed one address and a code for it.
+                                    fallback: None,
                                 })),
                             );
                         }
@@ -335,9 +486,23 @@ impl Core {
 
         // A link we dialled to reach a known peer: IKpsk2, we speak first.
         if let Some(d) = dial
-            && let Some(peer) = self.pending_peer_dials.remove(&d)
+            && let Some(pending) = self.pending_peer_dials.remove(&d)
         {
-            self.start_session_initiator(now_ms, link, attrs, peer, deadline, out);
+            // The routes we have not tried travel with the link, not with the
+            // dial token. A connected socket is not a finished session, and
+            // until it is one there is still somewhere else to go.
+            let peer = pending.0.clone();
+            self.start_session_initiator(
+                now_ms,
+                link,
+                peer,
+                Dialled {
+                    attrs,
+                    deadline,
+                    fallback: Some(pending),
+                },
+                out,
+            );
             return;
         }
 
@@ -350,11 +515,15 @@ impl Core {
         &mut self,
         now_ms: u64,
         link: LinkId,
-        attrs: LinkAttrs,
         peer: DeviceId,
-        deadline: u64,
+        dialled: Dialled,
         out: &mut Outcome,
     ) {
+        let Dialled {
+            attrs,
+            deadline,
+            fallback,
+        } = dialled;
         let Some(rec) = self.peers.get(&peer) else {
             self.fail_link(link, "no such peer", out);
             return;
@@ -383,6 +552,7 @@ impl Core {
                                 expect: Some(peer),
                                 pairing_flow: false,
                                 via: None,
+                                fallback,
                             })),
                         );
                     }
@@ -428,7 +598,13 @@ impl Core {
                     self.fail_link(link, "no pairing window is open", out);
                     return;
                 };
-                let psk = window.psk;
+                let Some(psk) = window.psk else {
+                    // A window belonging to a pairing we started. It answers
+                    // nobody: we are the one waiting to be confirmed, and there
+                    // is no code here for anyone to have matched.
+                    self.fail_link(link, "no pairing window is open", out);
+                    return;
+                };
                 match Handshake::pair_responder(&self.identity, &psk) {
                     Ok(mut hs) => {
                         if hs.read(body).is_err() {
@@ -451,6 +627,9 @@ impl Core {
                                         expect: None,
                                         pairing_flow: true,
                                         via: None,
+                                        // Somebody dialled us, so there is no
+                                        // list of ours to walk.
+                                        fallback: None,
                                     })),
                                 );
                             }
@@ -561,7 +740,7 @@ impl Core {
         }
 
         if h.pairing_flow {
-            self.pairing_completed(link, h, &payload, out);
+            self.pairing_completed(now_ms, link, h, &payload, out);
         } else {
             // A session initiator learns the peer's Hello from message 2.
             let Some(peer) = h.expect.clone() else {
@@ -642,26 +821,48 @@ impl Core {
         let can_recv = crate::proto::handshake::negotiate(&rec.caps_out, &self.caps_in);
         let name = rec.name.clone();
 
+        // Once per session, at `info`, for the same reason the BLE transport
+        // says a central subscribed: which routes a peer has, and when each of
+        // them appeared, is the first question anybody asks about this thing and
+        // until now the journal could not answer it at all. A device beside a
+        // desktop holds two of these; nothing said so.
+        tracing::info!(
+            %peer,
+            transport = attrs.transport.0,
+            kind = ?attrs.kind,
+            "a route to a peer is up"
+        );
+
         self.links.insert(
             link,
-            LinkState::Up(UpLink {
+            LinkState::Up(Box::new(UpLink {
                 session,
                 peer: peer.clone(),
                 handshake_hash,
+                bulk: attrs.bulk,
+                max_message: attrs.max_message,
+                // The handshake came over this link a moment ago, so it is as
+                // proven as a link ever gets. Starting it at zero instead would
+                // make every new session lose to whatever was already there,
+                // which is the opposite of what just happened.
+                last_recv_ms: now_ms,
+                transport: attrs.transport,
+                kind: attrs.kind,
                 can_send,
                 can_recv,
-            }),
+            })),
         );
         out.ui(UiEvent::PeerReachable {
             peer: peer.clone(),
             name,
         });
 
-        let mut cx = Cx::new(now_ms, self.next_token, self.serves);
+        let mut cx = Cx::new(now_ms, self.next_token, self.next_transfer, self.serves);
         for p in &mut self.plugins {
             p.on_peer_connected(&mut cx, &peer);
         }
         self.next_token = cx.next_token;
+        self.next_transfer = cx.next_transfer;
         self.drain_cx(cx, out);
     }
 }
@@ -671,6 +872,7 @@ impl Core {
 impl Core {
     fn pairing_completed(
         &mut self,
+        now_ms: u64,
         link: LinkId,
         h: Box<HandshakingLink>,
         payload: &[u8],
@@ -723,9 +925,16 @@ impl Core {
             });
         } else {
             // We initiated; there is no window, so keep the same state inline.
+            // `None`, not a zero key: this holds a confirmation, it does not
+            // open a door. See `PairingWindow::psk`.
             self.pairing = Some(PairingWindow {
-                psk: [0u8; 32],
-                deadline: h.deadline,
+                psk: None,
+                // The window a *person* now has to compare six digits in, not
+                // the handshake timeout that got us here. `h.deadline` is
+                // fifteen seconds measured from before the connection was made;
+                // the responder has always given this two minutes, and the side
+                // that typed the code deserves the same.
+                deadline: now_ms + self.config.pairing_window_ms,
                 attempts: 0,
                 awaiting: Some(AwaitingConfirm {
                     link,
@@ -759,14 +968,17 @@ impl Core {
         // it: discovery may not speak again for a long time, and until this was
         // recorded a device reported itself unreachable the moment after it
         // finished pairing.
-        if let Some(via) = a.via {
-            self.addrs.insert(id.clone(), via);
+        if let Some((transport, addr)) = a.via {
+            self.addrs
+                .entry(id.clone())
+                .or_default()
+                .set(transport, addr);
         } else if let Some(fp) = a.record.fingerprint()
             && let Some(via) = self.seen.get(&fp).cloned()
         {
             // They dialled us, so we have no address of theirs from the
             // handshake. Discovery may still have shown us one.
-            self.addrs.insert(id.clone(), via);
+            self.addrs.entry(id.clone()).or_default().merge_from(&via);
         }
         let (key, value) = Self::peer_blob(&a.record);
         out.push(Action::Persist {
@@ -821,24 +1033,39 @@ impl Core {
         &mut self,
         now_ms: u64,
         link: LinkId,
-        mut u: UpLink,
+        // Taken and returned as the box it is stored in: the link is removed
+        // from the table for the duration of the call and put back afterwards,
+        // and moving a session's worth of bytes twice per frame to do it would
+        // be a poor trade for the borrow it avoids.
+        mut u: Box<UpLink>,
         kind: FrameKind,
         body: &[u8],
         out: &mut Outcome,
     ) {
         if kind != FrameKind::Transport {
-            self.fail_link(link, "handshake frame on an established link", out);
+            self.fail_up_link(
+                now_ms,
+                link,
+                u,
+                "handshake frame on an established link",
+                out,
+            );
             return;
         }
         let plaintext = match u.session.decrypt(body) {
             Ok(p) => p,
             Err(e) => {
-                self.fail_link(link, &e.to_string(), out);
+                let detail = e.to_string();
+                self.fail_up_link(now_ms, link, u, &detail, out);
                 return;
             }
         };
         let peer = u.peer.clone();
         let allowed = u.can_recv.clone();
+        // Recorded only once the frame has decrypted, so that noise on a socket
+        // cannot make a dead route look alive. Anything that gets this far came
+        // from the peer and from nobody else.
+        u.last_recv_ms = now_ms;
         self.links.insert(link, LinkState::Up(u));
 
         let Ok(env) = Envelope::decode(&plaintext) else {
@@ -879,9 +1106,11 @@ impl Core {
             return;
         };
 
-        let mut cx = Cx::new(now_ms, self.next_token, self.serves);
+        let mut cx = Cx::new(now_ms, self.next_token, self.next_transfer, self.serves)
+            .for_peer_link(self.bulk_support_for(&peer));
         let result = self.plugins[idx].on_message(&mut cx, &peer, &env);
         self.next_token = cx.next_token;
+        self.next_transfer = cx.next_transfer;
         self.remember_owner(&cx, idx);
         self.drain_cx(cx, out);
 
@@ -915,11 +1144,7 @@ impl Core {
     /// Encrypt and emit one plugin message.
     fn dispatch_send(&mut self, _now_ms: u64, s: PendingSend, out: &mut Outcome) {
         tracing::debug!(peer = %s.peer, cap = %s.cap, ty = %s.ty, "sending");
-        let Some((&link, _)) = self
-            .links
-            .iter()
-            .find(|(_, st)| matches!(st, LinkState::Up(u) if u.peer == s.peer))
-        else {
+        let Some(link) = self.best_link(&s.peer).map(|(id, _)| id) else {
             // Unreachable is an ordinary outcome, not an error. On iOS this is
             // simply what a peer is whenever the app is not in the foreground.
             out.ui(UiEvent::PeerUnreachable { peer: s.peer });
@@ -950,10 +1175,24 @@ impl Core {
         };
         let Ok(plaintext) = env.encode() else { return };
         match u.session.encrypt(&plaintext) {
-            Ok(ct) => out.push(Action::LinkSend {
-                link,
-                msg: frame::join(FrameKind::Transport, &ct),
-            }),
+            Ok(ct) => {
+                let msg = frame::join(FrameKind::Transport, &ct);
+                // The other promise `LinkAttrs` makes: "the core will never hand
+                // down a frame larger than this, and enforces it on plugins so
+                // an oversized body is a `TooLarge` error rather than a
+                // mysterious hang". Measured after sealing, because the tag and
+                // the AEAD overhead travel too and a transport has to carry all
+                // of it.
+                if msg.len() > u.max_message as usize {
+                    let (n, cap) = (msg.len(), u.max_message);
+                    out.ui(UiEvent::Error {
+                        code: ErrorCode::TooLarge,
+                        detail: format!("{} bytes does not fit this link, which takes {cap}", n),
+                    });
+                    return;
+                }
+                out.push(Action::LinkSend { link, msg });
+            }
             Err(e) => {
                 out.ui(UiEvent::Error {
                     code: ErrorCode::Internal,
@@ -983,6 +1222,7 @@ impl Core {
 
     fn drain_cx(&mut self, cx: Cx, out: &mut Outcome) {
         let Cx {
+            now_ms,
             sends,
             effects,
             ui,
@@ -997,7 +1237,7 @@ impl Core {
             out.push(Action::Effect { token, effect });
         }
         for b in bulk {
-            self.dispatch_bulk(b, out);
+            self.dispatch_bulk(now_ms, b, out);
         }
         for s in sends {
             self.dispatch_send(0, s, out);
@@ -1013,7 +1253,213 @@ impl Core {
     /// A plugin that could derive one could derive any of them, and a host is
     /// given a single-use key scoped to one transfer rather than anything it
     /// could reuse.
-    fn dispatch_bulk(&mut self, request: BulkRequest, out: &mut Outcome) {
+    /// What the live link to a peer can carry, if there is one.
+    /// Dial a peer we believe we know how to reach.
+    ///
+    /// `by_hand` separates the two callers, and it governs two things because
+    /// both follow from the same question — did a person ask for this?
+    ///
+    /// A typed `connect` that finds no address deserves to be told so; an
+    /// automatic attempt after a sighting does not, because an error nobody
+    /// caused is only noise. And a typed `connect` must still work while a dial
+    /// is outstanding, since retrying is the one thing a person can do about a
+    /// dial that is going nowhere — but discovery may resolve the same service
+    /// repeatedly, and a dial per sighting would be a storm aimed at a device
+    /// whose only offence is being switched on.
+    /// Try the next address for a peer, or say it cannot be reached.
+    ///
+    /// Reached from both ways an attempt can end without a session: the dial
+    /// itself failing, and a dial that connected whose handshake then ran out of
+    /// time. The second used to go nowhere at all — the routes were dropped the
+    /// moment the socket opened, on the assumption that a connected socket was a
+    /// reached peer.
+    fn try_next_route(&mut self, pending: PeerDial, out: &mut Outcome) {
+        let (peer, mut routes, by_hand) = pending;
+        // Something else got there while this was failing. Neither a further
+        // dial nor a death notice would be true.
+        if self.best_link(&peer).is_some() {
+            return;
+        }
+        // A device on Wi-Fi and BLE has two ways in. Reporting it unreachable
+        // because the first failed would be wrong, and wrong in the direction a
+        // user cannot diagnose.
+        if routes.is_empty() {
+            // Only when a person asked. An automatic attempt runs on every
+            // sighting, and one route can easily be seen before a working one
+            // is — announcing that would make a device flicker "unreachable"
+            // while it is coming up perfectly normally. It stays unreachable
+            // either way; that is a fact about its state, not news.
+            if by_hand {
+                out.ui(UiEvent::PeerUnreachable { peer });
+            }
+            return;
+        }
+        let (transport, addr) = routes.remove(0);
+        self.next_dial += 1;
+        let next = DialToken(self.next_dial);
+        self.pending_peer_dials
+            .insert(next, (peer, routes, by_hand));
+        out.push(Action::Dial {
+            transport,
+            addr,
+            dial: next,
+        });
+    }
+
+    fn connect_peer(&mut self, peer: DeviceId, out: &mut Outcome, by_hand: bool) {
+        if !by_hand && self.pending_peer_dials.values().any(|(p, _, _)| p == &peer) {
+            return;
+        }
+        // Three places an address can come from, in order of how much they are
+        // worth: one we recorded when the peer last worked, one discovery has
+        // shown us, or nothing.
+        let known = self.addrs.get(&peer).cloned().or_else(|| {
+            let fp = self.peers.get(&peer)?.fingerprint()?;
+            self.seen.get(&fp).cloned()
+        });
+        let mut routes: Vec<(TransportId, String)> =
+            known.iter().flat_map(Routes::in_preference_order).collect();
+
+        match self.peer_state(&peer) {
+            PeerState::Unreachable => {}
+            // A handshake is already in flight. Let it finish.
+            PeerState::Connecting => return,
+            PeerState::Reachable => {
+                // Reachable is not the same as reachable *well*, and treating
+                // them as one thing is what put a phone on Bluetooth and left
+                // it there.
+                //
+                // A phone walking into the room finds Bluetooth first: it is
+                // already connected to the desktop's radio while mDNS has yet
+                // to resolve anything. Stopping here because a link exists
+                // meant Wi-Fi was never dialled for the rest of the session —
+                // and a Bluetooth link cannot carry a file, so every transfer
+                // was refused while a perfectly good route sat unused.
+                //
+                // So a strictly better transport is still worth dialling. The
+                // existing link is left alone rather than replaced: the core
+                // keys sends by `LinkId`, whose high bits are the transport,
+                // and picks the lowest — so the better link takes over by
+                // existing, and the worse one stays as the fallback it already
+                // was.
+                if by_hand {
+                    return;
+                }
+                let Some(current) = self.best_link_transport(&peer) else {
+                    return;
+                };
+                routes.retain(|(t, _)| *t < current);
+                if routes.is_empty() {
+                    return;
+                }
+            }
+        }
+        // Best first; the rest stay behind it for `DialFailed` to walk.
+        let first = (!routes.is_empty()).then(|| routes.remove(0));
+        let Some((transport, addr)) = first else {
+            if by_hand {
+                // "Unreachable" would be true but useless. Not knowing where a
+                // device is differs from failing to reach it, and only one of
+                // those the user can do something about.
+                out.ui(UiEvent::Error {
+                    code: ErrorCode::NotAllowed,
+                    detail: format!(
+                        // No mention of a command-line flag: this reaches a
+                        // phone screen as often as a terminal, and advice about
+                        // `--addr` there is advice about a thing that is not on
+                        // the device reading it.
+                        "no address known for {peer}. Nothing has found it yet — it may \
+                         be switched off, on another network, or a device that only ever \
+                         dials out, which is never discovered at all."
+                    ),
+                });
+                out.ui(UiEvent::PeerUnreachable { peer });
+            }
+            return;
+        };
+        self.next_dial += 1;
+        let d = DialToken(self.next_dial);
+        self.pending_peer_dials.insert(d, (peer, routes, by_hand));
+        out.push(Action::Dial {
+            transport,
+            addr,
+            dial: d,
+        });
+    }
+
+    fn bulk_support_for(&self, peer: &DeviceId) -> Option<BulkSupport> {
+        self.best_link(peer).map(|(_, u)| u.bulk)
+    }
+
+    /// The link a message to this peer would take.
+    ///
+    /// Two doc blocks left over from when `transport_for` and
+    /// `best_link_transport` were separate walks have been removed rather than
+    /// updated: both described choosing by `LinkId` order and said that with
+    /// Wi-Fi and Bluetooth both up this answers Wi-Fi, which is exactly the
+    /// behaviour below no longer has.
+    ///
+    /// One definition, because everything that asks about a peer's connection
+    /// has to get the same answer: what a send goes over, what the screen
+    /// names, and whether a file can be carried at all. Those were three
+    /// separate walks that agreed only because a `BTreeMap` happens to order
+    /// `LinkId`s the way transports are numbered — true by convention in the
+    /// daemon, and quietly false anywhere ids are minted another way.
+    ///
+    /// **Most recently heard from first**, then the better transport, then the
+    /// newer link. Not transport preference alone, which is what this used to
+    /// be and what made a phone's now-playing screen stop moving whenever Wi-Fi
+    /// was switched off.
+    ///
+    /// Transport preference alone answers "which of these *would* be best",
+    /// and the core has no way to ask whether any of them still works. A socket
+    /// whose far end has vanished rather than closed stays `ESTABLISHED` and
+    /// accepts everything written to it; only a keepalive ends that, and only
+    /// after twenty seconds. Preferring it for those twenty seconds put every
+    /// reply and every announcement into it while a Bluetooth link sat beside it
+    /// working. Worse, a phone that re-dials Wi-Fi leaves the dead socket in
+    /// place next to the new one, and `min_by_key` kept the *older* of two equal
+    /// transports — so the dead one went on being chosen after the repair.
+    /// Observed as `a route to a peer went away … now_on=Some(1)`: a second live
+    /// route on the transport that had supposedly just gone.
+    ///
+    /// Which link a message arrived on is the one piece of evidence available
+    /// for free, and it is the peer's own answer to the question: it sends over
+    /// *its* best link, so hearing from it over Bluetooth is the peer saying
+    /// that is where it lives now. Recency decides, and transport preference
+    /// only breaks a tie between links equally proven — which is what two
+    /// freshly established sessions are.
+    ///
+    /// Deliberately a preference and never a teardown. An earlier attempt read
+    /// the same evidence and *closed* the route it thought was dead, which threw
+    /// away a perfectly good Wi-Fi link whenever one stray Bluetooth frame
+    /// landed in the moment between this end completing a handshake and the
+    /// other end finishing it. Getting this wrong should cost one message the
+    /// slower way, not a session.
+    fn best_link(&self, peer: &DeviceId) -> Option<(LinkId, &UpLink)> {
+        self.links
+            .iter()
+            .filter_map(|(id, st)| match st {
+                LinkState::Up(u) if &u.peer == peer => Some((*id, &**u)),
+                _ => None,
+            })
+            // `Reverse` on the transport because a *lower* id is the better one,
+            // and the id last so that two links which are otherwise equal are
+            // still ordered — a peer that reconnects on one transport leaves
+            // both, and the newer of them is the one it just proved.
+            .max_by_key(|(id, u)| (u.last_recv_ms, std::cmp::Reverse(u.transport), *id))
+    }
+
+    fn best_link_transport(&self, peer: &DeviceId) -> Option<TransportId> {
+        self.best_link(peer).map(|(_, u)| u.transport)
+    }
+
+    #[must_use]
+    pub fn transport_for(&self, peer: &DeviceId) -> Option<TransportKind> {
+        self.best_link(peer).map(|(_, u)| u.kind.clone())
+    }
+
+    fn dispatch_bulk(&mut self, now_ms: u64, request: BulkRequest, out: &mut Outcome) {
         let (peer, transfer) = match &request {
             BulkRequest::Listen { peer, transfer, .. }
             | BulkRequest::Send { peer, transfer, .. } => (peer.clone(), *transfer),
@@ -1025,6 +1471,30 @@ impl Core {
             }
         };
 
+        // A link that cannot carry bulk must say so here, not by handing out an
+        // endpoint the far end has no route to.
+        //
+        // `BulkSupport::None` exists for exactly this and went unchecked until
+        // there was a second transport to check it against: over BLE the
+        // desktop would accept an offer, listen on a TCP port, and send an
+        // address a phone with Wi-Fi off can never reach — which looks, from
+        // the phone, like a transfer that simply stopped.
+        if self.bulk_support_for(&peer) == Some(BulkSupport::None) {
+            out.ui(UiEvent::Error {
+                code: ErrorCode::NotAllowed,
+                detail: format!(
+                    "the link to {peer} cannot carry files. Reach it over the \
+                     network for that."
+                ),
+            });
+            // Reported finished-and-failed as well, so whichever plugin asked
+            // unwinds the way it would for any other failure rather than
+            // waiting for an endpoint that is never coming.
+            out.push(Action::BulkCancel { transfer });
+            self.bulk_owner.remove(&transfer);
+            return;
+        }
+
         let Some(hash) = self.handshake_hash_for(&peer) else {
             // No session, no key, and therefore no transfer. Reported as a
             // finished-and-failed one so the plugin unwinds the same way it
@@ -1035,14 +1505,40 @@ impl Core {
             });
             return;
         };
-        let key = crate::proto::bulk::key(&hash, transfer.0).to_vec();
+        // Whoever offered the transfer owns the id, and its device id separates
+        // the two directions. Both ends can name it without asking: the side
+        // that dials is the side that offered, and the side that listens was
+        // offered to. Without this the first transfer each way shares a key and
+        // a nonce sequence — see `proto::bulk::key`.
+        //
+        // The *number* has to be the offerer's too, and it is no longer ours to
+        // assume: a device that receives an offer now keys everything by an id
+        // of its own, because the one in the offer was minted from the sender's
+        // counter and means something else here. The sender has never heard of
+        // ours, so `offered_as` is what goes into the key.
+        let (offerer, numbered) = match &request {
+            BulkRequest::Send { .. } => (self.device_id(), transfer.0),
+            BulkRequest::Listen { offered_as, .. } => (peer.clone(), *offered_as),
+            BulkRequest::Cancel { .. } => unreachable!("handled above"),
+        };
+        let key = crate::proto::bulk::key(&hash, offerer.as_str(), numbered).to_vec();
 
         match request {
-            BulkRequest::Listen { expect_bytes, .. } => out.push(Action::BulkListen {
-                transfer,
-                key,
-                expect_bytes,
-            }),
+            BulkRequest::Listen { expect_bytes, .. } => {
+                // The clock starts here rather than at `BulkListening`, so that
+                // a host which never manages to bind is bounded by the same
+                // deadline as a sender which never dials. Both look identical
+                // from here, and both used to wait for ever.
+                self.bulk_wait.insert(transfer, now_ms + BULK_DIAL_WAIT_MS);
+                out.push(Action::BulkListen {
+                    transfer,
+                    // `numbered` is the offerer's, which for a listen is the
+                    // peer's — the same number the dialer will greet us with.
+                    offered_as: numbered,
+                    key,
+                    expect_bytes,
+                });
+            }
             BulkRequest::Send { endpoint, .. } => out.push(Action::BulkSend {
                 transfer,
                 endpoint,
@@ -1052,11 +1548,17 @@ impl Core {
         }
     }
 
+    /// The session a bulk key is derived from.
+    ///
+    /// `best_link`, not the first link that happens to match. Both ends derive
+    /// the key from the handshake hash of a session they must agree on, and a
+    /// peer reachable two ways has two of them — so picking by iteration order
+    /// meant one end could key a transfer from a session the other end was not
+    /// using, and nothing would decrypt. It went unnoticed while a peer only
+    /// ever had one link, which is the same reason `max_message` and
+    /// `BulkSupport` went unenforced.
     fn handshake_hash_for(&self, peer: &DeviceId) -> Option<Vec<u8>> {
-        self.links.values().find_map(|st| match st {
-            LinkState::Up(u) if &u.peer == peer => Some(u.handshake_hash.clone()),
-            _ => None,
-        })
+        self.best_link(peer).map(|(_, u)| u.handshake_hash.clone())
     }
 }
 
@@ -1069,7 +1571,7 @@ impl Core {
                 Ok(norm) => {
                     let deadline = now_ms + self.config.pairing_window_ms;
                     self.pairing = Some(PairingWindow {
-                        psk: pairing::psk(&norm),
+                        psk: Some(pairing::psk(&norm)),
                         deadline,
                         attempts: 0,
                         awaiting: None,
@@ -1121,7 +1623,7 @@ impl Core {
                 addr,
             } => {
                 if self.peers.contains_key(&peer) {
-                    self.addrs.insert(peer, (transport, addr));
+                    self.addrs.entry(peer).or_default().set(transport, addr);
                 } else {
                     out.ui(UiEvent::Error {
                         code: ErrorCode::NotPaired,
@@ -1129,41 +1631,7 @@ impl Core {
                     });
                 }
             }
-            LocalCommand::Connect { peer } => {
-                if self.peer_state(&peer) != PeerState::Unreachable {
-                    return;
-                }
-                // Three places an address can come from, in order of how much
-                // they are worth: one we recorded when the peer last worked,
-                // one discovery has shown us, or nothing.
-                let known = self.addrs.get(&peer).cloned().or_else(|| {
-                    let fp = self.peers.get(&peer)?.fingerprint()?;
-                    self.seen.get(&fp).cloned()
-                });
-                let Some((transport, addr)) = known else {
-                    // "Unreachable" would be true but useless. Not knowing where
-                    // a device is differs from failing to reach it, and only one
-                    // of those the user can do something about.
-                    out.ui(UiEvent::Error {
-                        code: ErrorCode::NotAllowed,
-                        detail: format!(
-                            "no address known for {peer}. It has not been seen on this \
-                             network, and a device that only ever dials out — a phone, \
-                             for instance — never will be. Pass one with --addr."
-                        ),
-                    });
-                    out.ui(UiEvent::PeerUnreachable { peer });
-                    return;
-                };
-                self.next_dial += 1;
-                let d = DialToken(self.next_dial);
-                self.pending_peer_dials.insert(d, peer);
-                out.push(Action::Dial {
-                    transport,
-                    addr,
-                    dial: d,
-                });
-            }
+            LocalCommand::Connect { peer } => self.connect_peer(peer, out, true),
             LocalCommand::Disconnect { peer } => {
                 let links: Vec<LinkId> = self
                     .links
@@ -1200,9 +1668,11 @@ impl Core {
                     return;
                 };
                 tracing::debug!(%peer, %cap, %ty, "local plugin command");
-                let mut cx = Cx::new(now_ms, self.next_token, self.serves);
+                let mut cx = Cx::new(now_ms, self.next_token, self.next_transfer, self.serves)
+                    .for_peer_link(self.bulk_support_for(&peer));
                 let r = self.plugins[idx].on_local(&mut cx, &peer, &ty, &body);
                 self.next_token = cx.next_token;
+                self.next_transfer = cx.next_transfer;
                 self.remember_owner(&cx, idx);
                 self.drain_cx(cx, out);
                 if let Err(e) = r {
@@ -1254,9 +1724,10 @@ impl Core {
         let Some(&idx) = self.bulk_owner.get(&transfer) else {
             return;
         };
-        let mut cx = Cx::new(now_ms, self.next_token, self.serves);
+        let mut cx = Cx::new(now_ms, self.next_token, self.next_transfer, self.serves);
         f(&mut self.plugins[idx], &mut cx);
         self.next_token = cx.next_token;
+        self.next_transfer = cx.next_transfer;
         self.remember_owner(&cx, idx);
         self.drain_cx(cx, out);
     }
@@ -1271,9 +1742,10 @@ impl Core {
         let Some(idx) = self.effect_owner.remove(&token) else {
             return;
         };
-        let mut cx = Cx::new(now_ms, self.next_token, self.serves);
+        let mut cx = Cx::new(now_ms, self.next_token, self.next_transfer, self.serves);
         self.plugins[idx].on_effect_result(&mut cx, token, result);
         self.next_token = cx.next_token;
+        self.next_transfer = cx.next_transfer;
         self.remember_owner(&cx, idx);
         self.drain_cx(cx, out);
     }
@@ -1297,6 +1769,29 @@ impl Core {
             });
         }
 
+        // Senders that were told where to connect and never did. See
+        // [`BULK_DIAL_WAIT_MS`]; `BulkStarted` has already taken out everything
+        // that is actually moving bytes.
+        let gave_up: Vec<TransferId> = self
+            .bulk_wait
+            .iter()
+            .filter(|(_, deadline)| now_ms >= **deadline)
+            .map(|(t, _)| *t)
+            .collect();
+        for transfer in gave_up {
+            self.bulk_wait.remove(&transfer);
+            // Cancelled at the host first, so the port and the reserved
+            // filename go back before anyone is told the transfer is over.
+            out.push(Action::BulkCancel { transfer });
+            // Reported as a failure rather than left silent, which is the rule
+            // every other bulk ending follows: the plugin unwinds, the person
+            // who accepted it is told, and the far end gets an answer.
+            self.dispatch_to_transfer_owner(now_ms, transfer, out, |p, cx| {
+                p.on_bulk_finished(cx, transfer, false, "the sender never connected");
+            });
+            self.bulk_owner.remove(&transfer);
+        }
+
         let stale: Vec<LinkId> = self
             .links
             .iter()
@@ -1308,38 +1803,138 @@ impl Core {
             .map(|(k, _)| *k)
             .collect();
         for l in stale {
-            self.links.remove(&l);
+            let was = self.links.remove(&l);
             out.push(Action::Close {
                 link: l,
                 reason: LinkDownReason::Closed,
             });
+            // A handshake that ran out of time has not proved the *device*
+            // unreachable, only this way in. Carry on down the list this dial
+            // was walking — or, if there is nothing left of it, say so once.
+            if let Some(LinkState::Handshaking(h)) = was
+                && let Some(pending) = h.fallback
+            {
+                self.try_next_route(pending, out);
+            }
         }
 
         if let Some(w) = self.plugin_wake
             && now_ms >= w
         {
             self.plugin_wake = None;
-            let mut cx = Cx::new(now_ms, self.next_token, self.serves);
+            let mut cx = Cx::new(now_ms, self.next_token, self.next_transfer, self.serves);
             for p in &mut self.plugins {
                 p.on_tick(&mut cx);
             }
             self.next_token = cx.next_token;
+            self.next_transfer = cx.next_transfer;
             self.drain_cx(cx, out);
         }
     }
 
     fn on_link_down(&mut self, now_ms: u64, link: LinkId, out: &mut Outcome) {
-        if let Some(LinkState::Up(u)) = self.links.remove(&link) {
-            out.ui(UiEvent::PeerUnreachable {
-                peer: u.peer.clone(),
-            });
-            let mut cx = Cx::new(now_ms, self.next_token, self.serves);
-            for p in &mut self.plugins {
-                p.on_peer_disconnected(&mut cx, &u.peer);
+        let u = match self.links.remove(&link) {
+            Some(LinkState::Up(u)) => u,
+            // A dialled link that died before it was ever a session has not
+            // proved the *device* unreachable, only this way in — something
+            // else answering on the port, or the peer refusing us. Carry on
+            // down the list this dial was walking rather than stopping here
+            // with the alternatives still untried and nobody told.
+            Some(LinkState::Handshaking(h)) => {
+                if let Some(pending) = h.fallback {
+                    self.try_next_route(pending, out);
+                }
+                return;
             }
-            self.next_token = cx.next_token;
-            self.drain_cx(cx, out);
+            _ => return,
+        };
+
+        // Losing a link is not losing a device.
+        //
+        // This used to announce every link's death as the peer's, which is
+        // wrong the moment a peer is reachable two ways — the arrangement a
+        // phone beside a desktop has all the time. Neither consequence is
+        // cosmetic. `PeerUnreachable` is what a host uses to throw away what a
+        // peer told it, and `on_peer_disconnected` is what stops a plugin
+        // broadcasting to it. So switching from Wi-Fi to Bluetooth emptied the
+        // phone's session controls and stopped the desktop announcing its lock
+        // state to a device it was still connected to.
+        //
+        // And nothing put either back, because the repair for both hangs off
+        // the peer becoming reachable again — which never happens to a peer
+        // that never left.
+        // The other half of the pair above, and the line that makes a takeover
+        // readable: which route died, and what — if anything — the next message
+        // will go over instead.
+        tracing::info!(
+            peer = %u.peer,
+            transport = u.transport.0,
+            now_on = ?self.best_link(&u.peer).map(|(_, b)| b.transport.0),
+            "a route to a peer went away"
+        );
+
+        if self.best_link(&u.peer).is_some() {
+            // Still here, but possibly not over what it was. Said rather than
+            // left silent, because a host that shows which transport is
+            // carrying would otherwise go on showing the one that just died,
+            // and because this is the moment to ask a peer for anything that
+            // was only ever sent when it changed.
+            let name = self
+                .peers
+                .get(&u.peer)
+                .map(|r| r.name.clone())
+                .unwrap_or_default();
+            out.ui(UiEvent::PeerReachable {
+                peer: u.peer.clone(),
+                name,
+            });
+            return;
         }
+
+        out.ui(UiEvent::PeerUnreachable {
+            peer: u.peer.clone(),
+        });
+        let mut cx = Cx::new(now_ms, self.next_token, self.next_transfer, self.serves);
+        for p in &mut self.plugins {
+            p.on_peer_disconnected(&mut cx, &u.peer);
+        }
+        self.next_token = cx.next_token;
+        self.next_transfer = cx.next_transfer;
+        self.drain_cx(cx, out);
+    }
+
+    /// Drop an *established* link and announce it the way any other death is.
+    ///
+    /// `fail_link` is not enough for one of these. It removes the link from the
+    /// table, which is right for a link that never came up — but
+    /// `on_transport_frame` holds the only `Box<UpLink>` *out* of that table for
+    /// the duration of the call, so the remove found nothing to remove. The peer
+    /// was never announced unreachable, no plugin was told it had gone, and the
+    /// `LinkDown` the transport sent once it acted on the `Close` found nothing
+    /// left to report either. A session dropped over one bad frame left a device
+    /// that looked connected, and stayed that way.
+    ///
+    /// So the link goes back before it is torn down, and the teardown is the one
+    /// every other link gets — including the part that decides a peer reachable
+    /// two ways has not actually gone anywhere.
+    fn fail_up_link(
+        &mut self,
+        now_ms: u64,
+        link: LinkId,
+        u: Box<UpLink>,
+        detail: &str,
+        out: &mut Outcome,
+    ) {
+        self.links.insert(link, LinkState::Up(u));
+        out.push(Action::Close {
+            link,
+            reason: LinkDownReason::Protocol(ErrorCode::NotAllowed),
+        });
+        out.ui(UiEvent::Error {
+            code: ErrorCode::NotAllowed,
+            detail: detail.to_string(),
+        });
+        self.on_link_down(now_ms, link, out);
     }
 
     fn fail_link(&mut self, link: LinkId, detail: &str, out: &mut Outcome) {
@@ -1463,6 +2058,8 @@ impl CoreBuilder {
             plugins,
             effect_owner: BTreeMap::new(),
             bulk_owner: BTreeMap::new(),
+            next_transfer: 0,
+            bulk_wait: BTreeMap::new(),
             caps_out,
             caps_in,
             caps_served,
