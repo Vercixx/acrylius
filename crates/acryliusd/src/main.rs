@@ -303,7 +303,18 @@ async fn main() -> anyhow::Result<()> {
                 // there now. Without it the BLE transport registered, advertised,
                 // took links up and down, and said none of it — which is how a
                 // whole transport ran unnoticed for an afternoon.
-                .unwrap_or_else(|_| "acryliusd=info,acrylius_rt=info,acrylius_linux=info".into()),
+                //
+                // `acrylius_core` for the same reason one level up, and it cost
+                // the same afternoon twice. The core decides which route every
+                // message takes and it was the one crate not admitted here, so a
+                // journal could show a Bluetooth link coming up and a desktop
+                // answering into a dead Wi-Fi socket and look identical to one
+                // where everything worked. Two wrong diagnoses were read off
+                // that silence, both of them from a log line that was never
+                // going to be printed.
+                .unwrap_or_else(|_| {
+                    "acryliusd=info,acrylius_rt=info,acrylius_linux=info,acrylius_core=info".into()
+                }),
         )
         .init();
 

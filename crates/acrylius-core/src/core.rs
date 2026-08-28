@@ -775,6 +775,18 @@ impl Core {
         let can_recv = crate::proto::handshake::negotiate(&rec.caps_out, &self.caps_in);
         let name = rec.name.clone();
 
+        // Once per session, at `info`, for the same reason the BLE transport
+        // says a central subscribed: which routes a peer has, and when each of
+        // them appeared, is the first question anybody asks about this thing and
+        // until now the journal could not answer it at all. A device beside a
+        // desktop holds two of these; nothing said so.
+        tracing::info!(
+            %peer,
+            transport = attrs.transport.0,
+            kind = ?attrs.kind,
+            "a route to a peer is up"
+        );
+
         self.links.insert(
             link,
             LinkState::Up(Box::new(UpLink {
@@ -1721,6 +1733,16 @@ impl Core {
         // And nothing put either back, because the repair for both hangs off
         // the peer becoming reachable again — which never happens to a peer
         // that never left.
+        // The other half of the pair above, and the line that makes a takeover
+        // readable: which route died, and what — if anything — the next message
+        // will go over instead.
+        tracing::info!(
+            peer = %u.peer,
+            transport = u.transport.0,
+            now_on = ?self.best_link(&u.peer).map(|(_, b)| b.transport.0),
+            "a route to a peer went away"
+        );
+
         if self.best_link(&u.peer).is_some() {
             // Still here, but possibly not over what it was. Said rather than
             // left silent, because a host that shows which transport is
