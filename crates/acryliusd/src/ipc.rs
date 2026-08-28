@@ -118,6 +118,20 @@ pub enum Response {
     Event {
         text: String,
     },
+    /// A pairing window is open, and everything needed to join it.
+    ///
+    /// Sent instead of an `Event` line so the client can draw a QR rather than
+    /// print prose about one. The daemon builds the payload because only it
+    /// knows all six fields — the CLI would otherwise have to ask for its own
+    /// status first and assemble a second copy of the format.
+    Pairing {
+        code: String,
+        expires_in_ms: u64,
+        /// `docs/PROTOCOL.md` § 8. `None` when this machine could not work out
+        /// a routable address to put in one, which is not fatal: the code
+        /// still works typed.
+        qr: Option<String>,
+    },
     /// A peer's answer, decoded but not yet worded.
     Report {
         report: Report,

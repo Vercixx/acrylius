@@ -1,17 +1,84 @@
 #if canImport(SwiftUI)
 
 import SwiftUI
+#if canImport(UIKit)
+import UIKit
+#endif
 
-/// Enter the code the PC printed, and where to reach it.
+/// Pick a computer, scan its code, or type both.
+///
+/// Three ways in, in the order they cost the person something. Discovery has
+/// always known which machines are on the network; until M3 nothing could ask
+/// it, so this screen opened on an empty text field and an IP address to type
+/// on a phone keyboard.
 struct PairView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @State private var code = ""
     @State private var addr = ""
+    @State private var scanning = false
+    @State private var scanTrouble: String?
+
+    /// Machines seen recently enough to still be worth offering.
+    ///
+    /// mDNS resolves a service once and then says nothing until something
+    /// changes, so an entry is never withdrawn — a computer switched off an
+    /// hour ago would otherwise sit here looking available for the life of the
+    /// app.
+    private var fresh: [AppModel.Nearby] {
+        model.nearby.filter { Date().timeIntervalSince($0.seen) < 300 }
+    }
 
     var body: some View {
         NavigationStack {
             Form {
+                Section {
+                    Button {
+                        scanning = true
+                    } label: {
+                        Label("Scan the code on your computer", systemImage: "qrcode.viewfinder")
+                    }
+                } footer: {
+                    if let scanTrouble {
+                        Text(scanTrouble).foregroundStyle(.orange)
+                    } else {
+                        Text("Run `acryliusctl pair` on the computer to show one.")
+                    }
+                }
+
+                if !fresh.isEmpty {
+                    Section {
+                        ForEach(fresh) { pc in
+                            Button {
+                                // Fills the form rather than pairing outright:
+                                // the code is the pre-shared key and discovery
+                                // does not carry it, so there is still one
+                                // thing only the computer's screen can supply.
+                                addr = pc.addr
+                            } label: {
+                                HStack {
+                                    VStack(alignment: .leading) {
+                                        Text(pc.name).foregroundStyle(.primary)
+                                        Text(pc.addr)
+                                            .font(.caption.monospaced())
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    Spacer()
+                                    if pc.pairing {
+                                        Text("waiting")
+                                            .font(.caption)
+                                            .foregroundStyle(.green)
+                                    }
+                                }
+                            }
+                        }
+                    } header: {
+                        Text("On this network")
+                    } footer: {
+                        Text("“Waiting” means that computer has a pairing window open.")
+                    }
+                }
+
                 Section("Pairing code") {
                     TextField("ABCD1234", text: $code)
                         .textInputAutocapitalization(.characters)
@@ -26,7 +93,7 @@ struct PairView: View {
                 } header: {
                     Text("IP address")
                 } footer: {
-                    Text("On PC, run `acryliusctl pair` first.")
+                    Text("Only needed if this \(deviceKind()) cannot find the computer by itself.")
                 }
             }
             .navigationTitle("Pair another device")
@@ -41,7 +108,40 @@ struct PairView: View {
                     .disabled(code.isEmpty || addr.isEmpty)
                 }
             }
+            .sheet(isPresented: $scanning) {
+                QrScannerView { text in
+                    scanning = false
+                    apply(scanned: text)
+                }
+            }
         }
+    }
+
+    /// Take what the camera read, if it is one of ours.
+    ///
+    /// Decoded by the same Rust that built it, so a payload this cannot read is
+    /// genuinely not an acrylius code rather than a disagreement between two
+    /// implementations of the format.
+    private func apply(scanned text: String) {
+        do {
+            let q = try decodePairingQr(text: text)
+            code = q.code
+            addr = q.addr
+            scanTrouble = nil
+            // Straight through. Everything a pairing needs was in the picture,
+            // and the SAS on both screens is still the thing a person checks.
+            Task { await model.pair(withCode: q.code, at: q.addr); dismiss() }
+        } catch {
+            scanTrouble = "That is not an Acrylius pairing code."
+        }
+    }
+
+    private func deviceKind() -> String {
+        #if canImport(UIKit)
+        return UIDevice.current.model
+        #else
+        return "device"
+        #endif
     }
 }
 

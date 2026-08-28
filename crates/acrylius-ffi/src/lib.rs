@@ -104,6 +104,45 @@ fn identity(key: &[u8]) -> Result<Identity, FfiError> {
     Ok(Identity::from_private(key))
 }
 
+/// What a scanned pairing QR carried.
+///
+/// Nothing here is trusted. It is a candidate address to dial and a code to
+/// derive the PSK from; the fingerprint is checked against the one the
+/// handshake produces and a mismatch aborts.
+#[derive(uniffi::Record, Clone, Debug)]
+pub struct FfiPairingQr {
+    pub name: String,
+    /// `host:port`, ready to dial.
+    pub addr: String,
+    pub device_id: String,
+    pub fingerprint: String,
+    pub code: String,
+}
+
+/// Read a pairing payload off a scanned QR.
+///
+/// The same code the desktop used to build it — `acrylius_proto::qr` — so the
+/// two cannot drift. A camera sees a great many things that are not this, so
+/// the failure is ordinary rather than exceptional and says which kind it was.
+///
+/// # Errors
+///
+/// [`FfiError::BadInput`] when the payload is not an acrylius one, is from a
+/// newer version, or is malformed.
+#[uniffi::export]
+pub fn decode_pairing_qr(text: String) -> Result<FfiPairingQr, FfiError> {
+    let q = acrylius_core::proto::qr::PairingQr::decode(&text).map_err(|e| FfiError::BadInput {
+        detail: e.to_string(),
+    })?;
+    Ok(FfiPairingQr {
+        name: q.name.clone(),
+        addr: q.addr(),
+        device_id: q.device_id.to_string(),
+        fingerprint: q.fingerprint.to_string(),
+        code: q.code.clone(),
+    })
+}
+
 /// A paired device, for the UI.
 #[derive(uniffi::Record, Clone, Debug)]
 pub struct FfiPeer {

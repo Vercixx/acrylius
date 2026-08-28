@@ -291,6 +291,23 @@ impl Core {
             .map(|a| a.sas.as_str())
     }
 
+    /// Whether a pairing window is open right now.
+    ///
+    /// `docs/PROTOCOL.md` § 4 specifies a `pair=0|1` key in the discovery
+    /// advertisement, "a convenience for a user interface". Both ends have read
+    /// it since M1 — `tcp.rs` and `NWTransport.swift` both decode it — and
+    /// nothing has ever written it, so `DiscoveredPeer::pairing` has been
+    /// `false` in production for its whole life.
+    ///
+    /// Read rather than announced because the window closes four ways: paired,
+    /// refused, given up on, and expired. Only the first two have an event, and
+    /// an advertisement that lied because the fourth had no event would be
+    /// worse than none.
+    #[must_use]
+    pub fn pairing_open(&self) -> bool {
+        self.pairing.is_some()
+    }
+
     /// Why the last attempt to reach this peer ended without a session, if it
     /// has not been reached since.
     ///
@@ -387,6 +404,20 @@ impl Core {
                         // session actually ends — which is the conservative way
                         // round, and the same order `dispatch_send` prefers.
                         self.connect_peer(id, &mut out, false);
+                    } else {
+                        // Nobody we know. Said out loud, because until now the
+                        // core kept every sighting in a private map with no
+                        // accessor and no event — it knew every acrylius
+                        // machine on the network and had no way to mention one.
+                        // That is the whole gap between "discovery works" and
+                        // "you can pick a computer to pair with".
+                        out.ui(UiEvent::Discovered {
+                            fingerprint: fp,
+                            name: peer.name,
+                            addr: peer.addr,
+                            transport,
+                            pairing: peer.pairing,
+                        });
                     }
                 }
             }

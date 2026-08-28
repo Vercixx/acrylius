@@ -70,6 +70,8 @@
          missing prompt: the app is terminated the moment a manager is created. -->
     <key>NSBluetoothAlwaysUsageDescription</key>
     <string>Acrylius reaches your computer over Bluetooth when you are not on the same Wi-Fi.</string>
+    <key>NSCameraUsageDescription</key>
+    <string>Acrylius reads the pairing code shown on your computer's screen. The camera is used for nothing else.</string>
     <key>NSBonjourServices</key>
     <array>
         <string>_acrylius._tcp</string>

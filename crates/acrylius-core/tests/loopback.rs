@@ -1655,6 +1655,78 @@ fn a_peer_with_no_address_explains_itself() {
 }
 
 #[test]
+fn a_pairing_window_is_something_the_advertisement_can_see() {
+    // `pair=1` is specified in PROTOCOL.md § 4 and read by both transports,
+    // and until now nothing produced it. The runtime re-advertises when this
+    // changes, so what it reports is the whole of that feature.
+    let (a, b) = (core("phone"), core("pc"));
+    let mut net = Net::new(a, b);
+    assert!(!net.b.pairing_open(), "nothing is open to begin with");
+
+    net.local(
+        Side::B,
+        LocalCommand::OpenPairingWindow {
+            code: CODE.to_string(),
+        },
+    );
+    assert!(net.b.pairing_open(), "an open window is on the air");
+
+    net.local(
+        Side::A,
+        LocalCommand::RequestPairing {
+            transport: TRANSPORT,
+            addr: Side::B.addr().to_string(),
+            code: CODE.to_string(),
+        },
+    );
+    net.local(Side::A, LocalCommand::ConfirmPairing { accept: true });
+    net.local(Side::B, LocalCommand::ConfirmPairing { accept: true });
+
+    assert!(
+        !net.b.pairing_open(),
+        "and a window that has done its job must come off it again"
+    );
+}
+
+#[test]
+fn a_pairing_window_that_expires_stops_advertising_itself() {
+    // The case with no event behind it, and the reason this is read rather
+    // than announced: nobody is told a window timed out, so an advertisement
+    // driven by events would go on inviting devices that will be refused.
+    let (a, b) = (core("phone"), core("pc"));
+    let mut net = Net::new(a, b);
+    net.local(
+        Side::B,
+        LocalCommand::OpenPairingWindow {
+            code: CODE.to_string(),
+        },
+    );
+    assert!(net.b.pairing_open());
+
+    // Wake it exactly when it asked to be woken, the way the runtime does.
+    let out = net.b.handle(
+        Now {
+            monotonic_ms: net.now,
+            wall_ms: net.wall,
+        },
+        Event::Tick,
+    );
+    net.now = out.next_deadline_ms.expect("a window sets a deadline");
+    let _ = net.b.handle(
+        Now {
+            monotonic_ms: net.now,
+            wall_ms: net.wall,
+        },
+        Event::Tick,
+    );
+
+    assert!(
+        !net.b.pairing_open(),
+        "an expired window must not still be advertised as open"
+    );
+}
+
+#[test]
 fn a_peer_that_could_not_be_reached_records_why_without_announcing_it() {
     // The Connect button is gone, so every dial is now automatic. That makes
     // the reason a dial failed something a screen has to be able to *ask* for,

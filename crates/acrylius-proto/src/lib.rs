@@ -23,6 +23,7 @@ pub mod frame;
 pub mod handshake;
 pub mod ids;
 pub mod pairing;
+pub mod qr;
 
 /// Wire format version. Bumped only for a change no `Envelope` field index can express.
 pub const WIRE_VERSION: u8 = 1;

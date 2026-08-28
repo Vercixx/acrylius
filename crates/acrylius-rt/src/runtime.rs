@@ -173,15 +173,11 @@ impl Runtime {
     /// Run until the event channel closes.
     pub async fn run(mut self) {
         // Start advertising and browsing on every transport we have.
-        let txt = vec![
-            ("v".to_string(), "1".to_string()),
-            ("fp".to_string(), self.core.fingerprint().to_string()),
-            ("id".to_string(), self.core.device_id().to_string()),
-        ];
+        let mut pairing = self.core.pairing_open();
         for tx in self.transports.values() {
             let _ = tx.send(TransportCmd::Advertise {
                 enable: true,
-                txt: txt.clone(),
+                txt: self.txt(pairing),
             });
             let _ = tx.send(TransportCmd::Discover { enable: true });
         }
@@ -222,10 +218,47 @@ impl Runtime {
             for a in out.actions {
                 self.apply(a).await;
             }
+            // Re-advertise when the pairing window opens or closes.
+            //
+            // Compared rather than driven by an event, because a window closes
+            // four ways — paired, refused, given up on, expired — and only the
+            // first two announce themselves. A `pair=1` left on the air because
+            // the window quietly timed out is an invitation to a device that
+            // will be refused when it accepts.
+            let now_pairing = self.core.pairing_open();
+            if now_pairing != pairing {
+                pairing = now_pairing;
+                for tx in self.transports.values() {
+                    let _ = tx.send(TransportCmd::Advertise {
+                        enable: true,
+                        txt: self.txt(pairing),
+                    });
+                }
+            }
+
             if let Some(f) = &self.observer {
                 f(&self.core);
             }
         }
+    }
+
+    /// What this device says about itself in a discovery advertisement.
+    ///
+    /// Never the raw static key: that is what keeps an `IKpsk2` opener opaque
+    /// to somebody watching, and the fingerprint is enough to match a peer we
+    /// already know. The display name is added by the transport, not here —
+    /// it is a hint nothing may decide from, and it belongs with the
+    /// advertisement rather than with the core's facts.
+    fn txt(&self, pairing: bool) -> Vec<(String, String)> {
+        vec![
+            ("v".to_string(), "1".to_string()),
+            ("fp".to_string(), self.core.fingerprint().to_string()),
+            ("id".to_string(), self.core.device_id().to_string()),
+            (
+                "pair".to_string(),
+                if pairing { "1" } else { "0" }.to_string(),
+            ),
+        ]
     }
 
     /// Report a transfer that never started as one that finished badly.

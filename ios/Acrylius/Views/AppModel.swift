@@ -106,6 +106,26 @@ final class AppModel {
     /// travels.
     var incoming: [IncomingOffer] = []
 
+    /// A computer on this network that this phone is not paired with.
+    struct Nearby: Identifiable, Equatable {
+        /// The advertised fingerprint. Not an identity — a hint for telling
+        /// two rows apart, which is all a list needs.
+        var id: String { fingerprint }
+        let fingerprint: String
+        let name: String
+        let addr: String
+        /// Whether it says it has a pairing window open right now.
+        var pairing: Bool
+        var seen: Date
+    }
+
+    /// What discovery has turned up, newest sighting first.
+    ///
+    /// Empty until M3: the core kept every sighting in a private map with no
+    /// accessor and no event, so the daemon knew every acrylius machine on the
+    /// network and the phone could not be told about one.
+    var nearby: [Nearby] = []
+
     /// What Bluetooth is doing. A projection like everything else here, filled
     /// in by the probe; the model decides nothing about the radio itself.
     let ble = BLEDiagnostics()
@@ -537,6 +557,22 @@ final class AppModel {
             pairingPeerName = name
             pairingPeerFingerprint = fp
             pairingSas = sas
+        case let .discovered(fingerprint, name, addr, _, pairing):
+            // Keyed by fingerprint, because mDNS re-resolves the same machine
+            // whenever anything about it changes — including the `pair` flag
+            // going up — and a list that appended would show one computer
+            // several times, each row claiming something different.
+            let found = Nearby(
+                fingerprint: fingerprint, name: name, addr: addr,
+                pairing: pairing, seen: Date())
+            if let at = nearby.firstIndex(where: { $0.fingerprint == fingerprint }) {
+                nearby[at] = found
+            } else {
+                nearby.append(found)
+            }
+            // A machine that is waiting for somebody sorts first: it is the one
+            // the person is most likely holding the phone for.
+            nearby.sort { ($0.pairing ? 0 : 1, $0.name) < ($1.pairing ? 0 : 1, $1.name) }
         case let .pairingComplete(_, name):
             pairingSas = nil
             pairingCode = nil

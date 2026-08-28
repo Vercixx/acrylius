@@ -129,7 +129,10 @@ fn about(e: &UiEvent, who: &DeviceId) -> bool {
         | UiEvent::Plugin { peer, .. }
         | UiEvent::PairingComplete { peer, .. } => peer == who,
         UiEvent::Error { peer, .. } => peer.as_ref() == Some(who),
-        UiEvent::PairingWindowOpen { .. }
+        // Nobody's request. A sighting is news about a stranger, and the
+        // control socket's waits are all about a device already paired.
+        UiEvent::Discovered { .. }
+        | UiEvent::PairingWindowOpen { .. }
         | UiEvent::PairingSas { .. }
         | UiEvent::PairingFailed { .. } => false,
     }
@@ -153,6 +156,15 @@ fn render(e: &UiEvent) -> String {
             sas,
         } => format!(
             "{name} wants to pair\n  fingerprint {fingerprint}\n  code on both screens: {sas}\n  run `acryliusctl pair approve` if they match"
+        ),
+        UiEvent::Discovered {
+            name,
+            addr,
+            pairing,
+            ..
+        } => format!(
+            "found {name} at {addr}{}",
+            if *pairing { ", waiting to pair" } else { "" }
         ),
         UiEvent::PairingComplete { peer, name } => format!("paired with {name} ({peer})"),
         UiEvent::PairingFailed { reason } => format!("pairing failed: {reason}"),
@@ -285,7 +297,7 @@ async fn handle_conn(stream: UnixStream, h: Handles) -> anyhow::Result<()> {
                 let mut rx = h.ui.subscribe();
                 h.events
                     .send(Event::Local(LocalCommand::OpenPairingWindow { code }))?;
-                stream_pairing(&mut wr, &mut rx).await?;
+                stream_pairing(&mut wr, &mut rx, &h.status).await?;
             }
             Request::Approve => {
                 h.events
@@ -320,7 +332,7 @@ async fn handle_conn(stream: UnixStream, h: Handles) -> anyhow::Result<()> {
                     addr,
                     code,
                 }))?;
-                stream_pairing(&mut wr, &mut rx).await?;
+                stream_pairing(&mut wr, &mut rx, &h.status).await?;
             }
             Request::Connect { device, addr } => match DeviceId::parse(&device) {
                 Ok(id) => {
@@ -966,6 +978,7 @@ fn report(cap: &str, ty: &str, body: &[u8]) -> Report {
 async fn stream_pairing(
     wr: &mut tokio::net::unix::OwnedWriteHalf,
     rx: &mut broadcast::Receiver<UiEvent>,
+    status: &std::sync::Arc<tokio::sync::Mutex<Option<Status>>>,
 ) -> anyhow::Result<()> {
     while let Ok(e) = rx.recv().await {
         let done = matches!(
@@ -973,6 +986,20 @@ async fn stream_pairing(
             UiEvent::PairingComplete { .. } | UiEvent::PairingFailed { .. }
         );
         match &e {
+            UiEvent::PairingWindowOpen {
+                code,
+                expires_in_ms,
+            } => {
+                write(
+                    wr,
+                    &Response::Pairing {
+                        code: code.clone(),
+                        expires_in_ms: *expires_in_ms,
+                        qr: pairing_qr(status, code).await,
+                    },
+                )
+                .await?;
+            }
             UiEvent::PairingSas {
                 name,
                 fingerprint,
@@ -995,6 +1022,31 @@ async fn stream_pairing(
         }
     }
     Ok(())
+}
+
+/// The payload a phone can scan instead of somebody reading a code aloud.
+///
+/// `None` rather than an error when this machine cannot name a routable
+/// address for itself: the code still works typed, and a pairing window that
+/// refused to open because it could not draw a picture would be worse than one
+/// that opens without the picture.
+async fn pairing_qr(
+    status: &std::sync::Arc<tokio::sync::Mutex<Option<Status>>>,
+    code: &str,
+) -> Option<String> {
+    let s = status.lock().await.clone()?;
+    let host = crate::netself::routed_ipv4()?;
+    Some(
+        acrylius_core::proto::qr::PairingQr {
+            name: s.name,
+            host,
+            port: s.port,
+            device_id: DeviceId::parse(&s.device_id).ok()?,
+            fingerprint: acrylius_core::proto::ids::Fingerprint::parse(&s.fingerprint).ok()?,
+            code: code.to_string(),
+        }
+        .encode(),
+    )
 }
 
 async fn write(wr: &mut tokio::net::unix::OwnedWriteHalf, r: &Response) -> anyhow::Result<()> {

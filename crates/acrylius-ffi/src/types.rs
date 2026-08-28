@@ -525,6 +525,15 @@ pub enum FfiUiEvent {
     PairingFailed {
         reason: String,
     },
+    /// A device nearby that this one is not paired with. See
+    /// [`acrylius_core::vocab::UiEvent::Discovered`].
+    Discovered {
+        fingerprint: String,
+        name: String,
+        addr: String,
+        transport: u32,
+        pairing: bool,
+    },
     PeerReachable {
         peer: String,
         name: String,
@@ -556,6 +565,19 @@ impl From<cv::UiEvent> for FfiUiEvent {
             } => Self::PairingWindowOpen {
                 code,
                 expires_in_ms,
+            },
+            cv::UiEvent::Discovered {
+                fingerprint,
+                name,
+                addr,
+                transport,
+                pairing,
+            } => Self::Discovered {
+                fingerprint: fingerprint.to_string(),
+                name,
+                addr,
+                transport: u32::from(transport.0),
+                pairing,
             },
             cv::UiEvent::PairingSas {
                 name,

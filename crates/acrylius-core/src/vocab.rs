@@ -395,6 +395,24 @@ pub enum UiEvent {
     PairingFailed {
         reason: String,
     },
+    /// A device nearby that this one is not paired with.
+    ///
+    /// Untrusted, like everything discovery says: it supplies a name to show
+    /// and an address to try, and nothing may be decided from either. The
+    /// handshake is what settles who is actually there.
+    ///
+    /// Only unpaired devices. A paired one is already in `peers` with somewhere
+    /// to display it, and the core dials it without being asked — so reporting
+    /// it here would be a second list of the same machine that does nothing.
+    Discovered {
+        fingerprint: Fingerprint,
+        name: String,
+        /// Transport-defined and opaque: a `host:port`, a BLE address.
+        addr: String,
+        transport: TransportId,
+        /// Whether it says it has a pairing window open right now.
+        pairing: bool,
+    },
     PeerReachable {
         peer: DeviceId,
         name: String,

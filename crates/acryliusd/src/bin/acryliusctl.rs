@@ -345,6 +345,23 @@ macro_rules! outln {
     ($($arg:tt)*) => {{ let _ = writeln!(std::io::stdout(), $($arg)*); }};
 }
 
+/// A QR as text, in half-block characters.
+///
+/// Unicode rather than an image file: this runs over SSH as often as it runs
+/// in front of somebody, and a picture written to `/tmp` that the operator
+/// then has to go and open is not a shorter path than typing eight characters.
+///
+/// `None` when the payload will not fit a QR at all, which for a code this
+/// size means something has gone wrong upstream rather than that the person
+/// should be shown a broken picture.
+fn render_qr(payload: &str) -> Option<String> {
+    use qrcode::render::unicode;
+    // Low correction: this is read from a screen a foot away, not off a parcel
+    // in the rain, and every level up makes the picture bigger for no gain.
+    let code = qrcode::QrCode::with_error_correction_level(payload, qrcode::EcLevel::L).ok()?;
+    Some(code.render::<unicode::Dense1x2>().quiet_zone(true).build())
+}
+
 fn socket_path(state: Option<PathBuf>) -> PathBuf {
     if let Some(s) = state {
         return s.join("acrylius.sock");
@@ -507,6 +524,28 @@ async fn main() -> anyhow::Result<()> {
                     );
                     outln!("  fingerprint {}", x.fingerprint);
                 }
+            }
+            Response::Pairing {
+                code,
+                expires_in_ms,
+                qr,
+            } => {
+                // The picture first, because scanning it is the path that
+                // needs no typing at all. The code stays under it: a phone
+                // with no camera permission, or a person on the far side of
+                // the room, still has to be able to pair.
+                if let Some(payload) = qr.as_deref() {
+                    match render_qr(payload) {
+                        Some(art) => {
+                            outln!();
+                            outln!("{art}");
+                        }
+                        None => outln!("(this pairing code is too long to draw)"),
+                    }
+                }
+                outln!("  code     {code}");
+                outln!("  expires  in {}s", expires_in_ms / 1000);
+                outln!();
             }
             Response::Event { text } => outln!("{text}"),
             Response::Confirm {
