@@ -41,7 +41,15 @@ pub trait BulkHost: Send + Sync + 'static {
         expect_bytes: u64,
     ) -> anyhow::Result<String>;
 
-    /// Wait for that connection and take what arrives.
+    /// Wait for the far end to connect, and no further.
+    ///
+    /// Split from `receive` so that the two silences can be told apart: a
+    /// sender that never dials has to be given up on, and a file taking its time
+    /// must not be. Only a host knows which of the two it is in, and this
+    /// returning is how it says so.
+    async fn accept(&self, transfer: TransferId) -> anyhow::Result<()>;
+
+    /// Take what arrives on the connection `accept` returned for.
     async fn receive(&self, transfer: TransferId) -> anyhow::Result<()>;
 
     /// Connect to somewhere the far end named, and send.
@@ -68,6 +76,15 @@ pub struct Runtime {
     store: Box<dyn Store>,
     ui: Option<UiSink>,
     bulk: Option<Arc<dyn BulkHost>>,
+    /// The task carrying each transfer, so that cancelling one can reach it.
+    ///
+    /// A bulk transfer runs detached, because it lasts as long as a file takes
+    /// and the loop below has other work. Detached and *forgotten*, though, is
+    /// what made `BulkCancel` a suggestion: the host's `cancel` takes the
+    /// transfer out of its own table, which the task stopped consulting the
+    /// moment it started, so a receive already blocked on `accept` never heard
+    /// about it and waited for a connection that was not coming.
+    running: HashMap<TransferId, tokio::task::JoinHandle<()>>,
     /// Called with the core after every step, so a host can keep a live
     /// snapshot for its own queries without ever holding the core itself.
     observer: Option<Observer>,
@@ -89,6 +106,7 @@ impl Runtime {
             store,
             ui: None,
             bulk: None,
+            running: HashMap::new(),
             observer: None,
             started: Instant::now(),
         }
@@ -182,6 +200,12 @@ impl Runtime {
                 },
                 () = &mut sleep => Event::Tick,
             };
+
+            // A transfer that has ended has nothing left to abort, and a handle
+            // kept for it is one this map never gives back.
+            if let Event::BulkFinished { transfer, .. } = &ev {
+                self.running.remove(transfer);
+            }
 
             let now = Now {
                 monotonic_ms: self.now_ms(),
@@ -279,13 +303,28 @@ impl Runtime {
                     return;
                 };
                 let back = self.events_tx.clone();
-                tokio::spawn(async move {
+                let task = tokio::spawn(async move {
                     match bulk.listen(transfer, key, expect_bytes).await {
                         Ok(endpoint) => {
                             let _ = back.send(Event::BulkListening { transfer, endpoint });
                             // Accepting blocks until the far end connects, so it
                             // runs after the endpoint has been sent rather than
                             // before it.
+                            //
+                            // Reported the moment it returns, because that is the
+                            // one thing about a transfer only a host can know and
+                            // the core needs it: everything before this is a wait
+                            // that has to be bounded, and everything after is a
+                            // file arriving, which must not be.
+                            if let Err(e) = bulk.accept(transfer).await {
+                                let _ = back.send(Event::BulkFinished {
+                                    transfer,
+                                    ok: false,
+                                    detail: e.to_string(),
+                                });
+                                return;
+                            }
+                            let _ = back.send(Event::BulkStarted { transfer });
                             let (ok, detail) = match bulk.receive(transfer).await {
                                 Ok(()) => (true, String::new()),
                                 Err(e) => (false, e.to_string()),
@@ -305,6 +344,7 @@ impl Runtime {
                         }
                     }
                 });
+                self.running.insert(transfer, task);
             }
 
             Action::BulkSend {
@@ -317,7 +357,7 @@ impl Runtime {
                     return;
                 };
                 let back = self.events_tx.clone();
-                tokio::spawn(async move {
+                let task = tokio::spawn(async move {
                     let (ok, detail) = match bulk.send(transfer, endpoint, key).await {
                         Ok(()) => (true, String::new()),
                         Err(e) => (false, e.to_string()),
@@ -328,9 +368,21 @@ impl Runtime {
                         detail,
                     });
                 });
+                // Held for the same reason a receive is: a send that cannot
+                // reach the endpoint it was given blocks in `connect` just as
+                // patiently.
+                self.running.insert(transfer, task);
             }
 
             Action::BulkCancel { transfer } => {
+                // The task first. Telling the host to forget a transfer does
+                // nothing to a task already blocked inside it, and that task
+                // holds the listener — so without this a cancelled receive kept
+                // its port bound and its file reserved for the life of the
+                // process.
+                if let Some(task) = self.running.remove(&transfer) {
+                    task.abort();
+                }
                 if let Some(bulk) = &self.bulk {
                     bulk.cancel(transfer);
                 }

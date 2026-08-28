@@ -266,9 +266,14 @@ public actor CoreRuntime {
             submit(.bulkListening(transfer: transfer, endpoint: listener.endpoint()))
             Task.detached { [weak self, inbox] in
                 do {
+                    // Waiting and receiving, told apart. Only this end knows
+                    // when the computer actually dialled, and the core needs
+                    // that: it gives up on a sender that never arrives, and must
+                    // never give up on a file that is still coming.
+                    try listener.accept(transfer: transfer)
+                    await self?.submit(.bulkStarted(transfer: transfer))
                     let got = try listener.receive(
-                        transfer: transfer, key: key,
-                        expectBytes: expectBytes, path: path)
+                        key: key, expectBytes: expectBytes, path: path)
                     await self?.submit(.bulkFinished(
                         transfer: transfer, ok: true, detail: "\(got) bytes"))
                 } catch {

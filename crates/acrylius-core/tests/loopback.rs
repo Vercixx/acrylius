@@ -97,6 +97,8 @@ struct Net {
     /// Wi-Fi at the same time, which is the arrangement a phone actually has
     /// and the one where preferring the wrong link shows up.
     pub ble_transport: Option<TransportId>,
+    /// How far a transfer gets once the sender has been told where to dial.
+    pub dials: Dials,
     /// Every link the harness has brought up, and which transport carried it,
     /// so a test can take one away by name. Losing the better transport while
     /// the worse one is still connected is the case a real phone meets every
@@ -123,6 +125,7 @@ impl Net {
             dialed: Vec::new(),
             links_are_ble: false,
             ble_transport: None,
+            dials: Dials::AndFinishes,
             links: Vec::new(),
         }
     }
@@ -197,6 +200,17 @@ impl Net {
                     assert_eq!(&key, theirs, "both ends must derive the same bulk key");
                 }
                 self.bulk_keys.insert((side, transfer), key);
+                if self.dials == Dials::Never {
+                    return;
+                }
+                // Only the listening side learns that anything connected, and
+                // only its host could have known. That is the whole reason
+                // `BulkStarted` exists.
+                self.queue
+                    .push_back((side.other(), Event::BulkStarted { transfer }));
+                if self.dials == Dials::AndKeepsGoing {
+                    return;
+                }
                 for who in [side, side.other()] {
                     self.queue.push_back((
                         who,
@@ -447,6 +461,24 @@ fn discover_via(net: &mut Net, side: Side, of: Side, transport: TransportId, add
 /// A second transport, worse than `TRANSPORT`. Preference is ascending id, so
 /// this stands in for BLE beside Wi-Fi.
 const SLOWER: TransportId = TransportId(1);
+
+/// What the harness does when a sender is told where to connect.
+///
+/// A working transfer does all of it and does it at once, which is what every
+/// test wanted until the core grew a deadline. Watching it wait needs a way to
+/// stop part-way — and the two ways of stopping are the whole point, because
+/// from the outside they look identical and only one of them should end.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Dials {
+    /// Connects and finishes, the way a small file on a local network does.
+    AndFinishes,
+    /// Connects, and is still going. A large file, a slow disk, a phone on the
+    /// edge of the network.
+    AndKeepsGoing,
+    /// Never arrives. Its session died between the accept and the dial, or its
+    /// app was killed, or its Wi-Fi went away.
+    Never,
+}
 
 /// Take one transport's link away, the way switching Wi-Fi off does.
 ///
@@ -1649,6 +1681,7 @@ fn a_session_survives_two_machines_with_different_uptimes() {
 
 // ---------------------------------------------------------------- file transfer
 
+use acrylius_core::core::BULK_DIAL_WAIT_MS;
 use acrylius_core::plugins::share::{self, Accept, Finished, Offer};
 use acrylius_core::vocab::TransferId;
 
@@ -1725,6 +1758,85 @@ fn offer_body(transfer: u64, size: u64) -> Vec<u8> {
         mime: "image/jpeg".to_string(),
     })
     .unwrap()
+}
+
+/// Fire the host's single timer, which is how every deadline in the core is
+/// reached.
+fn tick(net: &mut Net, side: Side) {
+    net.queue.push_back((side, Event::Tick));
+    net.run();
+}
+
+/// Whether a side was told a transfer had ended, and how.
+fn told_it_finished(net: &Net, side: Side, ok: bool) -> bool {
+    net.ui.iter().any(|(s, e)| {
+        *s == side
+            && matches!(e, UiEvent::Plugin { cap, ty, body, .. }
+                if cap == share::CAP && ty == "finished"
+                && minicbor::decode::<Finished>(body).is_ok_and(|f| f.ok == ok))
+    })
+}
+
+#[test]
+fn a_sender_that_never_dials_is_given_up_on() {
+    // Accepting a file binds a port and reserves a filename, and until now
+    // nothing ever took them back. A sender whose session died between the
+    // accept and the dial left both held for the life of the process, and the
+    // person who had pressed Accept watched a transfer that never moved and
+    // never failed.
+    let (mut net, b_id) = sharing_pair();
+    let a_id = net.a.device_id();
+    net.dials = Dials::Never;
+
+    plugin(&mut net, Side::A, &b_id, "offer", offer_body(1, 4096));
+    plugin(&mut net, Side::B, &a_id, "accept", answer_body(1));
+    net.ui.clear();
+
+    // Not early. A transfer that is merely slow to start is not a failed one,
+    // and a deadline that fires before it is due is worse than none.
+    net.now += BULK_DIAL_WAIT_MS - 1;
+    tick(&mut net, Side::B);
+    assert!(
+        !told_it_finished(&net, Side::B, false),
+        "given up on before the wait was over"
+    );
+
+    net.now += 2;
+    tick(&mut net, Side::B);
+    assert!(
+        told_it_finished(&net, Side::B, false),
+        "the transfer was never ended, so nothing released the port or the name"
+    );
+    // And the far end is told rather than left to wonder, which is the rule
+    // every other bulk ending follows.
+    assert!(
+        told_it_finished(&net, Side::A, false),
+        "the sender was not told the transfer it had been offered is over"
+    );
+}
+
+#[test]
+fn a_file_still_arriving_is_not_given_up_on() {
+    // The other half, and the reason `BulkStarted` exists at all. Nothing in
+    // the core knows how long a gigabyte should take, so the deadline may only
+    // ever cover the wait for a sender — never the file. Bounding both would
+    // cut off the transfers people most need to work.
+    let (mut net, b_id) = sharing_pair();
+    let a_id = net.a.device_id();
+    net.dials = Dials::AndKeepsGoing;
+
+    plugin(&mut net, Side::A, &b_id, "offer", offer_body(1, 4096));
+    plugin(&mut net, Side::B, &a_id, "accept", answer_body(1));
+    net.ui.clear();
+
+    // Long past any deadline, and still going.
+    net.now += BULK_DIAL_WAIT_MS * 10;
+    tick(&mut net, Side::B);
+
+    assert!(
+        !told_it_finished(&net, Side::B, false),
+        "a file that was still arriving was reported as a sender that never came"
+    );
 }
 
 fn answer_body(transfer: u64) -> Vec<u8> {

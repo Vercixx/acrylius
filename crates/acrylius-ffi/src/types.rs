@@ -226,6 +226,11 @@ pub enum FfiEvent {
         transfer: u64,
         endpoint: String,
     },
+    /// The far end connected. Sent between `BulkListener.accept` and its
+    /// `receive`, which is the only moment either is known.
+    BulkStarted {
+        transfer: u64,
+    },
     BulkFinished {
         transfer: u64,
         ok: bool,
@@ -352,6 +357,9 @@ impl TryFrom<FfiEvent> for cv::Event {
             FfiEvent::BulkListening { transfer, endpoint } => Self::BulkListening {
                 transfer: cv::TransferId(transfer),
                 endpoint,
+            },
+            FfiEvent::BulkStarted { transfer } => Self::BulkStarted {
+                transfer: cv::TransferId(transfer),
             },
             FfiEvent::BulkFinished {
                 transfer,

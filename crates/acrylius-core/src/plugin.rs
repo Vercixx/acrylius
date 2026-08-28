@@ -91,7 +91,9 @@ pub struct PendingSend {
 
 /// The only way a plugin affects anything.
 pub struct Cx {
-    now_ms: u64,
+    /// Visible to the core because a bulk request it drains needs a deadline,
+    /// and this is the clock the plugin that asked was working against.
+    pub(crate) now_ms: u64,
     /// Owned rather than borrowed from the core: a `&mut` here would conflict
     /// with the core's own borrow of the plugin it is calling.
     pub(crate) next_token: u64,

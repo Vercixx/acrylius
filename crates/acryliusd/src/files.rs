@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use acrylius_core::plugins::share::Offer;
 use acrylius_core::vocab::TransferId;
-use acrylius_rt::bulk::{self, Listening};
+use acrylius_rt::bulk::{self, Accepted, Listening};
 use acrylius_rt::runtime::BulkHost;
 
 /// A transfer we are sending.
@@ -24,7 +24,11 @@ struct Incoming {
     dest: PathBuf,
     expect_bytes: u64,
     key: Vec<u8>,
+    /// Waiting for a sender. Taken by `accept`, which leaves `connected` in its
+    /// place: the two are never both here, and both being gone means this
+    /// transfer is already being read.
     listening: Option<Listening>,
+    connected: Option<Accepted>,
 }
 
 pub struct FileBulk {
@@ -189,32 +193,52 @@ impl BulkHost for FileBulk {
                 expect_bytes,
                 key,
                 listening: Some(listening),
+                connected: None,
             },
         );
         Ok(endpoint)
     }
 
-    async fn receive(&self, transfer: TransferId) -> anyhow::Result<()> {
+    async fn accept(&self, transfer: TransferId) -> anyhow::Result<()> {
         // Taken out of the map, because a listener can only be accepted on
         // once and leaving it there would let a second call wait forever.
-        let (listening, dest, expect, key) = {
+        let listening = {
+            let mut map = self.incoming.lock().expect("poisoned");
+            map.get_mut(&transfer)
+                .ok_or_else(|| anyhow::anyhow!("nothing listening for {}", transfer.0))?
+                .listening
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("already accepted {}", transfer.0))?
+        };
+        // Awaited with nothing locked. This is the wait that lasts, and holding
+        // the map across it would stop every other transfer on the machine.
+        let accepted = listening.accept(transfer.0).await?;
+        let mut map = self.incoming.lock().expect("poisoned");
+        map.get_mut(&transfer)
+            .ok_or_else(|| anyhow::anyhow!("{} was cancelled while waiting", transfer.0))?
+            .connected = Some(accepted);
+        Ok(())
+    }
+
+    async fn receive(&self, transfer: TransferId) -> anyhow::Result<()> {
+        let (connected, dest, expect, key) = {
             let mut map = self.incoming.lock().expect("poisoned");
             let entry = map
                 .get_mut(&transfer)
                 .ok_or_else(|| anyhow::anyhow!("nothing listening for {}", transfer.0))?;
-            let listening = entry
-                .listening
+            let connected = entry
+                .connected
                 .take()
-                .ok_or_else(|| anyhow::anyhow!("already receiving {}", transfer.0))?;
+                .ok_or_else(|| anyhow::anyhow!("nothing has connected for {}", transfer.0))?;
             (
-                listening,
+                connected,
                 entry.dest.clone(),
                 entry.expect_bytes,
                 entry.key.clone(),
             )
         };
 
-        let result = listening.receive(transfer.0, &key, expect, &dest).await;
+        let result = connected.receive(&key, expect, &dest).await;
         // Answered, either way. An offer left here would keep showing up as
         // waiting for a decision that was already made, and the next transfer
         // of a file by the same name would find the old id first.
@@ -384,6 +408,7 @@ mod tests {
         let source = b.dir().join("source.bin");
         std::fs::write(&source, b"data").unwrap();
         let sending = tokio::spawn(async move { bulk::send(7, &endpoint, &key, &source).await });
+        b.accept(TransferId(7)).await.unwrap();
         b.receive(TransferId(7)).await.unwrap();
         sending.await.unwrap().unwrap();
 

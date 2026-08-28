@@ -76,19 +76,18 @@ pub async fn listen(advertise_host: &str) -> anyhow::Result<Listening> {
     })
 }
 
+/// A connection that has arrived and said which transfer it is.
+///
+/// Separate from [`Listening`] so that waiting for a sender and reading from one
+/// are two things a caller can be in the middle of, rather than one. Nothing
+/// above here can bound the first without being able to see the difference.
+pub struct Accepted {
+    stream: TcpStream,
+}
+
 impl Listening {
-    /// Accept one connection and write what arrives to `dest`.
-    ///
-    /// Written to a temporary beside the destination and renamed at the end, so
-    /// an interrupted transfer never leaves something that looks like a
-    /// complete file. A short transfer is a failure and the temporary goes.
-    pub async fn receive(
-        self,
-        transfer: u64,
-        key: &[u8],
-        expect_bytes: u64,
-        dest: &Path,
-    ) -> anyhow::Result<u64> {
+    /// Wait for one connection, and check it is for the transfer expected.
+    pub async fn accept(self, transfer: u64) -> anyhow::Result<Accepted> {
         let (mut stream, from) = self.listener.accept().await?;
         tracing::debug!(%from, transfer, "bulk connection");
 
@@ -98,7 +97,18 @@ impl Listening {
         if named != transfer {
             anyhow::bail!("that connection is for transfer {named}, not {transfer}");
         }
+        Ok(Accepted { stream })
+    }
+}
 
+impl Accepted {
+    /// Write what arrives to `dest`.
+    ///
+    /// Written to a temporary beside the destination and renamed at the end, so
+    /// an interrupted transfer never leaves something that looks like a
+    /// complete file. A short transfer is a failure and the temporary goes.
+    pub async fn receive(self, key: &[u8], expect_bytes: u64, dest: &Path) -> anyhow::Result<u64> {
+        let mut stream = self.stream;
         let tmp = temp_beside(dest);
         let mut file = tokio::fs::File::create(&tmp).await?;
         let mut written: u64 = 0;
@@ -245,7 +255,10 @@ mod tests {
         let endpoint = listening.endpoint.clone();
         let len = payload.len() as u64;
         let dest2 = dest.clone();
-        let recv = tokio::spawn(async move { listening.receive(1, &key, len, &dest2).await });
+        let recv =
+            tokio::spawn(
+                async move { listening.accept(1).await?.receive(&key, len, &dest2).await },
+            );
 
         send(1, &endpoint, &key, &src).await.unwrap();
         let got = recv.await.unwrap().unwrap();
@@ -266,7 +279,13 @@ mod tests {
         let listening = listen("127.0.0.1").await.unwrap();
         let endpoint = listening.endpoint.clone();
         let dest2 = dest.clone();
-        let recv = tokio::spawn(async move { listening.receive(1, &[1u8; 32], 13, &dest2).await });
+        let recv = tokio::spawn(async move {
+            listening
+                .accept(1)
+                .await?
+                .receive(&[1u8; 32], 13, &dest2)
+                .await
+        });
 
         // The dialer knows the port and the transfer id, and neither helps.
         let _ = send(1, &endpoint, &[2u8; 32], &src).await;
@@ -289,7 +308,13 @@ mod tests {
         let endpoint = listening.endpoint.clone();
         let dest2 = dest.clone();
         // Told to expect more than will arrive.
-        let recv = tokio::spawn(async move { listening.receive(1, &[3u8; 32], 999, &dest2).await });
+        let recv = tokio::spawn(async move {
+            listening
+                .accept(1)
+                .await?
+                .receive(&[3u8; 32], 999, &dest2)
+                .await
+        });
         let _ = send(1, &endpoint, &[3u8; 32], &src).await;
 
         assert!(recv.await.unwrap().is_err());

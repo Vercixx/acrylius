@@ -101,6 +101,18 @@ pub enum Event {
         transfer: TransferId,
         endpoint: String,
     },
+    /// The far end has connected, and bytes are on their way.
+    ///
+    /// The one fact about a transfer that only a host can report, and the core
+    /// cannot do without it. Waiting for a sender that never dials has to be
+    /// bounded — an accepted offer otherwise holds a port and a reserved
+    /// filename for the life of the process — while a file arriving must not be,
+    /// because nothing here knows how long a gigabyte should take. From the
+    /// outside those two are the same silence. This is what tells them apart.
+    ///
+    /// A host that never sends it gets the old behaviour for the transfer
+    /// itself and keeps the bound wait, which is the safe way round.
+    BulkStarted { transfer: TransferId },
     /// A bulk transfer ended, one way or the other. `detail` is empty on
     /// success.
     BulkFinished {
@@ -420,9 +432,10 @@ pub enum Action {
     /// Accept a bulk connection for `transfer`, and say where.
     ///
     /// The host answers with [`Event::BulkListening`] once it has somewhere,
-    /// and with [`Event::BulkFinished`] when the transfer ends. A host that
-    /// cannot listen reports that as a finished-and-failed transfer rather than
-    /// staying silent.
+    /// [`Event::BulkStarted`] when the far end actually connects, and
+    /// [`Event::BulkFinished`] when the transfer ends. A host that cannot listen
+    /// reports that as a finished-and-failed transfer rather than staying
+    /// silent.
     BulkListen {
         transfer: TransferId,
         /// Derived from the session. The core is the only thing that knows the

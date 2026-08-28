@@ -94,9 +94,14 @@ pub fn bulk_safe_name(offered: String) -> String {
 #[derive(uniffi::Object)]
 pub struct BulkListener {
     endpoint: String,
-    /// Taken by `receive`, which consumes the listener. `Option` because a
-    /// UniFFI object is behind an `Arc` and cannot be moved out of.
+    /// Taken by `accept`. `Option` because a UniFFI object is behind an `Arc`
+    /// and cannot be moved out of.
     listener: std::sync::Mutex<Option<TcpListener>>,
+    /// What `accept` left behind for `receive`. The two are separate calls so
+    /// that the wait for a sender and the reading of a file are separate things
+    /// a caller can be inside — only then can the first be given up on without
+    /// the second being cut short. See `Event::BulkStarted`.
+    connected: std::sync::Mutex<Option<TcpStream>>,
 }
 
 #[uniffi::export]
@@ -125,6 +130,7 @@ impl BulkListener {
         Ok(Self {
             endpoint: format!("{host}:{port}"),
             listener: std::sync::Mutex::new(Some(listener)),
+            connected: std::sync::Mutex::new(None),
         })
     }
 
@@ -135,21 +141,13 @@ impl BulkListener {
         self.endpoint.clone()
     }
 
-    /// Accept one connection and write what arrives to `path`.
+    /// Wait for the far end to connect, and check it is the transfer expected.
     ///
-    /// Blocking, like its sending counterpart, and for as long as the transfer
-    /// takes. Call it off the main thread.
-    ///
-    /// Written to a temporary beside the destination and renamed at the end, so
-    /// an interrupted transfer never leaves something that looks like a whole
-    /// file. A short one is a failure and the temporary goes.
-    pub fn receive(
-        &self,
-        transfer: u64,
-        key: Vec<u8>,
-        expect_bytes: u64,
-        path: String,
-    ) -> Result<u64, FfiError> {
+    /// Blocking, and for as long as the sender takes to arrive — which may be
+    /// never. Call it off the main thread, and tell the core when it returns:
+    /// that is what separates a sender still coming from a file still arriving,
+    /// and the core gives up on only the first of those.
+    pub fn accept(&self, transfer: u64) -> Result<(), FfiError> {
         let listener = self
             .listener
             .lock()
@@ -160,10 +158,36 @@ impl BulkListener {
             .ok_or_else(|| FfiError::Effect {
                 detail: "this listener has already taken its transfer".to_string(),
             })?;
-        receive(&listener, transfer, &key, expect_bytes, Path::new(&path)).map_err(|e| {
-            FfiError::Effect {
-                detail: e.to_string(),
-            }
+        let stream = accept(&listener, transfer).map_err(|e| FfiError::Effect {
+            detail: e.to_string(),
+        })?;
+        *self.connected.lock().map_err(|_| FfiError::Effect {
+            detail: "the listener is poisoned".to_string(),
+        })? = Some(stream);
+        Ok(())
+    }
+
+    /// Write what arrives on the accepted connection to `path`.
+    ///
+    /// Blocking, like its sending counterpart, and for as long as the transfer
+    /// takes. Call it off the main thread.
+    ///
+    /// Written to a temporary beside the destination and renamed at the end, so
+    /// an interrupted transfer never leaves something that looks like a whole
+    /// file. A short one is a failure and the temporary goes.
+    pub fn receive(&self, key: Vec<u8>, expect_bytes: u64, path: String) -> Result<u64, FfiError> {
+        let stream = self
+            .connected
+            .lock()
+            .map_err(|_| FfiError::Effect {
+                detail: "the listener is poisoned".to_string(),
+            })?
+            .take()
+            .ok_or_else(|| FfiError::Effect {
+                detail: "nothing has connected to this listener".to_string(),
+            })?;
+        receive(stream, &key, expect_bytes, Path::new(&path)).map_err(|e| FfiError::Effect {
+            detail: e.to_string(),
         })
     }
 }
@@ -174,13 +198,7 @@ fn temp_beside(dest: &Path) -> PathBuf {
     dest.with_file_name(name)
 }
 
-fn receive(
-    listener: &TcpListener,
-    transfer: u64,
-    key: &[u8],
-    expect_bytes: u64,
-    dest: &Path,
-) -> std::io::Result<u64> {
+fn accept(listener: &TcpListener, transfer: u64) -> std::io::Result<TcpStream> {
     let (mut stream, _from) = listener.accept()?;
     stream.set_nodelay(true).ok();
 
@@ -192,7 +210,15 @@ fn receive(
             "that connection is for transfer {named}, not {transfer}"
         )));
     }
+    Ok(stream)
+}
 
+fn receive(
+    mut stream: TcpStream,
+    key: &[u8],
+    expect_bytes: u64,
+    dest: &Path,
+) -> std::io::Result<u64> {
     let tmp = temp_beside(dest);
     let outcome = (|| -> std::io::Result<u64> {
         let mut file = std::fs::File::create(&tmp)?;
@@ -280,7 +306,10 @@ mod tests {
             tokio::task::spawn_blocking(move || bulk_send(7, endpoint, k, path))
         };
         let received = listening
-            .receive(7, &k, bytes.len() as u64, &dest)
+            .accept(7)
+            .await
+            .expect("the phone connects")
+            .receive(&k, bytes.len() as u64, &dest)
             .await
             .expect("the daemon reads what the phone wrote");
 
@@ -316,14 +345,21 @@ mod tests {
             let wrong = key(b"some other handshake", "the-offerer", 7).to_vec();
             tokio::task::spawn_blocking(move || bulk_send(7, endpoint, wrong, path))
         };
-        let outcome = listening
-            .receive(
-                7,
-                &key(b"a shared handshake hash", "the-offerer", 7),
-                14,
-                &dest,
-            )
-            .await;
+        let outcome = match listening.accept(7).await {
+            // The greeting names a transfer and nothing secret, so a sender
+            // without the key still gets this far. What it cannot do is open a
+            // single frame afterwards.
+            Ok(connected) => {
+                connected
+                    .receive(
+                        &key(b"a shared handshake hash", "the-offerer", 7),
+                        14,
+                        &dest,
+                    )
+                    .await
+            }
+            Err(e) => Err(e),
+        };
         let _ = sending.await;
 
         assert!(outcome.is_err(), "nothing it sent would open");
@@ -363,7 +399,10 @@ mod tests {
         let receiving = {
             let k = k.to_vec();
             let path = dest.to_string_lossy().into_owned();
-            tokio::task::spawn_blocking(move || listener.receive(11, k, size, path))
+            tokio::task::spawn_blocking(move || {
+                listener.accept(11)?;
+                listener.receive(k, size, path)
+            })
         };
         let sent = acrylius_rt::bulk::send(11, &endpoint, &k, &source)
             .await
@@ -399,7 +438,10 @@ mod tests {
             let k = k.to_vec();
             let path = dest.to_string_lossy().into_owned();
             // Told to expect far more than is coming.
-            tokio::task::spawn_blocking(move || listener.receive(12, k, 9_000, path))
+            tokio::task::spawn_blocking(move || {
+                listener.accept(12)?;
+                listener.receive(k, 9_000, path)
+            })
         };
         let _ = acrylius_rt::bulk::send(12, &endpoint, &k, &source).await;
 

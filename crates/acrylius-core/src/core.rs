@@ -33,6 +33,27 @@ type PeerDial = (DeviceId, Vec<(TransportId, String)>, bool);
 /// become a leak on a daemon that runs for months across many networks.
 const MAX_SEEN: usize = 256;
 
+/// How long a host may hold a listener open for a sender that has not dialled.
+///
+/// The wait, never the transfer: [`Event::BulkStarted`] ends it the moment the
+/// far end connects, so a slow gigabyte is not this deadline's business.
+///
+/// What is being bounded is a sender that will never come — its session died
+/// between the accept and the dial, its app was killed, its Wi-Fi went away.
+/// Until this existed there was nothing to end that: a port stayed bound and a
+/// filename stayed reserved for the life of the process, and the person who had
+/// pressed Accept was shown a transfer that never moved and never failed.
+///
+/// Thirty seconds because the dial follows the endpoint immediately and over
+/// anything a session already runs on it is one round trip. Long enough that a
+/// loaded phone waking a socket is not cut off; short enough that a person
+/// watching it knows something is wrong before they ask.
+///
+/// Public because a host may want to say so in a UI, and because a second host
+/// must not invent its own answer — the shape of the lock-budget bug, which is
+/// written up on [`crate::plugins::session::LOCK_REPLY_BUDGET_MS`].
+pub const BULK_DIAL_WAIT_MS: u64 = 30_000;
+
 /// What a link we dialled brings with it into its handshake.
 struct Dialled {
     attrs: LinkAttrs,
@@ -180,6 +201,12 @@ pub struct Core {
     effect_owner: BTreeMap<EffectToken, usize>,
     /// Which plugin owns a bulk transfer, so its answer reaches the right one.
     bulk_owner: BTreeMap<TransferId, usize>,
+    /// Transfers a host is listening for, and when to stop waiting.
+    ///
+    /// An entry lives from [`Action::BulkListen`] until the far end connects,
+    /// and no longer: [`Event::BulkStarted`] takes it out, so the deadline
+    /// bounds the wait and never the file. See [`BULK_DIAL_WAIT_MS`].
+    bulk_wait: BTreeMap<TransferId, u64>,
     caps_out: Vec<String>,
     caps_in: Vec<String>,
     /// The subset of `caps_in` this host can actually act on, rather than only
@@ -344,6 +371,11 @@ impl Core {
                     p.on_bulk_listening(cx, transfer, &endpoint);
                 });
             }
+            // Bytes are moving, so there is nothing left to time out. How long a
+            // file takes is the file's business.
+            Event::BulkStarted { transfer } => {
+                self.bulk_wait.remove(&transfer);
+            }
             Event::BulkFinished {
                 transfer,
                 ok,
@@ -353,8 +385,9 @@ impl Core {
                     p.on_bulk_finished(cx, transfer, ok, &detail);
                 });
                 // The transfer is over either way, so nothing should still be
-                // holding a key for it.
+                // holding a key for it, or waiting on it.
                 self.bulk_owner.remove(&transfer);
+                self.bulk_wait.remove(&transfer);
             }
             Event::Tick => self.on_tick(now_ms, &mut out),
             Event::Local(cmd) => self.on_local(now_ms, cmd, &mut out),
@@ -371,6 +404,9 @@ impl Core {
         let mut consider = |d: u64| best = Some(best.map_or(d, |b: u64| b.min(d)));
         if let Some(p) = &self.pairing {
             consider(p.deadline);
+        }
+        for d in self.bulk_wait.values() {
+            consider(*d);
         }
         for st in self.links.values() {
             match st {
@@ -1182,6 +1218,7 @@ impl Core {
 
     fn drain_cx(&mut self, cx: Cx, out: &mut Outcome) {
         let Cx {
+            now_ms,
             sends,
             effects,
             ui,
@@ -1196,7 +1233,7 @@ impl Core {
             out.push(Action::Effect { token, effect });
         }
         for b in bulk {
-            self.dispatch_bulk(b, out);
+            self.dispatch_bulk(now_ms, b, out);
         }
         for s in sends {
             self.dispatch_send(0, s, out);
@@ -1418,7 +1455,7 @@ impl Core {
         self.best_link(peer).map(|(_, u)| u.kind.clone())
     }
 
-    fn dispatch_bulk(&mut self, request: BulkRequest, out: &mut Outcome) {
+    fn dispatch_bulk(&mut self, now_ms: u64, request: BulkRequest, out: &mut Outcome) {
         let (peer, transfer) = match &request {
             BulkRequest::Listen { peer, transfer, .. }
             | BulkRequest::Send { peer, transfer, .. } => (peer.clone(), *transfer),
@@ -1477,11 +1514,18 @@ impl Core {
         let key = crate::proto::bulk::key(&hash, offerer.as_str(), transfer.0).to_vec();
 
         match request {
-            BulkRequest::Listen { expect_bytes, .. } => out.push(Action::BulkListen {
-                transfer,
-                key,
-                expect_bytes,
-            }),
+            BulkRequest::Listen { expect_bytes, .. } => {
+                // The clock starts here rather than at `BulkListening`, so that
+                // a host which never manages to bind is bounded by the same
+                // deadline as a sender which never dials. Both look identical
+                // from here, and both used to wait for ever.
+                self.bulk_wait.insert(transfer, now_ms + BULK_DIAL_WAIT_MS);
+                out.push(Action::BulkListen {
+                    transfer,
+                    key,
+                    expect_bytes,
+                });
+            }
             BulkRequest::Send { endpoint, .. } => out.push(Action::BulkSend {
                 transfer,
                 endpoint,
@@ -1707,6 +1751,29 @@ impl Core {
             out.ui(UiEvent::PairingFailed {
                 reason: "the pairing window expired".to_string(),
             });
+        }
+
+        // Senders that were told where to connect and never did. See
+        // [`BULK_DIAL_WAIT_MS`]; `BulkStarted` has already taken out everything
+        // that is actually moving bytes.
+        let gave_up: Vec<TransferId> = self
+            .bulk_wait
+            .iter()
+            .filter(|(_, deadline)| now_ms >= **deadline)
+            .map(|(t, _)| *t)
+            .collect();
+        for transfer in gave_up {
+            self.bulk_wait.remove(&transfer);
+            // Cancelled at the host first, so the port and the reserved
+            // filename go back before anyone is told the transfer is over.
+            out.push(Action::BulkCancel { transfer });
+            // Reported as a failure rather than left silent, which is the rule
+            // every other bulk ending follows: the plugin unwinds, the person
+            // who accepted it is told, and the far end gets an answer.
+            self.dispatch_to_transfer_owner(now_ms, transfer, out, |p, cx| {
+                p.on_bulk_finished(cx, transfer, false, "the sender never connected");
+            });
+            self.bulk_owner.remove(&transfer);
         }
 
         let stale: Vec<LinkId> = self
@@ -1973,6 +2040,7 @@ impl CoreBuilder {
             plugins,
             effect_owner: BTreeMap::new(),
             bulk_owner: BTreeMap::new(),
+            bulk_wait: BTreeMap::new(),
             caps_out,
             caps_in,
             caps_served,
