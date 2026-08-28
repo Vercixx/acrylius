@@ -37,6 +37,15 @@ skip() { echo "  skip $1"; }
 
 prop() { busctl --system get-property org.bluez "$ADAPTER" "$1" "$2" 2>/dev/null; }
 
+# Built here rather than assumed, because nothing else in this script would
+# notice it was stale. A run against a binary from an earlier day reported a
+# failure that had been fixed hours before, and would just as happily report a
+# pass for a fix that is not in it.
+if ! cargo build --quiet; then
+  echo "  FAIL the workspace does not build; nothing to accept"
+  exit 1
+fi
+
 echo "### the adapter"
 if ! busctl --system status org.bluez >/dev/null 2>&1; then
   echo "  skip no bluetoothd on this machine; nothing to accept"
