@@ -201,6 +201,8 @@ pub struct Core {
     effect_owner: BTreeMap<EffectToken, usize>,
     /// Which plugin owns a bulk transfer, so its answer reaches the right one.
     bulk_owner: BTreeMap<TransferId, usize>,
+    /// This device's transfer numbering. See [`Cx::new_transfer`].
+    next_transfer: u64,
     /// Transfers a host is listening for, and when to stop waiting.
     ///
     /// An entry lives from [`Action::BulkListen`] until the far end connects,
@@ -855,11 +857,12 @@ impl Core {
             name,
         });
 
-        let mut cx = Cx::new(now_ms, self.next_token, self.serves);
+        let mut cx = Cx::new(now_ms, self.next_token, self.next_transfer, self.serves);
         for p in &mut self.plugins {
             p.on_peer_connected(&mut cx, &peer);
         }
         self.next_token = cx.next_token;
+        self.next_transfer = cx.next_transfer;
         self.drain_cx(cx, out);
     }
 }
@@ -1103,10 +1106,11 @@ impl Core {
             return;
         };
 
-        let mut cx = Cx::new(now_ms, self.next_token, self.serves)
+        let mut cx = Cx::new(now_ms, self.next_token, self.next_transfer, self.serves)
             .for_peer_link(self.bulk_support_for(&peer));
         let result = self.plugins[idx].on_message(&mut cx, &peer, &env);
         self.next_token = cx.next_token;
+        self.next_transfer = cx.next_transfer;
         self.remember_owner(&cx, idx);
         self.drain_cx(cx, out);
 
@@ -1506,12 +1510,18 @@ impl Core {
         // that dials is the side that offered, and the side that listens was
         // offered to. Without this the first transfer each way shares a key and
         // a nonce sequence — see `proto::bulk::key`.
-        let offerer = match &request {
-            BulkRequest::Send { .. } => self.device_id(),
-            BulkRequest::Listen { .. } => peer.clone(),
+        //
+        // The *number* has to be the offerer's too, and it is no longer ours to
+        // assume: a device that receives an offer now keys everything by an id
+        // of its own, because the one in the offer was minted from the sender's
+        // counter and means something else here. The sender has never heard of
+        // ours, so `offered_as` is what goes into the key.
+        let (offerer, numbered) = match &request {
+            BulkRequest::Send { .. } => (self.device_id(), transfer.0),
+            BulkRequest::Listen { offered_as, .. } => (peer.clone(), *offered_as),
             BulkRequest::Cancel { .. } => unreachable!("handled above"),
         };
-        let key = crate::proto::bulk::key(&hash, offerer.as_str(), transfer.0).to_vec();
+        let key = crate::proto::bulk::key(&hash, offerer.as_str(), numbered).to_vec();
 
         match request {
             BulkRequest::Listen { expect_bytes, .. } => {
@@ -1655,10 +1665,11 @@ impl Core {
                     return;
                 };
                 tracing::debug!(%peer, %cap, %ty, "local plugin command");
-                let mut cx = Cx::new(now_ms, self.next_token, self.serves)
+                let mut cx = Cx::new(now_ms, self.next_token, self.next_transfer, self.serves)
                     .for_peer_link(self.bulk_support_for(&peer));
                 let r = self.plugins[idx].on_local(&mut cx, &peer, &ty, &body);
                 self.next_token = cx.next_token;
+                self.next_transfer = cx.next_transfer;
                 self.remember_owner(&cx, idx);
                 self.drain_cx(cx, out);
                 if let Err(e) = r {
@@ -1710,9 +1721,10 @@ impl Core {
         let Some(&idx) = self.bulk_owner.get(&transfer) else {
             return;
         };
-        let mut cx = Cx::new(now_ms, self.next_token, self.serves);
+        let mut cx = Cx::new(now_ms, self.next_token, self.next_transfer, self.serves);
         f(&mut self.plugins[idx], &mut cx);
         self.next_token = cx.next_token;
+        self.next_transfer = cx.next_transfer;
         self.remember_owner(&cx, idx);
         self.drain_cx(cx, out);
     }
@@ -1727,9 +1739,10 @@ impl Core {
         let Some(idx) = self.effect_owner.remove(&token) else {
             return;
         };
-        let mut cx = Cx::new(now_ms, self.next_token, self.serves);
+        let mut cx = Cx::new(now_ms, self.next_token, self.next_transfer, self.serves);
         self.plugins[idx].on_effect_result(&mut cx, token, result);
         self.next_token = cx.next_token;
+        self.next_transfer = cx.next_transfer;
         self.remember_owner(&cx, idx);
         self.drain_cx(cx, out);
     }
@@ -1806,11 +1819,12 @@ impl Core {
             && now_ms >= w
         {
             self.plugin_wake = None;
-            let mut cx = Cx::new(now_ms, self.next_token, self.serves);
+            let mut cx = Cx::new(now_ms, self.next_token, self.next_transfer, self.serves);
             for p in &mut self.plugins {
                 p.on_tick(&mut cx);
             }
             self.next_token = cx.next_token;
+            self.next_transfer = cx.next_transfer;
             self.drain_cx(cx, out);
         }
     }
@@ -1877,11 +1891,12 @@ impl Core {
         out.ui(UiEvent::PeerUnreachable {
             peer: u.peer.clone(),
         });
-        let mut cx = Cx::new(now_ms, self.next_token, self.serves);
+        let mut cx = Cx::new(now_ms, self.next_token, self.next_transfer, self.serves);
         for p in &mut self.plugins {
             p.on_peer_disconnected(&mut cx, &u.peer);
         }
         self.next_token = cx.next_token;
+        self.next_transfer = cx.next_transfer;
         self.drain_cx(cx, out);
     }
 
@@ -2040,6 +2055,7 @@ impl CoreBuilder {
             plugins,
             effect_owner: BTreeMap::new(),
             bulk_owner: BTreeMap::new(),
+            next_transfer: 0,
             bulk_wait: BTreeMap::new(),
             caps_out,
             caps_in,

@@ -38,18 +38,11 @@ enum Side {
 }
 
 impl Side {
-    /// The other end of an A–B pair.
-    ///
-    /// Deliberately not defined for C: "the other side" is only meaningful
-    /// where there are two, and a third device makes the question ambiguous
-    /// rather than harder. Wiring works from the dialled address instead.
-    fn other(self) -> Self {
-        match self {
-            Self::A => Self::B,
-            Self::B => Self::A,
-            Self::C => panic!("C is a third device; ask which side was dialled"),
-        }
-    }
+    // `other()` used to live here, for the one place that assumed a transfer
+    // had the same name at both ends and could therefore be answered by
+    // flipping sides. It cannot: a receiver numbers a transfer itself, so the
+    // harness matches a dial to its listener by the endpoint instead, and there
+    // was nothing left that needed to name "the other one".
     fn addr(self) -> &'static str {
         match self {
             Self::A => "A",
@@ -99,6 +92,10 @@ struct Net {
     pub ble_transport: Option<TransportId>,
     /// How far a transfer gets once the sender has been told where to dial.
     pub dials: Dials,
+    /// Which side is listening on which endpoint, and what it calls the
+    /// transfer. The two ends number a transfer separately, so a dial can only
+    /// be matched to its listener by where it was told to go.
+    listening: BTreeMap<String, (Side, TransferId)>,
     /// Every link the harness has brought up, and which transport carried it,
     /// so a test can take one away by name. Losing the better transport while
     /// the worse one is still connected is the case a real phone meets every
@@ -126,6 +123,7 @@ impl Net {
             links_are_ble: false,
             ble_transport: None,
             dials: Dials::AndFinishes,
+            listening: BTreeMap::new(),
             links: Vec::new(),
         }
     }
@@ -184,38 +182,52 @@ impl Net {
             Action::BulkListen { transfer, key, .. } => {
                 assert_eq!(key.len(), 32, "a host is handed a real key");
                 self.bulk_keys.insert((side, transfer), key);
-                self.queue.push_back((
-                    side,
-                    Event::BulkListening {
-                        transfer,
-                        endpoint: format!("{}:9000", side.addr()),
-                    },
-                ));
+                // One endpoint per transfer, so that a dial can be matched back
+                // to the listener that put it there. The two ends no longer
+                // agree on what a transfer is called — the receiver numbers it
+                // itself — so a harness that told both sides the sender's
+                // number would be modelling something no host does.
+                let endpoint = format!("{}:{}", side.addr(), 9000 + (transfer.0 & 0xffff));
+                self.listening.insert(endpoint.clone(), (side, transfer));
+                self.queue
+                    .push_back((side, Event::BulkListening { transfer, endpoint }));
             }
-            Action::BulkSend { transfer, key, .. } => {
+            Action::BulkSend {
+                transfer,
+                key,
+                endpoint,
+            } => {
                 // Both ends must have derived the same key from the session
                 // without either transmitting it. If this ever fails, nothing
-                // would decrypt on a real socket.
-                if let Some(theirs) = self.bulk_keys.get(&(side.other(), transfer)) {
-                    assert_eq!(&key, theirs, "both ends must derive the same bulk key");
+                // would decrypt on a real socket. Looked up by endpoint, since
+                // the listener files it under its own number.
+                if let Some(&(listener, theirs)) = self.listening.get(&endpoint)
+                    && let Some(k) = self.bulk_keys.get(&(listener, theirs))
+                {
+                    assert_eq!(&key, k, "both ends must derive the same bulk key");
                 }
                 self.bulk_keys.insert((side, transfer), key);
                 if self.dials == Dials::Never {
                     return;
                 }
+                // Whoever is listening on that endpoint, under whatever it
+                // calls the transfer.
+                let Some(&(listener, theirs)) = self.listening.get(&endpoint) else {
+                    return;
+                };
                 // Only the listening side learns that anything connected, and
                 // only its host could have known. That is the whole reason
                 // `BulkStarted` exists.
                 self.queue
-                    .push_back((side.other(), Event::BulkStarted { transfer }));
+                    .push_back((listener, Event::BulkStarted { transfer: theirs }));
                 if self.dials == Dials::AndKeepsGoing {
                     return;
                 }
-                for who in [side, side.other()] {
+                for (who, id) in [(side, transfer), (listener, theirs)] {
                     self.queue.push_back((
                         who,
                         Event::BulkFinished {
-                            transfer,
+                            transfer: id,
                             ok: true,
                             detail: String::new(),
                         },
@@ -1760,6 +1772,179 @@ fn offer_body(transfer: u64, size: u64) -> Vec<u8> {
     .unwrap()
 }
 
+/// The transfer id a side most recently announced to its own host.
+///
+/// A receiver renumbers an offer on arrival, so this is the only way a test can
+/// learn what it is going to call the thing — which is exactly the position a
+/// host is in.
+fn announced_transfer(net: &Net, side: Side, ty: &str) -> u64 {
+    net.ui
+        .iter()
+        .rev()
+        .find_map(|(s, e)| match e {
+            UiEvent::Plugin {
+                cap,
+                ty: kind,
+                body,
+                ..
+            } if *s == side && cap == share::CAP && kind == ty => {
+                minicbor::decode::<Offer>(body).ok().map(|o| o.transfer)
+            }
+            _ => None,
+        })
+        .expect("nothing of that kind was announced")
+}
+
+#[test]
+fn a_transfer_works_when_the_two_ends_number_it_differently() {
+    // The receiver keys everything by a number of its own now, so the two ends
+    // disagree about what the transfer is called as a matter of course. Every
+    // message between them has to be translated, and the bulk key — which
+    // neither end sends and both must derive — has to come from the *sender's*
+    // number or nothing will decrypt.
+    //
+    // Contrived only in how the numbers are made to diverge. Two people sending
+    // you a photo at the same time does it by itself, which is the case this
+    // exists to allow.
+    let (mut net, b_id) = sharing_pair();
+    let a_id = net.a.device_id();
+
+    // One offer, refused, purely to move the receiver's numbering on.
+    plugin(&mut net, Side::A, &b_id, "offer", offer_body(1, 16));
+    let first = announced_transfer(&net, Side::B, "offer");
+    plugin(&mut net, Side::B, &a_id, "reject", answer_body(first));
+
+    // Now the real one, under a number the receiver will not reach for a while.
+    net.ui.clear();
+    plugin(&mut net, Side::A, &b_id, "offer", offer_body(7, 4096));
+    let ours = announced_transfer(&net, Side::B, "offer");
+    assert_ne!(
+        ours, 7,
+        "the receiver is meant to have a number of its own, and this test \
+         proves nothing if it happens to match"
+    );
+
+    plugin(&mut net, Side::B, &a_id, "accept", answer_body(ours));
+
+    // The key each end derived, under the name each end knows it by.
+    let sender = net
+        .bulk_keys
+        .get(&(Side::A, TransferId(7)))
+        .expect("the sender has a key");
+    let receiver = net
+        .bulk_keys
+        .get(&(Side::B, TransferId(ours)))
+        .expect("the receiver has a key");
+    assert_eq!(
+        sender, receiver,
+        "the two ends derived different keys, so nothing would decrypt"
+    );
+
+    // And both were told it finished, each in its own numbering.
+    assert!(
+        net.saw(Side::A, |e| matches!(e, UiEvent::Plugin { ty, body, .. }
+            if ty == "finished"
+            && minicbor::decode::<Finished>(body).is_ok_and(|f| f.transfer == 7))),
+        "the sender was told about a transfer it does not have"
+    );
+    assert!(
+        net.saw(Side::B, |e| matches!(e, UiEvent::Plugin { ty, body, .. }
+            if ty == "finished"
+            && minicbor::decode::<Finished>(body).is_ok_and(|f| f.transfer == ours))),
+        "the receiver was told about a transfer it does not have"
+    );
+}
+
+#[test]
+fn a_refusal_reaches_the_sender_under_the_number_the_sender_used() {
+    // Everything the receiver sends back has to be translated, not just the
+    // accept. A reject carrying the receiver's own number names a transfer the
+    // sender has never had, and is refused as somebody else's business — so the
+    // file sits listed as offered until the session ends.
+    let (mut net, b_id) = sharing_pair();
+    let a_id = net.a.device_id();
+
+    plugin(&mut net, Side::A, &b_id, "offer", offer_body(1, 16));
+    let first = announced_transfer(&net, Side::B, "offer");
+    plugin(&mut net, Side::B, &a_id, "reject", answer_body(first));
+
+    net.ui.clear();
+    plugin(&mut net, Side::A, &b_id, "offer", offer_body(7, 4096));
+    let ours = announced_transfer(&net, Side::B, "offer");
+    assert_ne!(
+        ours, 7,
+        "the two ends must disagree for this to test anything"
+    );
+
+    plugin(&mut net, Side::B, &a_id, "reject", answer_body(ours));
+    assert!(
+        net.saw(Side::A, |e| matches!(e, UiEvent::Plugin { ty, body, .. }
+            if ty == "reject"
+            && minicbor::decode::<Finished>(body).is_ok_and(|f| f.transfer == 7))),
+        "the refusal named a transfer the sender has never heard of"
+    );
+}
+
+#[test]
+fn a_receiver_cancelling_names_the_transfer_the_sender_knows() {
+    // The same again for a transfer given up on rather than refused, which is
+    // the other way a receiver ends one and the other place the number has to
+    // be put back.
+    let (mut net, b_id) = sharing_pair();
+    let a_id = net.a.device_id();
+
+    plugin(&mut net, Side::A, &b_id, "offer", offer_body(1, 16));
+    let first = announced_transfer(&net, Side::B, "offer");
+    plugin(&mut net, Side::B, &a_id, "reject", answer_body(first));
+
+    net.ui.clear();
+    plugin(&mut net, Side::A, &b_id, "offer", offer_body(7, 4096));
+    let ours = announced_transfer(&net, Side::B, "offer");
+    assert_ne!(
+        ours, 7,
+        "the two ends must disagree for this to test anything"
+    );
+
+    plugin(&mut net, Side::B, &a_id, "cancel", answer_body(ours));
+    assert!(
+        net.saw(Side::A, |e| matches!(e, UiEvent::Plugin { ty, body, .. }
+            if ty == "finished"
+            && minicbor::decode::<Finished>(body).is_ok_and(|f| f.transfer == 7))),
+        "the sender was never told, and would hold the file open"
+    );
+}
+
+#[test]
+fn a_sender_cancelling_is_reported_under_the_number_the_receiver_uses() {
+    // The mirror, and the direction where the translation runs on the way *in*
+    // rather than out. A host is told about its own transfers and knows nothing
+    // of the sender's numbering, so an ending announced under the sender's
+    // number names something the host has never had — and the file it is
+    // holding a port and a name open for is never cleared.
+    let (mut net, b_id) = sharing_pair();
+    let a_id = net.a.device_id();
+
+    plugin(&mut net, Side::A, &b_id, "offer", offer_body(1, 16));
+    let first = announced_transfer(&net, Side::B, "offer");
+    plugin(&mut net, Side::B, &a_id, "reject", answer_body(first));
+
+    net.ui.clear();
+    plugin(&mut net, Side::A, &b_id, "offer", offer_body(7, 4096));
+    let ours = announced_transfer(&net, Side::B, "offer");
+    assert_ne!(
+        ours, 7,
+        "the two ends must disagree for this to test anything"
+    );
+
+    plugin(&mut net, Side::A, &b_id, "cancel", answer_body(7));
+    assert!(
+        net.saw(Side::B, |e| matches!(e, UiEvent::Plugin { ty, body, .. }
+            if ty == "finished"
+            && minicbor::decode::<Finished>(body).is_ok_and(|f| f.transfer == ours))),
+        "the receiver was told about a transfer it has never heard of"
+    );
+}
+
 /// Fire the host's single timer, which is how every deadline in the core is
 /// reached.
 fn tick(net: &mut Net, side: Side) {
@@ -1786,10 +1971,22 @@ fn a_sender_that_never_dials_is_given_up_on() {
     // never failed.
     let (mut net, b_id) = sharing_pair();
     let a_id = net.a.device_id();
-    net.dials = Dials::Never;
 
-    plugin(&mut net, Side::A, &b_id, "offer", offer_body(1, 4096));
-    plugin(&mut net, Side::B, &a_id, "accept", answer_body(1));
+    // Numbered differently at the two ends, which is the ordinary case now and
+    // the one where telling the sender means translating. Under matching
+    // numbers this passes whether or not anything is translated at all.
+    plugin(&mut net, Side::A, &b_id, "offer", offer_body(1, 16));
+    let first = announced_transfer(&net, Side::B, "offer");
+    plugin(&mut net, Side::B, &a_id, "reject", answer_body(first));
+
+    net.dials = Dials::Never;
+    plugin(&mut net, Side::A, &b_id, "offer", offer_body(7, 4096));
+    let ours = announced_transfer(&net, Side::B, "offer");
+    assert_ne!(
+        ours, 7,
+        "the two ends must disagree for this to test anything"
+    );
+    plugin(&mut net, Side::B, &a_id, "accept", answer_body(ours));
     net.ui.clear();
 
     // Not early. A transfer that is merely slow to start is not a failed one,
@@ -1826,7 +2023,8 @@ fn a_file_still_arriving_is_not_given_up_on() {
     net.dials = Dials::AndKeepsGoing;
 
     plugin(&mut net, Side::A, &b_id, "offer", offer_body(1, 4096));
-    plugin(&mut net, Side::B, &a_id, "accept", answer_body(1));
+    let ours = announced_transfer(&net, Side::B, "offer");
+    plugin(&mut net, Side::B, &a_id, "accept", answer_body(ours));
     net.ui.clear();
 
     // Long past any deadline, and still going.
@@ -1863,17 +2061,18 @@ fn a_file_is_offered_accepted_and_finished() {
     );
     assert!(net.bulk_keys.is_empty(), "and nothing has a key yet");
 
-    plugin(&mut net, Side::B, &a_id, "accept", answer_body(1));
+    let local = announced_transfer(&net, Side::B, "offer");
+    plugin(&mut net, Side::B, &a_id, "accept", answer_body(local));
 
-    // Both ends were handed a key, and they match. Neither sent it.
-    let transfer = TransferId(1);
+    // Both ends were handed a key, and they match. Neither sent it, and each
+    // filed it under its own number for the transfer.
     let ours = net
         .bulk_keys
-        .get(&(Side::A, transfer))
+        .get(&(Side::A, TransferId(1)))
         .expect("sender has a key");
     let theirs = net
         .bulk_keys
-        .get(&(Side::B, transfer))
+        .get(&(Side::B, TransferId(local)))
         .expect("receiver has a key");
     assert_eq!(ours, theirs, "derived independently from the session");
     assert_eq!(ours.len(), 32);
@@ -1908,7 +2107,8 @@ fn rejecting_an_offer_tells_the_sender_and_opens_nothing() {
     let (mut net, b_id) = sharing_pair();
     let a_id = net.a.device_id();
     plugin(&mut net, Side::A, &b_id, "offer", offer_body(1, 4096));
-    plugin(&mut net, Side::B, &a_id, "reject", answer_body(1));
+    let ours = announced_transfer(&net, Side::B, "offer");
+    plugin(&mut net, Side::B, &a_id, "reject", answer_body(ours));
 
     assert!(net.bulk_keys.is_empty(), "nothing was ever listened for");
     assert!(
@@ -2053,7 +2253,8 @@ fn a_link_that_can_carry_files_is_left_alone() {
         "an ordinary link still carries an offer"
     );
 
-    plugin(&mut net, Side::B, &a_id, "accept", answer_body(1));
+    let ours = announced_transfer(&net, Side::B, "offer");
+    plugin(&mut net, Side::B, &a_id, "accept", answer_body(ours));
     assert!(
         !net.bulk_keys.is_empty(),
         "and still opens a side channel for it"

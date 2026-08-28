@@ -94,6 +94,14 @@ struct Incoming {
     offer: Offer,
     /// The envelope id of the offer, so a result can answer it.
     request: u32,
+    /// What the sender calls this transfer.
+    ///
+    /// Kept because everything that goes back over the wire has to use it: the
+    /// accept, the reject, the finished, and the greeting on the bulk socket.
+    /// The sender numbers its transfers from one and so do we, so this is
+    /// almost never the id we know it by, and using ours would name one of the
+    /// sender's other transfers — or nothing at all.
+    offered_as: u64,
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -127,6 +135,29 @@ impl SharePlugin {
     /// simply cancel a transfer it had nothing to do with.
     fn is_sending_to(&self, peer: &DeviceId, transfer: TransferId) -> bool {
         self.sending.get(&transfer).is_some_and(|o| &o.peer == peer)
+    }
+
+    /// Our number for a transfer a peer is naming by its own.
+    ///
+    /// Answered against the peer as well as the number, for the reason
+    /// [`Self::is_sending_to`] exists: a bare id names nothing, and every device
+    /// hands out the same small ones.
+    fn incoming_from(&self, peer: &DeviceId, offered_as: u64) -> Option<TransferId> {
+        self.offered
+            .iter()
+            .find(|(_, i)| &i.peer == peer && i.offered_as == offered_as)
+            .map(|(t, _)| *t)
+    }
+
+    /// What to call a transfer when speaking to the peer it is with.
+    ///
+    /// Ours for something we offered, and theirs for something they did. Every
+    /// message that leaves this plugin goes through here, because a number that
+    /// is right locally is wrong on the wire exactly half the time.
+    fn as_the_peer_numbers_it(&self, transfer: TransferId) -> u64 {
+        self.offered
+            .get(&transfer)
+            .map_or(transfer.0, |i| i.offered_as)
     }
 
     fn announce(cx: &mut Cx, peer: &DeviceId, ty: &str, body: &impl minicbor::Encode<()>) {
@@ -176,35 +207,45 @@ impl Plugin for SharePlugin {
                 if offer.name.is_empty() {
                     return Err(PluginError::BadBody);
                 }
-                let transfer = TransferId(offer.transfer);
-                // A transfer id is chosen by whoever offered it, and every
-                // device numbers its own from one — so two peers offering at the
-                // same time collide, and this map, the daemon's and the phone's
-                // are all keyed by it. Letting the second overwrite the first
-                // meant the wrong offer was answered, and one device's bytes
-                // could be written into another device's file.
+                // Renumbered on arrival, and this is the only place it happens.
                 //
-                // Refused rather than renumbered. Making the id local is the
-                // proper fix, but it would have to travel through the accept,
-                // the listener's opening hello and both hosts' tables; until it
-                // does, a refusal the sender can retry is the honest answer. Its
-                // own counter has already moved on, so a retry does not collide.
-                if let Some(existing) = self.offered.get(&transfer)
-                    && existing.peer != *peer
-                {
-                    return Err(PluginError::NotAllowed);
-                }
+                // The id in an offer was minted from the sender's counter,
+                // which starts at one exactly like ours and like every other
+                // device's. Keying anything by it meant two peers offering at
+                // the same moment both called it transfer 1: this map, the
+                // daemon's and the phone's all had one entry where they needed
+                // two, the second offer replaced the first, and one device's
+                // bytes could be written into the file another device had been
+                // promised. Refusing the second was the stopgap; a number that
+                // means something here is the fix.
+                //
+                // The sender's number is kept rather than discarded, because
+                // every reply has to use it — see `Incoming::offered_as`.
+                let transfer = cx.new_transfer();
+                let offered_as = offer.transfer;
                 self.offered.insert(
                     transfer,
                     Incoming {
                         peer: peer.clone(),
                         offer: offer.clone(),
                         request: env.id,
+                        offered_as,
+                    },
+                );
+                // Announced under our number, so that a host — and the person
+                // answering — only ever handles ids that mean something on this
+                // device. Nothing above this layer sees the sender's.
+                Self::announce(
+                    cx,
+                    peer,
+                    "offer",
+                    &Offer {
+                        transfer: transfer.0,
+                        ..offer
                     },
                 );
                 // Nothing is accepted here. The host asks a person, and until
                 // it answers the sender waits.
-                Self::announce(cx, peer, "offer", &offer);
                 Ok(())
             }
 
@@ -235,17 +276,27 @@ impl Plugin for SharePlugin {
 
             "finished" => {
                 let f: Finished = minicbor::decode(env.body).map_err(|_| PluginError::BadBody)?;
-                let transfer = TransferId(f.transfer);
-                // Either direction may be finishing, but only the device the
-                // transfer is actually with may say so.
-                let mine = self.is_sending_to(peer, transfer)
-                    || self.offered.get(&transfer).is_some_and(|i| &i.peer == peer);
-                if !mine {
-                    return Err(PluginError::NotAllowed);
-                }
+                // Either direction may be finishing, and the number means
+                // different things in the two: a transfer we offered comes back
+                // under our id, and one offered to us under the sender's.
+                let transfer = if self.is_sending_to(peer, TransferId(f.transfer)) {
+                    TransferId(f.transfer)
+                } else {
+                    // Only the device the transfer is actually with may end it.
+                    self.incoming_from(peer, f.transfer)
+                        .ok_or(PluginError::NotAllowed)?
+                };
                 self.sending.remove(&transfer);
                 self.offered.remove(&transfer);
-                Self::announce(cx, peer, "finished", &f);
+                Self::announce(
+                    cx,
+                    peer,
+                    "finished",
+                    &Finished {
+                        transfer: transfer.0,
+                        ..f
+                    },
+                );
                 Ok(())
             }
 
@@ -322,7 +373,16 @@ impl Plugin for SharePlugin {
                 // Ask the host for somewhere to listen. The endpoint goes to
                 // the peer only once the host has one, because a peer told to
                 // connect to nothing has no way to tell that from a refusal.
-                cx.bulk_listen(&incoming.peer.clone(), transfer, incoming.offer.size);
+                //
+                // Both numbers: ours is what the host and everything above it
+                // works in, and the sender's is what the bulk key is derived
+                // from, which neither end may get wrong and neither end sends.
+                cx.bulk_listen(
+                    &incoming.peer.clone(),
+                    transfer,
+                    incoming.offered_as,
+                    incoming.offer.size,
+                );
                 Ok(())
             }
 
@@ -332,23 +392,31 @@ impl Plugin for SharePlugin {
                 let Some(incoming) = self.offered.remove(&transfer) else {
                     return Err(PluginError::NotAllowed);
                 };
-                cx.send_reply(
-                    &incoming.peer,
-                    CAP,
-                    "reject",
-                    body.to_vec(),
-                    incoming.request,
-                );
+                // Re-encoded rather than forwarded: the body a host hands down
+                // names the transfer the way this device does, and the sender
+                // would not recognise it.
+                let body = minicbor::to_vec(Finished {
+                    transfer: incoming.offered_as,
+                    ..f
+                })
+                .map_err(|_| PluginError::BadBody)?;
+                cx.send_reply(&incoming.peer, CAP, "reject", body, incoming.request);
                 Ok(())
             }
 
             "cancel" => {
                 let f: Finished = minicbor::decode(body).map_err(|_| PluginError::BadBody)?;
                 let transfer = TransferId(f.transfer);
+                let theirs = self.as_the_peer_numbers_it(transfer);
                 self.offered.remove(&transfer);
                 self.sending.remove(&transfer);
                 cx.bulk_cancel(transfer);
-                cx.send(peer, CAP, "finished", body.to_vec());
+                let body = minicbor::to_vec(Finished {
+                    transfer: theirs,
+                    ..f
+                })
+                .map_err(|_| PluginError::BadBody)?;
+                cx.send(peer, CAP, "finished", body);
                 Ok(())
             }
 
@@ -360,8 +428,10 @@ impl Plugin for SharePlugin {
         let Some(incoming) = self.offered.get(&transfer) else {
             return;
         };
+        // Under the sender's number. It is the sender that has to match this
+        // against something, and it has never heard of ours.
         let body = minicbor::to_vec(Accept {
-            transfer: transfer.0,
+            transfer: incoming.offered_as,
             endpoint: endpoint.to_string(),
         })
         .unwrap_or_default();
@@ -380,9 +450,12 @@ impl Plugin for SharePlugin {
             .get(&transfer)
             .map(|i| i.peer.clone())
             .or_else(|| self.sending.get(&transfer).map(|o| o.peer.clone()));
+        let theirs = self.as_the_peer_numbers_it(transfer);
         self.offered.remove(&transfer);
         self.sending.remove(&transfer);
 
+        // The same ending, said twice in two numbering schemes: this device's
+        // upwards, and the peer's outwards.
         let f = Finished {
             transfer: transfer.0,
             ok,
@@ -393,7 +466,10 @@ impl Plugin for SharePlugin {
             // that finished writing does not know whether the receiver kept the
             // file, and a receiver cannot tell a cancelled send from a dropped
             // connection.
-            if let Ok(body) = minicbor::to_vec(&f) {
+            if let Ok(body) = minicbor::to_vec(Finished {
+                transfer: theirs,
+                ..f.clone()
+            }) {
                 cx.send(&peer, CAP, "finished", body);
             }
             Self::announce(cx, &peer, "finished", &f);
@@ -421,6 +497,21 @@ mod tests {
             mime: "text/plain".to_string(),
         })
         .unwrap()
+    }
+
+    /// The number this device gave an offer that arrived.
+    ///
+    /// Never the number in the offer: that one was the sender's. A host learns
+    /// ours from the announcement and answers with it, and so does a test.
+    fn ours(r: &crate::plugin::harness::Ran) -> u64 {
+        r.ui.iter()
+            .find_map(|e| match e {
+                UiEvent::Plugin { ty, body, .. } if ty == "offer" => {
+                    minicbor::decode::<Offer>(body).ok().map(|o| o.transfer)
+                }
+                _ => None,
+            })
+            .expect("an arriving offer is announced")
     }
 
     fn finished(transfer: u64) -> Vec<u8> {
@@ -460,11 +551,11 @@ mod tests {
         // to connect to nothing cannot tell that from a refusal.
         let mut p = SharePlugin::default();
         let body = offer(1024);
-        run(0, |cx| {
+        let arrived = run(0, |cx| {
             p.on_message(cx, &peer(), &envelope(9, CAP, "offer", &body))
                 .unwrap();
         });
-        let yes = finished(1);
+        let yes = finished(ours(&arrived));
         let r = run(0, |cx| p.on_local(cx, &peer(), "accept", &yes).unwrap());
         assert!(r.sent("accept").is_none(), "not yet");
         assert!(matches!(
@@ -476,12 +567,17 @@ mod tests {
         ));
 
         let r = run(0, |cx| {
-            p.on_bulk_listening(cx, TransferId(1), "127.0.0.1:5000")
+            p.on_bulk_listening(cx, TransferId(ours(&arrived)), "127.0.0.1:5000")
         });
         let sent = r.sent("accept").expect("now the peer is told where");
         let a: Accept = minicbor::decode(&sent.body).unwrap();
         assert_eq!(a.endpoint, "127.0.0.1:5000");
         assert_eq!(sent.re, Some(9), "answering the offer");
+        // Under the sender's number, not the one this device answered with.
+        assert_eq!(
+            a.transfer, 1,
+            "the endpoint named a transfer the sender never offered"
+        );
     }
 
     #[test]
@@ -503,37 +599,47 @@ mod tests {
     }
 
     #[test]
-    fn a_second_device_cannot_take_over_an_outstanding_offer_id() {
+    fn two_devices_offering_the_same_id_each_get_one_of_their_own() {
         // Every device numbers its transfers from one, so "transfer 1" exists
-        // for all of them at once. The second offer used to replace the first in
-        // a map keyed by that number alone — so the wrong offer was answered,
-        // and the accept went to the wrong device.
+        // for all of them at once. Keyed by that number alone, the second offer
+        // replaced the first: the wrong offer was answered, and the accept —
+        // which carries somewhere to send the file — went to the wrong device.
+        //
+        // Refusing the second was the stopgap. Numbering them here is the fix,
+        // and it is the difference between two people being able to send you a
+        // photo at the same time and not.
         let mut p = SharePlugin::default();
         let first = peer();
         let second = DeviceId::of(&[6u8; 32]);
 
         let body = offer(10);
-        run(0, |cx| {
+        let r = run(0, |cx| {
             p.on_message(cx, &first, &envelope(1, CAP, "offer", &body))
                 .unwrap();
         });
-        run(0, |cx| {
-            assert_eq!(
-                p.on_message(cx, &second, &envelope(2, CAP, "offer", &body))
-                    .unwrap_err(),
-                PluginError::NotAllowed,
-                "the id is taken, and a silent swap is worse than a refusal"
-            );
-        });
-
-        let (_, who, _) = p.pending().next().expect("the first offer stands");
-        assert_eq!(who, &first, "and it is still the device that made it");
-
-        // The same peer re-offering its own id is not a collision.
-        run(0, |cx| {
-            p.on_message(cx, &first, &envelope(3, CAP, "offer", &body))
+        // Carried on, the way the core carries it between dispatches.
+        run(r.next_transfer, |cx| {
+            p.on_message(cx, &second, &envelope(2, CAP, "offer", &body))
                 .unwrap();
         });
+
+        let pending: Vec<(TransferId, DeviceId)> =
+            p.pending().map(|(t, who, _)| (t, who.clone())).collect();
+        assert_eq!(pending.len(), 2, "both offers stand");
+        assert_ne!(
+            pending[0].0, pending[1].0,
+            "under numbers that are not each other's"
+        );
+        assert!(
+            pending.iter().any(|(_, who)| who == &first)
+                && pending.iter().any(|(_, who)| who == &second),
+            "and each is still attributed to the device that made it"
+        );
+        assert!(
+            pending.iter().all(|(t, _)| t.0 != 10),
+            "and neither is filed under the number the senders chose, \
+             which is the number they collided on"
+        );
     }
 
     #[test]
@@ -791,11 +897,11 @@ mod tests {
     fn rejecting_answers_the_offer_and_forgets_it() {
         let mut p = SharePlugin::default();
         let body = offer(10);
-        run(0, |cx| {
+        let arrived = run(0, |cx| {
             p.on_message(cx, &peer(), &envelope(9, CAP, "offer", &body))
                 .unwrap();
         });
-        let no = finished(1);
+        let no = finished(ours(&arrived));
         let r = run(0, |cx| p.on_local(cx, &peer(), "reject", &no).unwrap());
         assert_eq!(r.sent("reject").and_then(|s| s.re), Some(9));
         assert!(p.offered.is_empty());

@@ -97,6 +97,14 @@ pub struct Cx {
     /// Owned rather than borrowed from the core: a `&mut` here would conflict
     /// with the core's own borrow of the plugin it is calling.
     pub(crate) next_token: u64,
+    /// The device's own transfer numbering, handed out by [`Cx::new_transfer`].
+    ///
+    /// One counter for the whole device, for the reason `LinkId` namespaces its
+    /// ids by transport: two numbering schemes sharing one table is not a
+    /// collision that might happen, it is one that will. Every device numbered
+    /// its transfers from one, so the id in an offer named something different
+    /// on each side of it.
+    pub(crate) next_transfer: u64,
     pub(crate) sends: Vec<PendingSend>,
     pub(crate) effects: Vec<(EffectToken, Effect)>,
     pub(crate) ui: Vec<UiEvent>,
@@ -111,6 +119,10 @@ pub struct Cx {
     peer_bulk: Option<crate::link::BulkSupport>,
 }
 
+/// The half of the transfer-id range the core mints from, leaving the rest to
+/// hosts that number their own. See [`Cx::new_transfer`].
+const MINTED_HERE: u64 = 1 << 63;
+
 /// A plugin asking for a side channel.
 ///
 /// It names a peer and a transfer and nothing else. The key is the core's to
@@ -121,7 +133,15 @@ pub enum BulkRequest {
     /// Accept a connection for this transfer, and say where.
     Listen {
         peer: DeviceId,
+        /// Ours, and what the host is told to listen for.
         transfer: crate::vocab::TransferId,
+        /// The number the offerer gave it, which is a different number.
+        ///
+        /// Carried because the bulk key is derived from the offerer's device id
+        /// and the offerer's transfer number, and both ends have to arrive at
+        /// the same key without sending it. Ours would not do: the sender has
+        /// never heard of it.
+        offered_as: u64,
         expect_bytes: u64,
     },
     /// Connect to somewhere the far end named, and send.
@@ -136,10 +156,16 @@ pub enum BulkRequest {
 }
 
 impl Cx {
-    pub(crate) fn new(now_ms: u64, next_token: u64, serves: crate::vocab::EffectSet) -> Self {
+    pub(crate) fn new(
+        now_ms: u64,
+        next_token: u64,
+        next_transfer: u64,
+        serves: crate::vocab::EffectSet,
+    ) -> Self {
         Self {
             now_ms,
             next_token,
+            next_transfer,
             sends: Vec::new(),
             effects: Vec::new(),
             ui: Vec::new(),
@@ -245,6 +271,35 @@ impl Cx {
         t
     }
 
+    /// A transfer id that means something on this device.
+    ///
+    /// The one every table here is keyed by, and never the one in an offer that
+    /// arrived: that was chosen by the device that sent it, out of a counter
+    /// starting at one, exactly like ours. Two peers offering a file at the same
+    /// time therefore both call it transfer 1, and a table keyed by that has one
+    /// entry where it needs two — the second offer replacing the first, and one
+    /// device's bytes going into the file another device was promised.
+    ///
+    /// A plugin that mints one of these is responsible for remembering which
+    /// remote id it stands for, because the wire keeps using the sender's.
+    ///
+    /// Minted with the top bit set, which is not decoration. A host numbers the
+    /// transfers *it* offers, from one, and hands the id down in the offer —
+    /// `FileBulk` on the desktop does exactly that. So an id minted here from a
+    /// counter starting at one would meet the host's first send head-on, in
+    /// tables the host keys by transfer alone: `forget` clears three maps by id,
+    /// and would take an arriving file out with a finished one. Naming the
+    /// minter in the high bit makes that impossible rather than unlikely, which
+    /// is the same move `LinkId` makes for transports.
+    ///
+    /// The tidier answer is for a host to ask for its ids here too, rather than
+    /// counting its own; that is a bigger change to the host seam than this is
+    /// worth on its own.
+    pub fn new_transfer(&mut self) -> crate::vocab::TransferId {
+        self.next_transfer += 1;
+        crate::vocab::TransferId(MINTED_HERE | self.next_transfer)
+    }
+
     pub fn ui(&mut self, e: UiEvent) {
         self.ui.push(e);
     }
@@ -258,11 +313,13 @@ impl Cx {
         &mut self,
         peer: &DeviceId,
         transfer: crate::vocab::TransferId,
+        offered_as: u64,
         expect_bytes: u64,
     ) {
         self.bulk.push(BulkRequest::Listen {
             peer: peer.clone(),
             transfer,
+            offered_as,
             expect_bytes,
         });
     }
@@ -390,6 +447,12 @@ pub(crate) mod harness {
             reason = "read by tests that assert a plugin asked for a side channel"
         )]
         pub bulk: Vec<BulkRequest>,
+        /// Where the transfer numbering got to, so a test that needs two
+        /// separate transfers can carry it into the next `run` the way the core
+        /// carries it between dispatches. Without it every call would mint the
+        /// same id and a collision test would be testing nothing.
+        #[allow(dead_code, reason = "read by tests that mint more than one transfer")]
+        pub next_transfer: u64,
         pub next_token: u64,
     }
 
@@ -422,7 +485,9 @@ pub(crate) mod harness {
         serves: crate::vocab::EffectSet,
         f: impl FnOnce(&mut Cx),
     ) -> Ran {
-        let mut cx = Cx::new(1_000, next_token, serves);
+        // Transfers numbered from the same place the tokens are, so a harness
+        // test sees the ids a plugin would really be handed.
+        let mut cx = Cx::new(1_000, next_token, next_token, serves);
         f(&mut cx);
         Ran {
             sends: cx.sends,
@@ -430,6 +495,7 @@ pub(crate) mod harness {
             ui: cx.ui,
             bulk: cx.bulk,
             next_token: cx.next_token,
+            next_transfer: cx.next_transfer,
         }
     }
 
