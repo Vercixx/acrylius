@@ -26,6 +26,20 @@ none of it was caught by any gate.
       answering it actually forgets. *(Present since M1. The dialog was
       attached to the row the swipe was removing, so it went with it.)*
 - [ ] **Errors are a normal iOS alert**, not a floating glass capsule.
+- [ ] **Bluetooth takes over when Wi-Fi goes off**, within about six seconds
+      and with no force-quit. *(A dial with no viable path is not failed by
+      Network.framework, it is waited on — so the Wi-Fi dial hung, and the
+      route walk it was holding never reached Bluetooth. Nothing could rescue
+      it: an automatic retry stands down while a dial is outstanding.)*
+- [ ] **"Connecting…" while it is connecting.** A dial in flight used to read
+      as "Not connected", which beside a state called Connecting says *gave up*.
+      "Not connected" now means every route has been tried.
+- [ ] **A file arriving says it arrived** — "Saved <name>", not "Sent the
+      file". *(Present since M1. The ending was looked up in the table of
+      things this phone had offered, and a file coming the other way is not in
+      it, so every arrival read as a send of an unnamed file.)*
+- [ ] **Seeking to 00:00 works.** Fixed on the desktop, so it needs
+      `./scripts/install.sh` — a phone build alone will not carry it.
 
 Still open, and not fixed in this build — see the end of this file: the widget
 extension, and BLE.
