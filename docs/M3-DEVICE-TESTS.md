@@ -40,6 +40,18 @@ none of it was caught by any gate.
       it, so every arrival read as a send of an unnamed file.)*
 - [ ] **Seeking to 00:00 works.** Fixed on the desktop, so it needs
       `./scripts/install.sh` — a phone build alone will not carry it.
+- [ ] **Wi-Fi coming back moves the session off Bluetooth**, without a
+      force-quit. *(Losing Wi-Fi announces itself; regaining it announces
+      nothing, because the peer never stopped being reachable — it was just on
+      a radio that cannot carry a file. And the Bonjour browse was created once
+      and never replaced, so a browse that failed during the outage reported
+      nothing ever again.)*
+- [ ] **A computer switched off leaves "On this network"** within a few
+      seconds, rather than staying on offer until the app is restarted.
+      *(Sightings were one-way: nothing was ever un-discovered.)*
+- [ ] **Actions can be felt.** A control that lands and one that is refused
+      buzz differently; a seek buzzes when the finger lifts. Nothing buzzes on
+      the press itself.
 
 Still open, and not fixed in this build — see the end of this file: the widget
 extension, and BLE.
