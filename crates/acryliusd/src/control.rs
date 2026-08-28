@@ -56,6 +56,66 @@ pub fn socket_path(state: &Path, explicit_state: bool) -> PathBuf {
         .join("acrylius.sock")
 }
 
+/// What one event means to a request that is waiting.
+#[derive(Debug, PartialEq, Eq)]
+enum Verdict {
+    /// The answer, with the verb it came back under.
+    Reply(String, Vec<u8>),
+    /// It will never be answered, and here is why.
+    Refused(String),
+    /// The device this was aimed at has gone.
+    Gone,
+    /// Somebody else's business.
+    Ignore,
+}
+
+/// Decide what an event means for a request aimed at `id`.
+///
+/// A function rather than match guards inside the wait loop, because the guards
+/// were the fix for the correlation bug and nothing could reach them to test
+/// them — mutation testing flipped every one of `p == id`, `c == cap` and the
+/// `&&` between them with no test objecting. The bug they fix would have come
+/// straight back.
+fn verdict(e: UiEvent, id: &DeviceId, cap: &str, expect: &[&str]) -> Verdict {
+    match e {
+        UiEvent::Plugin {
+            peer,
+            cap: c,
+            ty,
+            body,
+        } => {
+            if &peer == id && c == cap && expect.contains(&ty.as_str()) {
+                Verdict::Reply(ty, body)
+            } else {
+                Verdict::Ignore
+            }
+        }
+        // A request the core refused before it left this machine — a value out
+        // of range, a capability not negotiated. Nothing will ever come back
+        // from the peer, so waiting for one turns an immediate, well-explained
+        // refusal into a fifteen-second timeout reported as if the peer were at
+        // fault.
+        //
+        // An error with no peer is about the machine rather than about a
+        // conversation, and is not this request's answer.
+        UiEvent::Error { peer, code, detail } => {
+            if peer.as_ref() == Some(id) {
+                Verdict::Refused(format!("{detail} ({})", code.as_str()))
+            } else {
+                Verdict::Ignore
+            }
+        }
+        UiEvent::PeerUnreachable { peer } => {
+            if &peer == id {
+                Verdict::Gone
+            } else {
+                Verdict::Ignore
+            }
+        }
+        _ => Verdict::Ignore,
+    }
+}
+
 /// Whether an event is about a particular peer.
 ///
 /// The control socket subscribes to one broadcast carrying every device's
@@ -736,33 +796,12 @@ async fn plugin_request(
     // refusal, for as long as an hour on a `share`.
     let waited = tokio::time::timeout(patience, async {
         loop {
-            match rx.recv().await {
-                Ok(UiEvent::Plugin {
-                    peer: p,
-                    cap: c,
-                    ty: t,
-                    body,
-                }) if p == id && c == cap && expect.contains(&t.as_str()) => {
-                    return Some(Answer::Reply(t, body));
-                }
-                // A request the core refused before it left this machine — a
-                // value out of range, a capability not negotiated. Nothing will
-                // ever come back from the peer, so waiting for one turns an
-                // immediate, well-explained refusal into a fifteen-second
-                // timeout reported as if the peer were at fault.
-                //
-                // An error with no peer is about the machine rather than about
-                // a conversation, and is not this request's answer.
-                Ok(UiEvent::Error {
-                    peer: Some(p),
-                    code,
-                    detail,
-                }) if p == id => {
-                    return Some(Answer::Refused(format!("{detail} ({})", code.as_str())));
-                }
-                Ok(UiEvent::PeerUnreachable { peer: p }) if p == id => return None,
-                Err(_) => return None,
-                Ok(_) => {}
+            let Ok(e) = rx.recv().await else { return None };
+            match verdict(e, &id, cap, expect) {
+                Verdict::Reply(ty, body) => return Some(Answer::Reply(ty, body)),
+                Verdict::Refused(m) => return Some(Answer::Refused(m)),
+                Verdict::Gone => return None,
+                Verdict::Ignore => {}
             }
         }
     })
@@ -1054,6 +1093,107 @@ mod tests {
         };
         assert!(!about(&theirs, &who('A')));
         assert!(about(&theirs, &who('B')));
+    }
+
+    fn reply_from(peer: DeviceId, cap: &str, ty: &str) -> UiEvent {
+        UiEvent::Plugin {
+            peer,
+            cap: cap.to_string(),
+            ty: ty.to_string(),
+            body: b"body".to_vec(),
+        }
+    }
+
+    const MEDIA: &str = "org.acrylius.media/1";
+
+    #[test]
+    fn a_reply_must_match_the_peer_the_cap_and_the_verb() {
+        // All three, and each on its own. Mutation testing flipped every
+        // comparison in the old inline guard and the `&&` between them, and
+        // nothing noticed — so each conjunct gets a case that fails without it.
+        let want = ["state"];
+        assert_eq!(
+            verdict(
+                reply_from(who('A'), MEDIA, "state"),
+                &who('A'),
+                MEDIA,
+                &want
+            ),
+            Verdict::Reply("state".to_string(), b"body".to_vec()),
+        );
+        assert_eq!(
+            verdict(
+                reply_from(who('B'), MEDIA, "state"),
+                &who('A'),
+                MEDIA,
+                &want
+            ),
+            Verdict::Ignore,
+            "the right answer from the wrong device is not this request's"
+        );
+        assert_eq!(
+            verdict(
+                reply_from(who('A'), "org.acrylius.session/1", "state"),
+                &who('A'),
+                MEDIA,
+                &want
+            ),
+            Verdict::Ignore,
+            "a session state is not a media state"
+        );
+        assert_eq!(
+            verdict(
+                reply_from(who('A'), MEDIA, "other"),
+                &who('A'),
+                MEDIA,
+                &want
+            ),
+            Verdict::Ignore,
+            "a verb nobody asked for is not an answer"
+        );
+    }
+
+    #[test]
+    fn only_this_peers_failures_end_this_request() {
+        let mine = UiEvent::Error {
+            peer: Some(who('A')),
+            code: ErrorCode::NotAllowed,
+            detail: "no".to_string(),
+        };
+        assert!(matches!(
+            verdict(mine, &who('A'), MEDIA, &["state"]),
+            Verdict::Refused(_)
+        ));
+
+        for other in [
+            UiEvent::Error {
+                peer: Some(who('B')),
+                code: ErrorCode::NotAllowed,
+                detail: "no".to_string(),
+            },
+            UiEvent::Error {
+                peer: None,
+                code: ErrorCode::Internal,
+                detail: "a disk went away".to_string(),
+            },
+            UiEvent::PeerUnreachable { peer: who('B') },
+        ] {
+            assert_eq!(
+                verdict(other, &who('A'), MEDIA, &["state"]),
+                Verdict::Ignore,
+                "somebody else's trouble must not answer this request"
+            );
+        }
+
+        assert_eq!(
+            verdict(
+                UiEvent::PeerUnreachable { peer: who('A') },
+                &who('A'),
+                MEDIA,
+                &["state"]
+            ),
+            Verdict::Gone
+        );
     }
 
     #[test]
