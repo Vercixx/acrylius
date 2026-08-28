@@ -121,6 +121,11 @@ struct MediaSection: View {
                     // Sent on release. A drag emits a value per frame and each
                     // one here would be a round trip to another machine.
                     guard !editing, let target = scrubbing else { return }
+                    // The one action here with no button to answer it. A drag
+                    // ends by lifting a finger, and the track moves somewhere
+                    // else a moment later, so nothing marks the instant the
+                    // request was actually made.
+                    seeks &+= 1
                     Task {
                         // Moved locally first. The computer takes a moment to
                         // act and re-read, and a knob that springs back to the
@@ -132,6 +137,7 @@ struct MediaSection: View {
                     }
                 }
                 .tint(.secondary)
+                .sensoryFeedback(.impact(weight: .light), trigger: seeks)
             } else {
                 ProgressView(value: Double(shownMs), total: Double(max(player.lengthMs, 1)))
                     .tint(.secondary)
@@ -263,6 +269,10 @@ struct MediaSection: View {
     /// Where the timeline is while a finger is on it, `nil` when nobody is
     /// holding it and the peer's own reading should win.
     @State private var scrubbing: Double?
+
+    /// Counts seeks asked for, so each one can be felt. Only the change
+    /// matters, never the value; it wraps rather than traps.
+    @State private var seeks: UInt = 0
 
     /// The position on screen, extrapolated from the last reading.
     ///

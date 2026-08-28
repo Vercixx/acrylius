@@ -108,6 +108,28 @@ struct TaskButton<Label: View>: View {
         // Not disabled while running: disabling greys the label out, which
         // reads as "unavailable" rather than "working". The guard above already
         // stops a second tap.
+        //
+        // Felt as well as seen, and keyed to the same thing the tick is: what
+        // came *back*, not that a tap was registered. Every action on these
+        // screens is a round trip, so the interesting moment is a second or two
+        // after the finger has gone — which is exactly the moment a person has
+        // looked away from the phone, and the one a screen cannot report to
+        // them. Two outcomes, told apart: an unlock the far end ignored must
+        // not feel like one it carried out.
+        //
+        // `.sensoryFeedback` rather than a `UIFeedbackGenerator`: it honours
+        // the system setting, does nothing in the background, and needs no
+        // availability guard at this deployment target.
+        .sensoryFeedback(trigger: phase) { _, now in
+            switch now {
+            case .ok: .success
+            case .failed: .error
+            // Nothing for the press itself. iOS already gives a button its own
+            // feedback, and a second buzz on the way out would say "sent",
+            // which is the claim this whole type exists to avoid making.
+            case .idle, .running: nil
+            }
+        }
     }
 }
 
