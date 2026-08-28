@@ -113,6 +113,19 @@ public struct PeerCatalog: Equatable, Sendable {
 
     public var peers: [String] { Array(byPeer.keys).sorted() }
 
+    /// Record a failure the core reported against a particular peer.
+    ///
+    /// `UiEvent.error` carries who it was about since M3; before that the only
+    /// place such a failure could land was one app-wide string, so a refusal
+    /// from one computer was displayed on the screen of another. It clears the
+    /// same way a refusal that arrived over the wire does — on the next thing
+    /// that peer says.
+    public mutating func note(error: String, for peer: String) {
+        var features = byPeer[peer] ?? PeerFeatures()
+        features.lastError = error
+        byPeer[peer] = features
+    }
+
     /// Absorb one event. Returns true when something a view shows changed.
     @discardableResult
     public mutating func ingest(_ event: FfiUiEvent) -> Bool {

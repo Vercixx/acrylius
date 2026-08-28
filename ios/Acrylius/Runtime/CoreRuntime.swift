@@ -144,7 +144,9 @@ public actor CoreRuntime {
         do {
             outcome = try core.handle(monotonicMs: nowMs(), wallMs: wallMs(), event: event)
         } catch {
-            ui?.emit(.error(code: "bad_input", detail: String(describing: error)))
+            // No peer: the core refused to handle an event at all, which is
+            // this machine's problem and not a conversation with anybody.
+            ui?.emit(.error(peer: nil, code: "bad_input", detail: String(describing: error)))
             return
         }
         for action in outcome.actions {
@@ -192,7 +194,7 @@ public actor CoreRuntime {
             do {
                 try store.put(key: key, value: value, sensitivity: sensitivity)
             } catch {
-                ui?.emit(.error(code: "persist_failed", detail: "\(key): \(error)"))
+                ui?.emit(.error(peer: nil, code: "persist_failed", detail: "\(key): \(error)"))
             }
 
         case let .advertise(transport, enable, txt):

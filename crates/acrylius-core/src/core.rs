@@ -781,6 +781,7 @@ impl Core {
     fn accept_hello(&mut self, peer: &DeviceId, payload: &[u8], out: &mut Outcome) -> bool {
         let Ok(hello) = minicbor::decode::<Hello>(payload) else {
             out.ui(UiEvent::Error {
+                peer: Some(peer.clone()),
                 code: ErrorCode::BadBody,
                 detail: "handshake payload did not decode".to_string(),
             });
@@ -806,6 +807,7 @@ impl Core {
             }
             Err(e) => {
                 out.ui(UiEvent::Error {
+                    peer: Some(peer.clone()),
                     code: ErrorCode::NotAllowed,
                     detail: e.to_string(),
                 });
@@ -1096,6 +1098,7 @@ impl Core {
 
         let Ok(env) = Envelope::decode(&plaintext) else {
             out.ui(UiEvent::Error {
+                peer: Some(peer.clone()),
                 code: ErrorCode::BadBody,
                 detail: "envelope did not decode".to_string(),
             });
@@ -1182,6 +1185,7 @@ impl Core {
 
         if !u.can_send.contains(&s.cap) {
             out.ui(UiEvent::Error {
+                peer: Some(u.peer.clone()),
                 code: ErrorCode::CapNotNegotiated,
                 detail: format!("{} is not negotiated with this peer", s.cap),
             });
@@ -1212,6 +1216,7 @@ impl Core {
                 if msg.len() > u.max_message as usize {
                     let (n, cap) = (msg.len(), u.max_message);
                     out.ui(UiEvent::Error {
+                        peer: Some(u.peer.clone()),
                         code: ErrorCode::TooLarge,
                         detail: format!("{} bytes does not fit this link, which takes {cap}", n),
                     });
@@ -1221,6 +1226,7 @@ impl Core {
             }
             Err(e) => {
                 out.ui(UiEvent::Error {
+                    peer: Some(u.peer.clone()),
                     code: ErrorCode::Internal,
                     detail: e.to_string(),
                 });
@@ -1404,6 +1410,7 @@ impl Core {
             self.dial_trouble.insert(peer.clone(), NOWHERE.to_string());
             if by_hand {
                 out.ui(UiEvent::Error {
+                    peer: Some(peer.clone()),
                     code: ErrorCode::NotAllowed,
                     detail: format!("no address known for {peer}. {NOWHERE}"),
                 });
@@ -1515,6 +1522,7 @@ impl Core {
         // the phone, like a transfer that simply stopped.
         if self.bulk_support_for(&peer) == Some(BulkSupport::None) {
             out.ui(UiEvent::Error {
+                peer: Some(peer.clone()),
                 code: ErrorCode::NotAllowed,
                 detail: format!(
                     "the link to {peer} cannot carry files. Reach it over the \
@@ -1534,6 +1542,7 @@ impl Core {
             // finished-and-failed one so the plugin unwinds the same way it
             // would for any other failure rather than waiting forever.
             out.ui(UiEvent::Error {
+                peer: Some(peer.clone()),
                 code: ErrorCode::NotAllowed,
                 detail: format!("no session with {peer} to derive a transfer key from"),
             });
@@ -1660,6 +1669,7 @@ impl Core {
                     self.addrs.entry(peer).or_default().set(transport, addr);
                 } else {
                     out.ui(UiEvent::Error {
+                        peer: Some(peer.clone()),
                         code: ErrorCode::NotPaired,
                         detail: format!("{peer} is not a paired device"),
                     });
@@ -1696,6 +1706,7 @@ impl Core {
                     .position(|p| crate::plugin::handles(p.manifest(), &cap))
                 else {
                     out.ui(UiEvent::Error {
+                        peer: Some(peer.clone()),
                         code: ErrorCode::UnknownType,
                         detail: format!("no plugin handles {cap}"),
                     });
@@ -1711,6 +1722,7 @@ impl Core {
                 self.drain_cx(cx, out);
                 if let Err(e) = r {
                     out.ui(UiEvent::Error {
+                        peer: Some(peer.clone()),
                         code: e.code(),
                         detail: e.to_string(),
                     });
@@ -1960,12 +1972,15 @@ impl Core {
         detail: &str,
         out: &mut Outcome,
     ) {
+        // Taken before the link goes back in the table, which moves `u`.
+        let peer = u.peer.clone();
         self.links.insert(link, LinkState::Up(u));
         out.push(Action::Close {
             link,
             reason: LinkDownReason::Protocol(ErrorCode::NotAllowed),
         });
         out.ui(UiEvent::Error {
+            peer: Some(peer),
             code: ErrorCode::NotAllowed,
             detail: detail.to_string(),
         });
@@ -1973,12 +1988,20 @@ impl Core {
     }
 
     fn fail_link(&mut self, link: LinkId, detail: &str, out: &mut Outcome) {
-        self.links.remove(&link);
+        // A link that never finished handshaking has no peer yet, and saying
+        // `None` is the honest answer: naming the device we *hoped* was at the
+        // other end would be attributing a failure to somebody on the strength
+        // of an opener that did not verify.
+        let peer = match self.links.remove(&link) {
+            Some(LinkState::Up(u)) => Some(u.peer.clone()),
+            _ => None,
+        };
         out.push(Action::Close {
             link,
             reason: LinkDownReason::Protocol(ErrorCode::NotAllowed),
         });
         out.ui(UiEvent::Error {
+            peer,
             code: ErrorCode::NotAllowed,
             detail: detail.to_string(),
         });

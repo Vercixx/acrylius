@@ -410,6 +410,18 @@ pub enum UiEvent {
         body: Vec<u8>,
     },
     Error {
+        /// Which peer this is about, when it is about one.
+        ///
+        /// A host that correlates a request with its answer has to be able to
+        /// tell "the peer you asked about refused" from "something else went
+        /// wrong elsewhere". Without this the control socket reported any
+        /// core-level error anywhere as the refusal of whatever request
+        /// happened to be waiting — and with a `share` request waiting an hour,
+        /// that window is an hour long.
+        ///
+        /// `None` for errors that belong to the machine rather than to a
+        /// conversation with somebody.
+        peer: Option<DeviceId>,
         code: ErrorCode,
         detail: String,
     },

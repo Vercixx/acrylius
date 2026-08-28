@@ -610,12 +610,18 @@ final class AppModel {
                 #endif
                 activity = "Copied to this phone"
             }
-        case let .error(code, detail):
+        case let .error(peer, code, detail):
             // Local Network permission is the failure users actually hit, and
             // it is silent: iOS offers no API to query it. Say what to do.
             lastError = detail.contains("local network")
                 ? "Allow local network access in Settings → Privacy → Local Network."
                 : "\(code): \(detail)"
+            // And put it on the device it is about, so the screen for that
+            // computer can show it in place rather than only the banner over
+            // everything. `nil` means the failure belongs to this phone.
+            if let peer {
+                catalog.note(error: detail, for: peer)
+            }
         }
     }
 

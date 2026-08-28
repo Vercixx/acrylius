@@ -328,6 +328,7 @@ impl Plugin for SharePlugin {
                 // would sit on "offered" until the session ended.
                 if !cx.peer_can_carry_bulk() {
                     cx.ui(UiEvent::Error {
+                        peer: Some(peer.clone()),
                         code: ErrorCode::NotAllowed,
                         detail: format!(
                             "the link to {peer} cannot carry files. Reach it over the \

@@ -539,6 +539,9 @@ pub enum FfiUiEvent {
         body: Vec<u8>,
     },
     Error {
+        /// Which peer this is about, when it is about one. See
+        /// [`acrylius_core::vocab::UiEvent::Error`].
+        peer: Option<String>,
         code: String,
         detail: String,
     },
@@ -586,7 +589,8 @@ impl From<cv::UiEvent> for FfiUiEvent {
                 ty,
                 body,
             },
-            cv::UiEvent::Error { code, detail } => Self::Error {
+            cv::UiEvent::Error { peer, code, detail } => Self::Error {
+                peer: peer.map(|p| p.to_string()),
                 code: code.as_str().to_string(),
                 detail,
             },

@@ -176,6 +176,25 @@ pub fn socket_path(state: &Path, explicit_state: bool) -> PathBuf {
         .join("acrylius.sock")
 }
 
+/// Whether an event is about a particular peer.
+///
+/// The control socket subscribes to one broadcast carrying every device's
+/// events, so anything that waits for an answer has to say which conversation
+/// it is waiting on. Events with no peer — a pairing window opening, a
+/// machine-level error — are about the machine and answer nobody's request.
+fn about(e: &UiEvent, who: &DeviceId) -> bool {
+    match e {
+        UiEvent::PeerReachable { peer, .. }
+        | UiEvent::PeerUnreachable { peer }
+        | UiEvent::Plugin { peer, .. }
+        | UiEvent::PairingComplete { peer, .. } => peer == who,
+        UiEvent::Error { peer, .. } => peer.as_ref() == Some(who),
+        UiEvent::PairingWindowOpen { .. }
+        | UiEvent::PairingSas { .. }
+        | UiEvent::PairingFailed { .. } => false,
+    }
+}
+
 /// Render a UI event as a line a human can read.
 fn render(e: &UiEvent) -> String {
     match e {
@@ -202,7 +221,7 @@ fn render(e: &UiEvent) -> String {
         UiEvent::Plugin { cap, ty, body, .. } => {
             format!("{cap} {ty} ({} bytes)", body.len())
         }
-        UiEvent::Error { code, detail } => format!("error [{}]: {detail}", code.as_str()),
+        UiEvent::Error { code, detail, .. } => format!("error [{}]: {detail}", code.as_str()),
     }
 }
 
@@ -374,10 +393,22 @@ async fn handle_conn(stream: UnixStream, h: Handles) -> anyhow::Result<()> {
                         }))?;
                     }
                     h.events
-                        .send(Event::Local(LocalCommand::Connect { peer: id }))?;
-                    if let Ok(Ok(e)) =
-                        tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv()).await
-                    {
+                        .send(Event::Local(LocalCommand::Connect { peer: id.clone() }))?;
+                    // The first event *about this peer*, not the first event at
+                    // all. Taking whatever arrived meant a media push from
+                    // another machine, two seconds after asking, was reported
+                    // as the outcome of connecting.
+                    let waited = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                        loop {
+                            match rx.recv().await {
+                                Ok(e) if about(&e, &id) => return Some(e),
+                                Err(_) => return None,
+                                Ok(_) => {}
+                            }
+                        }
+                    })
+                    .await;
+                    if let Ok(Some(e)) = waited {
                         write(&mut wr, &Response::Event { text: render(&e) }).await?;
                     } else {
                         write(
@@ -681,17 +712,29 @@ async fn handle_conn(stream: UnixStream, h: Handles) -> anyhow::Result<()> {
                 Ok(id) => {
                     let mut rx = h.ui.subscribe();
                     h.events.send(Event::Local(LocalCommand::Plugin {
-                        peer: id,
+                        peer: id.clone(),
                         cap: acrylius_core::plugins::ping::CAP.to_string(),
                         ty: "ping".to_string(),
                         body: b"acryliusctl".to_vec(),
                     }))?;
                     let deadline = std::time::Duration::from_secs(5);
+                    // By peer, like `plugin_request`. A pong is the one reply
+                    // where taking somebody else's would be perfectly
+                    // convincing: every pong is identical, so pinging a device
+                    // that was not answering succeeded whenever any other one
+                    // was.
                     let got = tokio::time::timeout(deadline, async {
                         loop {
                             match rx.recv().await {
-                                Ok(UiEvent::Plugin { ty, .. }) if ty == "pong" => return true,
-                                Ok(UiEvent::PeerUnreachable { .. }) | Err(_) => return false,
+                                Ok(UiEvent::Plugin { peer, ty, .. })
+                                    if peer == id && ty == "pong" =>
+                                {
+                                    return true;
+                                }
+                                Ok(UiEvent::PeerUnreachable { peer }) if peer == id => {
+                                    return false;
+                                }
+                                Err(_) => return false,
                                 Ok(_) => {}
                             }
                         }
@@ -792,7 +835,7 @@ async fn plugin_request(
     };
     let mut rx = h.ui.subscribe();
     h.events.send(Event::Local(LocalCommand::Plugin {
-        peer: id,
+        peer: id.clone(),
         cap: cap.to_string(),
         ty: ty.to_string(),
         body,
@@ -801,15 +844,25 @@ async fn plugin_request(
         return write(wr, &Response::Ok).await;
     }
 
+    // Every arm below is filtered by peer, and that is the whole point of it.
+    //
+    // This used to match on `(cap, ty)` alone against a *global* event
+    // broadcast, so with two devices connected the answer to a question about
+    // one could be somebody else's unsolicited push. That is not theoretical:
+    // the media plugin broadcasts state every two seconds, so `media A query`
+    // was routinely answered with B's now-playing. The same held for the
+    // failure paths — any peer going unreachable ended a request aimed at a
+    // different one, and any core-level error anywhere became this request's
+    // refusal, for as long as an hour on a `share`.
     let waited = tokio::time::timeout(patience, async {
         loop {
             match rx.recv().await {
                 Ok(UiEvent::Plugin {
+                    peer: p,
                     cap: c,
                     ty: t,
                     body,
-                    ..
-                }) if c == cap && expect.contains(&t.as_str()) => {
+                }) if p == id && c == cap && expect.contains(&t.as_str()) => {
                     return Some(Answer::Reply(t, body));
                 }
                 // A request the core refused before it left this machine — a
@@ -817,10 +870,18 @@ async fn plugin_request(
                 // ever come back from the peer, so waiting for one turns an
                 // immediate, well-explained refusal into a fifteen-second
                 // timeout reported as if the peer were at fault.
-                Ok(UiEvent::Error { code, detail }) => {
+                //
+                // An error with no peer is about the machine rather than about
+                // a conversation, and is not this request's answer.
+                Ok(UiEvent::Error {
+                    peer: Some(p),
+                    code,
+                    detail,
+                }) if p == id => {
                     return Some(Answer::Refused(format!("{detail} ({})", code.as_str())));
                 }
-                Ok(UiEvent::PeerUnreachable { .. }) | Err(_) => return None,
+                Ok(UiEvent::PeerUnreachable { peer: p }) if p == id => return None,
+                Err(_) => return None,
                 Ok(_) => {}
             }
         }
@@ -1063,4 +1124,83 @@ pub fn random_code() -> String {
     use rand::Rng;
     let bits: u64 = rand::rng().random::<u64>() & 0xFF_FFFF_FFFF;
     acrylius_core::proto::pairing::encode(bits)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use acrylius_core::proto::envelope::ErrorCode;
+
+    /// A device id built the only way one can be from outside: parsed.
+    ///
+    /// 22 base64url characters carry 16 bytes, so the last one holds just two
+    /// significant bits and anything but `A`, `Q`, `g` or `w` there is refused
+    /// as non-canonical. The variation therefore goes at the front.
+    fn who(first: char) -> DeviceId {
+        let s: String = std::iter::once(first)
+            .chain(std::iter::repeat_n('A', DeviceId::CHARS - 1))
+            .collect();
+        DeviceId::parse(&s).expect("a well-formed device id")
+    }
+
+    #[test]
+    fn a_reply_from_another_peer_is_not_this_requests_answer() {
+        // The bug this whole change exists for. The media plugin broadcasts
+        // state every two seconds, so with two devices connected the answer to
+        // "what is playing on A" was routinely B's.
+        let theirs = UiEvent::Plugin {
+            peer: who('B'),
+            cap: "org.acrylius.media/1".to_string(),
+            ty: "state".to_string(),
+            body: Vec::new(),
+        };
+        assert!(!about(&theirs, &who('A')));
+        assert!(about(&theirs, &who('B')));
+    }
+
+    #[test]
+    fn another_peer_going_away_does_not_end_this_request() {
+        let gone = UiEvent::PeerUnreachable { peer: who('B') };
+        assert!(
+            !about(&gone, &who('A')),
+            "B going away must not report A as unreachable"
+        );
+        assert!(about(&gone, &who('B')));
+    }
+
+    #[test]
+    fn an_error_about_the_machine_is_nobodys_answer() {
+        // `None` is the honest value for a failure that belongs to this
+        // computer rather than to a conversation. Treating it as an answer is
+        // how any error anywhere became the refusal of whatever request
+        // happened to be waiting — for up to an hour, on a share.
+        let machine = UiEvent::Error {
+            peer: None,
+            code: ErrorCode::Internal,
+            detail: "a disk went away".to_string(),
+        };
+        assert!(!about(&machine, &who('A')));
+
+        let theirs = UiEvent::Error {
+            peer: Some(who('B')),
+            code: ErrorCode::NotAllowed,
+            detail: "no".to_string(),
+        };
+        assert!(!about(&theirs, &who('A')));
+        assert!(about(&theirs, &who('B')));
+    }
+
+    #[test]
+    fn pairing_events_answer_no_ones_request() {
+        // They are about a window, not a device, and there is no peer to
+        // compare: a pairing window opening must not satisfy a `session query`
+        // that happens to be outstanding.
+        assert!(!about(
+            &UiEvent::PairingWindowOpen {
+                code: "ABCD1234".to_string(),
+                expires_in_ms: 1,
+            },
+            &who('A')
+        ));
+    }
 }
