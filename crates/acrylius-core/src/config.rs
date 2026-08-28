@@ -29,6 +29,15 @@ pub struct CoreConfig {
     pub max_pairing_attempts: u8,
     /// How long an unfinished handshake may hold a link.
     pub handshake_timeout_ms: u64,
+    /// How long the core waits for a transport to answer a dial before giving
+    /// up on that route and trying the next.
+    ///
+    /// A backstop, not the primary bound: a transport that can time out its own
+    /// dial should, because only it can hang up the connection it opened. This
+    /// catches the one that does not, and it must therefore be the *later* of
+    /// the two — see [`crate::link::DIAL_TIMEOUT_MS`], which is what the hosts
+    /// bound themselves by and what this is derived from.
+    pub dial_timeout_ms: u64,
 }
 
 impl Default for CoreConfig {
@@ -43,6 +52,11 @@ impl Default for CoreConfig {
             reconnect_every_ms: 10_000,
             max_pairing_attempts: 3,
             handshake_timeout_ms: 15_000,
+            // Derived rather than chosen, so the two cannot drift apart into
+            // the order that makes this useless: a backstop that fires first
+            // takes the route walk away from the host that was about to answer
+            // properly, and leaves a stale token behind for it to answer into.
+            dial_timeout_ms: crate::link::DIAL_TIMEOUT_MS * 2,
         }
     }
 }

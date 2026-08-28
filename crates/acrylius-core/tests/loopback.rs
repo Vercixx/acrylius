@@ -255,6 +255,17 @@ impl Net {
                 transport,
             } => {
                 self.dialed.push((transport, addr.clone()));
+                // A dial that is never answered, either way.
+                //
+                // Not a hypothetical: Network.framework does this by design. A
+                // connection with no viable path waits for one instead of
+                // failing, so with Wi-Fi switched off the phone's dial neither
+                // came up nor failed — it simply hung, and every route behind
+                // it went untried. Every other address here answers, which is
+                // why nothing caught it.
+                if addr == "silent" {
+                    return;
+                }
                 // Only the two cores are wired. Anything else is somewhere that
                 // did not answer — which is the whole point of having more than
                 // one route to try.
@@ -1796,6 +1807,269 @@ fn a_peer_nothing_can_reach_is_tried_again_without_a_new_sighting() {
         PeerState::Reachable,
         "the address is still on file, so something must try it again"
     );
+}
+
+#[test]
+fn a_dial_nobody_answers_does_not_hold_the_remaining_routes_hostage() {
+    // Switching Wi-Fi off, and the takeover to Bluetooth that did not happen.
+    //
+    // Every route walk hangs off a promise the transports make: a dial is
+    // answered exactly once, with a link or with a failure. Network.framework
+    // does not keep it — a connection with no viable path waits for one rather
+    // than failing — so the phone dialled the Wi-Fi route into silence and
+    // never reached the Bluetooth route behind it. Nor could anything rescue
+    // it: the retry heartbeat declines to start a second dial while one is
+    // outstanding, and that one was outstanding forever.
+    let (mut net, _a_id, b_id) = paired();
+    net.ble_transport = Some(SLOWER);
+
+    // Up on the better transport first, because that is the situation a
+    // takeover starts from.
+    discover_via(&mut net, Side::A, Side::B, TRANSPORT, "B");
+    assert_eq!(net.a.peer_state(&b_id), PeerState::Reachable);
+    // The address that route will be retried at, once it stops working. Both
+    // of these are recorded without dialling: the peer is already reachable
+    // over the best transport there is.
+    discover_via(&mut net, Side::A, Side::B, TRANSPORT, "silent");
+    discover_via(&mut net, Side::A, Side::B, SLOWER, "B");
+
+    // Wi-Fi goes away.
+    lose_link(&mut net, TRANSPORT);
+    assert_eq!(net.a.peer_state(&b_id), PeerState::Unreachable);
+    net.dialed.clear();
+
+    // The retry begins at once rather than at the next heartbeat, and finds
+    // the route that no longer answers.
+    net.wall += 1_000;
+    net.queue.push_back((Side::A, Event::Tick));
+    net.run();
+    assert_eq!(
+        net.dialed,
+        vec![(TRANSPORT, "silent".to_string())],
+        "the better route is tried first, and it is the one that hangs"
+    );
+    assert_eq!(
+        net.a.peer_state(&b_id),
+        PeerState::Connecting,
+        "a dial is out, so this is a device being reached and not one given up on"
+    );
+
+    // Not a moment before the budget is up, either. A dial that is abandoned
+    // early is the same bug pointing the other way: `.preparing` is a
+    // connection that is about to work, and giving up on those is what once
+    // killed the app's very first dial at launch.
+    net.now += CoreConfig::default().dial_timeout_ms - 1;
+    net.wall += CoreConfig::default().dial_timeout_ms - 1;
+    net.queue.push_back((Side::A, Event::Tick));
+    net.run();
+    assert_eq!(
+        net.dialed,
+        vec![(TRANSPORT, "silent".to_string())],
+        "a dial still inside its budget is still a dial, not a spent route"
+    );
+
+    // And now the part that did not exist: the dial is given up on, and the
+    // walk carries on to the transport that works.
+    net.now += 2;
+    net.wall += 2;
+    net.queue.push_back((Side::A, Event::Tick));
+    net.run();
+
+    assert!(
+        net.dialed.contains(&(SLOWER, "B".to_string())),
+        "a dial that never answered has to spend its route, or the ones behind \
+         it are never tried: {:?}",
+        net.dialed
+    );
+    assert_eq!(
+        net.a.peer_state(&b_id),
+        PeerState::Reachable,
+        "the second radio was there the whole time"
+    );
+    assert_eq!(
+        net.a.transport_for(&b_id),
+        Some(TransportKind::BleGatt),
+        "and it is what carries now"
+    );
+}
+
+#[test]
+fn an_automatic_dial_waits_for_the_one_already_out() {
+    // The guard that made the hang above so total, and which is still right.
+    //
+    // Sightings arrive at whatever rate two radios feel like producing them,
+    // and dialling on each would open a fresh connection every time while the
+    // last was still coming up. So an automatic attempt stands down when one is
+    // already outstanding — which is correct, and is exactly why a dial that
+    // never comes back had to be given a deadline rather than a second dial.
+    let (mut net, _a_id, b_id) = paired();
+    // Pairing dialled to get here; this is about what happens afterwards.
+    net.dialed.clear();
+
+    discover_via(&mut net, Side::A, Side::B, TRANSPORT, "silent");
+    assert_eq!(
+        net.dialed,
+        vec![(TRANSPORT, "silent".to_string())],
+        "the first sighting dials"
+    );
+
+    // Seen again, and again, with the first dial still in the air.
+    discover_via(&mut net, Side::A, Side::B, TRANSPORT, "silent");
+    discover_via(&mut net, Side::A, Side::B, TRANSPORT, "silent");
+    assert_eq!(
+        net.dialed.len(),
+        1,
+        "every sighting dialled again while one was already outstanding: {:?}",
+        net.dialed
+    );
+    // And it says so. A dial in the air is not a link, but it is not nothing,
+    // and reporting it as unreachable is what made the screen read "Not
+    // connected" throughout the time the app was busy connecting.
+    assert_eq!(net.a.peer_state(&b_id), PeerState::Connecting);
+
+    // Nor does a person asking start a second one on top. What they asked for
+    // is already under way, and the screen is now showing them that.
+    net.local(Side::A, LocalCommand::Connect { peer: b_id });
+    assert_eq!(
+        net.dialed.len(),
+        1,
+        "a request piled a second dial onto one already in flight: {:?}",
+        net.dialed
+    );
+}
+
+#[test]
+fn the_core_gives_up_on_a_dial_later_than_the_hosts_do() {
+    // Two timeouts on one dial, and the order between them is the whole point.
+    //
+    // The host bounds its own dial because only it holds the connection and can
+    // hang up. The core's is a backstop for a host that does not. If the
+    // backstop fired first it would take the answer away from the half that can
+    // clean up, and leave a stale token for that half to answer into later.
+    assert!(
+        CoreConfig::default().dial_timeout_ms > acrylius_core::link::DIAL_TIMEOUT_MS,
+        "the backstop must outlast the bound the hosts are told to use"
+    );
+}
+
+#[test]
+fn every_route_gets_its_own_budget_before_the_next_is_tried() {
+    // One deadline per dial, not one for the walk.
+    //
+    // A route that hangs must not spend the budget of the route behind it: the
+    // second one is usually a different radio, and starting it already out of
+    // time would mean never really trying it. And a walk in which every route
+    // hangs must still end, or the peer sits at "Connecting" forever with
+    // nothing left to try and nothing to say about it.
+    let (mut net, _a_id, b_id) = paired();
+
+    // Both routes on file up front and neither ever answers, which a pair of
+    // sightings could not arrange: the first would dial and the second would
+    // stand down behind it, leaving the walk with nothing queued.
+    net.local(
+        Side::A,
+        LocalCommand::SetPeerAddress {
+            peer: b_id.clone(),
+            transport: TRANSPORT,
+            addr: "silent".to_string(),
+        },
+    );
+    net.local(
+        Side::A,
+        LocalCommand::SetPeerAddress {
+            peer: b_id.clone(),
+            transport: SLOWER,
+            addr: "silent".to_string(),
+        },
+    );
+    net.dialed.clear();
+    net.local(Side::A, LocalCommand::Connect { peer: b_id.clone() });
+    assert_eq!(
+        net.dialed,
+        vec![(TRANSPORT, "silent".to_string())],
+        "the better route goes first"
+    );
+
+    // The first route's budget runs out and the second is tried.
+    net.now += CoreConfig::default().dial_timeout_ms + 1;
+    net.wall += CoreConfig::default().dial_timeout_ms + 1;
+    net.queue.push_back((Side::A, Event::Tick));
+    net.run();
+    assert_eq!(
+        net.dialed,
+        vec![
+            (TRANSPORT, "silent".to_string()),
+            (SLOWER, "silent".to_string()),
+        ],
+        "the walk carried on to the route behind it"
+    );
+
+    // The second route now gets the same wait the first one did, rather than
+    // inheriting a deadline that has already gone by.
+    net.now += CoreConfig::default().dial_timeout_ms - 1;
+    net.wall += CoreConfig::default().dial_timeout_ms - 1;
+    net.queue.push_back((Side::A, Event::Tick));
+    net.run();
+    assert_eq!(
+        net.a.peer_state(&b_id),
+        PeerState::Connecting,
+        "the second route was given up on before it had its turn"
+    );
+
+    // And then the walk ends, with a reason on file rather than a peer stuck
+    // reporting that it is connecting to something that never answers.
+    net.now += 2;
+    net.wall += 2;
+    net.queue.push_back((Side::A, Event::Tick));
+    net.run();
+    assert_eq!(net.a.peer_state(&b_id), PeerState::Unreachable);
+    assert!(
+        net.a
+            .dial_trouble(&b_id)
+            .is_some_and(|w| w.contains("never answered")),
+        "a walk that ended in silence still owes the screen an explanation, got {:?}",
+        net.a.dial_trouble(&b_id)
+    );
+}
+
+#[test]
+fn a_better_transport_is_dialled_once_while_a_worse_one_carries() {
+    // The phone that walks into the room: Bluetooth connects first because the
+    // radio is already talking, and Wi-Fi is dialled behind it because a
+    // Bluetooth link cannot carry a file. That dial takes time, and sightings
+    // keep arriving while it does — from two radios, at whatever rate each
+    // feels like. Every one of them must not open another connection.
+    let (mut net, _a_id, b_id) = paired();
+    net.ble_transport = Some(SLOWER);
+
+    // Pairing left a Wi-Fi address on file, so it has to stop working before
+    // Bluetooth is what carries — the same setup `both_routes_up` uses.
+    discover_via(&mut net, Side::A, Side::B, TRANSPORT, "not-listening");
+    discover_via(&mut net, Side::A, Side::B, SLOWER, "B");
+    assert_eq!(net.a.peer_state(&b_id), PeerState::Reachable);
+    assert_eq!(net.a.transport_for(&b_id), Some(TransportKind::BleGatt));
+
+    net.dialed.clear();
+    discover_via(&mut net, Side::A, Side::B, TRANSPORT, "silent");
+    assert_eq!(
+        net.dialed,
+        vec![(TRANSPORT, "silent".to_string())],
+        "the better transport is worth dialling even while the worse one works"
+    );
+
+    // Seen again, twice, with that dial still in the air.
+    discover_via(&mut net, Side::A, Side::B, TRANSPORT, "silent");
+    discover_via(&mut net, Side::A, Side::B, SLOWER, "B");
+    assert_eq!(
+        net.dialed.len(),
+        1,
+        "a sighting opened a second connection while one was already in \
+         flight: {:?}",
+        net.dialed
+    );
+    // Still carried by what actually works, throughout.
+    assert_eq!(net.a.peer_state(&b_id), PeerState::Reachable);
+    assert_eq!(net.a.transport_for(&b_id), Some(TransportKind::BleGatt));
 }
 
 #[test]

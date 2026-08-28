@@ -139,6 +139,28 @@ public final class NWTransport: Transport, @unchecked Sendable {
         attach(NWConnection(to: endpoint, using: Self.tcp), dial: token)
     }
 
+    /// Give up on a dial that is going nowhere, and hang up behind it.
+    ///
+    /// Network.framework waits for connectivity rather than failing: a
+    /// connection with no viable path sits in `.waiting` for as long as it
+    /// takes, which with Wi-Fi switched off is forever. `stateUpdateHandler`
+    /// answers a dial on `.ready`, `.failed` and `.cancelled`, and none of
+    /// those arrive — so the core was left holding a route walk that could not
+    /// continue, and never tried the Bluetooth route behind it.
+    ///
+    /// The core bounds this too, but later and on purpose. Only this end holds
+    /// the connection, so only this end can stop it, and a backstop that fired
+    /// first would take the answer away from the half that can clean up.
+    private func boundDial(_ link: UInt64, _ c: NWConnection) {
+        queue.asyncAfter(deadline: .now() + .milliseconds(Int(dialTimeoutMs()))) {
+            [weak self] in
+            guard let self, let pending = self.answerDial(link) else { return }
+            _ = self.release(link)
+            c.cancel()
+            self.fire(.dialFailed(dial: pending, reason: "it never answered"))
+        }
+    }
+
     /// TCP with the same dead-peer budget the desktop uses.
     ///
     /// `.tcp` on its own is the default, and the default never questions an
@@ -276,7 +298,10 @@ public final class NWTransport: Transport, @unchecked Sendable {
 
     private func attach(_ c: NWConnection, dial: UInt64?) {
         let link = claimLink(c)
-        if let dial { noteDial(link, dial) }
+        if let dial {
+            noteDial(link, dial)
+            boundDial(link, c)
+        }
         c.stateUpdateHandler = { [weak self] state in
             guard let self else { return }
             switch state {

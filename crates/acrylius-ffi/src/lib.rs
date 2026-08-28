@@ -216,6 +216,10 @@ impl AcryliusCore {
                 // sensible number for itself, and nothing on that side has any
                 // reason to want a different one.
                 reconnect_every_ms: CoreConfig::default().reconnect_every_ms,
+                // Likewise, and more so: this one is a backstop for a transport
+                // that fails to bound its own dial, so it is the core's business
+                // and not the host's. See [`dial_timeout_ms`].
+                dial_timeout_ms: CoreConfig::default().dial_timeout_ms,
             },
         )
         // The same plugin list every device registers, which is the point of
@@ -466,6 +470,19 @@ pub fn dead_peer_ms() -> u64 {
     acrylius_core::link::DEAD_PEER_MS
 }
 
+/// How long a dial may go unanswered before the route it was trying is spent.
+/// See [`acrylius_core::link::DIAL_TIMEOUT_MS`].
+///
+/// Exported because the transport that opened the connection is the only thing
+/// that can hang it up, so it has to bound the dial itself — and it must use
+/// this number rather than one of its own, or the core's backstop and the
+/// host's timeout drift into the order where the backstop fires first.
+#[uniffi::export]
+#[must_use]
+pub fn dial_timeout_ms() -> u64 {
+    acrylius_core::link::DIAL_TIMEOUT_MS
+}
+
 /// How often to re-read a peer's media while watching it play. See
 /// [`acrylius_core::plugins::media::WATCH_INTERVAL_MS`].
 #[uniffi::export]
@@ -518,4 +535,29 @@ pub fn media_command_landed(
         return None;
     };
     media::landed(&action, &player, &before.into(), &now.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The budgets a host is told to use are the core's, not copies of them.
+    ///
+    /// These accessors exist so that a number lives in exactly one place and
+    /// both ends read it. That only holds while each really returns the
+    /// constant it names — an accessor quietly answering something else is
+    /// indistinguishable from the drift they were added to prevent, and it
+    /// would be read on a phone, where nothing else here can see it.
+    #[test]
+    fn the_exported_budgets_are_the_ones_the_core_holds() {
+        assert_eq!(dead_peer_ms(), acrylius_core::link::DEAD_PEER_MS);
+        assert_eq!(dial_timeout_ms(), acrylius_core::link::DIAL_TIMEOUT_MS);
+        assert_eq!(
+            media_watch_interval_ms(),
+            acrylius_core::plugins::media::WATCH_INTERVAL_MS
+        );
+        // And the order between the two halves of a bounded dial: the host
+        // gives up first, because only the host can hang up the connection.
+        assert!(dial_timeout_ms() < CoreConfig::default().dial_timeout_ms);
+    }
 }

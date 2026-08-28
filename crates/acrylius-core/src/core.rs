@@ -195,7 +195,10 @@ pub struct Core {
     /// the peer unreachable while a working route sits untried.
     /// The flag is whether a person asked, which decides whether failing to
     /// reach them is worth saying out loud.
-    pending_peer_dials: BTreeMap<DialToken, PeerDial>,
+    /// Each carries a deadline, because a transport that answers neither way
+    /// would otherwise hold the walk open forever — see
+    /// [`crate::link::DIAL_TIMEOUT_MS`].
+    pending_peer_dials: BTreeMap<DialToken, (u64, PeerDial)>,
     /// Why the last attempt to reach a peer ended without a session.
     ///
     /// State, deliberately, and not a `UiEvent`. An automatic dial runs on
@@ -332,6 +335,19 @@ impl Core {
                 _ => {}
             }
         }
+        // A dial that has not produced a link yet is not a link, and it is not
+        // nothing either. Reported as unreachable, it made the screen say "Not
+        // connected" for the entire time the app was busy connecting — and
+        // beside a state called "Connecting", that reads as *gave up* rather
+        // than as *not yet*. It is a longer window now that a dial is given a
+        // budget to answer within, so the difference is one a person sees.
+        if self
+            .pending_peer_dials
+            .values()
+            .any(|(_, (p, _, _))| p == peer)
+        {
+            return PeerState::Connecting;
+        }
         PeerState::Unreachable
     }
 
@@ -349,11 +365,18 @@ impl Core {
             Event::LinkRecv { link, msg } => self.on_link_recv(now_ms, link, &msg, &mut out),
             Event::LinkDown { link, .. } => self.on_link_down(now_ms, link, &mut out),
             Event::DialFailed { dial, reason } => {
-                self.pending_pair_dials.remove(&dial);
-                if let Some(pending) = self.pending_peer_dials.remove(&dial) {
-                    self.try_next_route(pending, &reason, &mut out);
-                } else {
+                // Answered by whichever table actually holds the token, and by
+                // neither when nothing does. It used to fall through to
+                // `PairingFailed` for anything it did not recognise, which was
+                // harmless only while every token lived until it was answered.
+                // A dial can now expire, so a host answering one late — the
+                // ordinary case for a connection that was never going to come
+                // up — would announce a pairing failure to someone who had not
+                // been pairing.
+                if self.pending_pair_dials.remove(&dial).is_some() {
                     out.ui(UiEvent::PairingFailed { reason });
+                } else if let Some((_, pending)) = self.pending_peer_dials.remove(&dial) {
+                    self.try_next_route(now_ms, pending, &reason, &mut out);
                 }
             }
             Event::Discovered { transport, peer } => {
@@ -406,7 +429,7 @@ impl Core {
                         // so Wi-Fi coming back does not win until the Bluetooth
                         // session actually ends — which is the conservative way
                         // round, and the same order `dispatch_send` prefers.
-                        self.connect_peer(id, &mut out, false);
+                        self.connect_peer(now_ms, id, &mut out, false);
                     } else {
                         // Nobody we know. Said out loud, because until now the
                         // core kept every sighting in a private map with no
@@ -462,6 +485,9 @@ impl Core {
         let mut consider = |d: u64| best = Some(best.map_or(d, |b: u64| b.min(d)));
         if let Some(r) = self.reconnect_at {
             consider(r);
+        }
+        for (deadline, _) in self.pending_peer_dials.values() {
+            consider(*deadline);
         }
         if let Some(p) = &self.pairing {
             consider(p.deadline);
@@ -545,7 +571,7 @@ impl Core {
 
         // A link we dialled to reach a known peer: IKpsk2, we speak first.
         if let Some(d) = dial
-            && let Some(pending) = self.pending_peer_dials.remove(&d)
+            && let Some((_, pending)) = self.pending_peer_dials.remove(&d)
         {
             // The routes we have not tried travel with the link, not with the
             // dial token. A connected socket is not a finished session, and
@@ -1359,7 +1385,7 @@ impl Core {
     /// time. The second used to go nowhere at all — the routes were dropped the
     /// moment the socket opened, on the assumption that a connected socket was a
     /// reached peer.
-    fn try_next_route(&mut self, pending: PeerDial, why: &str, out: &mut Outcome) {
+    fn try_next_route(&mut self, now_ms: u64, pending: PeerDial, why: &str, out: &mut Outcome) {
         let (peer, mut routes, by_hand) = pending;
         // Something else got there while this was failing. Neither a further
         // dial nor a death notice would be true.
@@ -1388,8 +1414,13 @@ impl Core {
         let (transport, addr) = routes.remove(0);
         self.next_dial += 1;
         let next = DialToken(self.next_dial);
-        self.pending_peer_dials
-            .insert(next, (peer, routes, by_hand));
+        self.pending_peer_dials.insert(
+            next,
+            (
+                now_ms + self.config.dial_timeout_ms,
+                (peer, routes, by_hand),
+            ),
+        );
         out.push(Action::Dial {
             transport,
             addr,
@@ -1397,8 +1428,13 @@ impl Core {
         });
     }
 
-    fn connect_peer(&mut self, peer: DeviceId, out: &mut Outcome, by_hand: bool) {
-        if !by_hand && self.pending_peer_dials.values().any(|(p, _, _)| p == &peer) {
+    fn connect_peer(&mut self, now_ms: u64, peer: DeviceId, out: &mut Outcome, by_hand: bool) {
+        if !by_hand
+            && self
+                .pending_peer_dials
+                .values()
+                .any(|(_, (p, _, _))| p == &peer)
+        {
             return;
         }
         // Three places an address can come from, in order of how much they are
@@ -1413,7 +1449,10 @@ impl Core {
 
         match self.peer_state(&peer) {
             PeerState::Unreachable => {}
-            // A handshake is already in flight. Let it finish.
+            // A dial or a handshake is already in flight. Let it finish —
+            // including when a person asked, because what they asked for is
+            // already happening and a second attempt would not make it
+            // happen sooner.
             PeerState::Connecting => return,
             PeerState::Reachable => {
                 // Reachable is not the same as reachable *well*, and treating
@@ -1474,7 +1513,13 @@ impl Core {
         };
         self.next_dial += 1;
         let d = DialToken(self.next_dial);
-        self.pending_peer_dials.insert(d, (peer, routes, by_hand));
+        self.pending_peer_dials.insert(
+            d,
+            (
+                now_ms + self.config.dial_timeout_ms,
+                (peer, routes, by_hand),
+            ),
+        );
         out.push(Action::Dial {
             transport,
             addr,
@@ -1729,7 +1774,7 @@ impl Core {
                     });
                 }
             }
-            LocalCommand::Connect { peer } => self.connect_peer(peer, out, true),
+            LocalCommand::Connect { peer } => self.connect_peer(now_ms, peer, out, true),
             LocalCommand::Disconnect { peer } => {
                 let links: Vec<LinkId> = self
                     .links
@@ -1915,8 +1960,34 @@ impl Core {
             if let Some(LinkState::Handshaking(h)) = was
                 && let Some(pending) = h.fallback
             {
-                self.try_next_route(pending, "it answered, then stopped part way", out);
+                self.try_next_route(now_ms, pending, "it answered, then stopped part way", out);
             }
+        }
+
+        // Dials nobody ever answered.
+        //
+        // A transport is meant to answer every dial exactly once, with a link
+        // or with a failure, and the whole route walk hangs off that promise.
+        // Network.framework does not keep it: a connection with no viable path
+        // waits for one rather than failing, so switching Wi-Fi off left the
+        // phone dialling a Wi-Fi route indefinitely and never walking on to the
+        // Bluetooth route behind it. Nothing above rescues that — the retry
+        // heartbeat declines to start a second dial while one is outstanding,
+        // and this one never came back.
+        //
+        // So the walk is bounded here as well, where it cannot depend on a host
+        // remembering to bound it.
+        let expired: Vec<DialToken> = self
+            .pending_peer_dials
+            .iter()
+            .filter(|(_, (deadline, _))| now_ms >= *deadline)
+            .map(|(d, _)| *d)
+            .collect();
+        for d in expired {
+            let Some((_, pending)) = self.pending_peer_dials.remove(&d) else {
+                continue;
+            };
+            self.try_next_route(now_ms, pending, "it never answered", out);
         }
 
         // Try again the peers nothing can reach.
@@ -1942,7 +2013,7 @@ impl Core {
             for id in waiting {
                 // Not `by_hand`: nobody asked, so a failure is state and not
                 // news, and `connect_peer` drops it if a dial is already out.
-                self.connect_peer(id, out, false);
+                self.connect_peer(now_ms, id, out, false);
             }
         }
 
@@ -1970,7 +2041,12 @@ impl Core {
             // with the alternatives still untried and nobody told.
             Some(LinkState::Handshaking(h)) => {
                 if let Some(pending) = h.fallback {
-                    self.try_next_route(pending, "the connection closed before it opened", out);
+                    self.try_next_route(
+                        now_ms,
+                        pending,
+                        "the connection closed before it opened",
+                        out,
+                    );
                 }
                 return;
             }
@@ -2022,6 +2098,17 @@ impl Core {
         out.ui(UiEvent::PeerUnreachable {
             peer: u.peer.clone(),
         });
+        // And go looking straight away rather than at the next heartbeat.
+        //
+        // This is the moment a takeover has to happen: the route that was
+        // carrying the session has just died, and the whole point of holding a
+        // second one is that the gap is short. Waiting up to `reconnect_every_ms`
+        // to *begin* would add ten seconds to every switch between radios, on
+        // top of however long the dial itself takes.
+        //
+        // Armed rather than dialled here, so the attempt still runs through the
+        // one path that knows about routes already being walked.
+        self.reconnect_at = Some(0);
         let mut cx = Cx::new(now_ms, self.next_token, self.next_transfer, self.serves);
         for p in &mut self.plugins {
             p.on_peer_disconnected(&mut cx, &u.peer);

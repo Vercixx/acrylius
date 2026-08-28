@@ -23,6 +23,24 @@
 /// works.
 pub const DEAD_PEER_MS: u64 = 20_000;
 
+/// How long a dial may go unanswered before the route it was trying is spent.
+///
+/// A transport answers a dial exactly once, with a link or with a failure, and
+/// the core walks to the next route on the failure. Nothing said what happens
+/// when a transport answers *neither* — and Network.framework does exactly that
+/// by design: a connection with no viable path waits for one indefinitely rather
+/// than failing. So with Wi-Fi switched off the phone dialled the Wi-Fi route,
+/// waited forever, and never reached the Bluetooth route sitting behind it. The
+/// peer stayed unreachable with a working radio in the room, and the retry
+/// heartbeat could not help — it declines to start a second dial while one is
+/// still outstanding, and that one never came back.
+///
+/// Six seconds because this bounds a *local* connection: mDNS resolution plus a
+/// TCP handshake on the same network is well under a second, and anything still
+/// unresolved after six is not resolving. It is also how long a takeover now
+/// takes in the worst case, which is a number a person waits through.
+pub const DIAL_TIMEOUT_MS: u64 = 6_000;
+
 /// Host-assigned, unique for the lifetime of a process. The core treats it as
 /// opaque and never invents one.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
