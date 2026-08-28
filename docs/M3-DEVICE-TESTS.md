@@ -1,5 +1,36 @@
 # M3 — what a machine cannot check
 
+## Re-test after the first pass
+
+Fixed from the 2026-08-28 report. Everything here was found on a device and
+none of it was caught by any gate.
+
+- [ ] **Pairing connects immediately.** No force-quit. *(`confirm_pairing` left
+      it to the peer to open a session, which is only ever true between two
+      computers — a phone always dials and is never dialled, so nobody did.)*
+- [ ] **It reconnects on its own** after backgrounding the app, after the
+      computer sleeps and wakes, and after Wi-Fi comes back — within ~10s and
+      with no force-quit. *(Auto-connect fired on a sighting, and mDNS resolves
+      once and then says nothing, so anything that ended a session without a
+      fresh advertisement was permanent.)*
+- [ ] **A sleeping computer stops reading as connected** within ~20s.
+      *(The phone opened its sockets with plain defaults while the desktop has
+      bounded this since M2; the phone held an ESTABLISHED socket forever.)*
+- [ ] **The timeline can be dragged** and the track actually moves.
+      *(The slider lived inside a `TimelineView` that rebuilt it every second,
+      cancelling the drag before it ended; and its binding read a value
+      captured once per rebuild, so it answered the same number however far the
+      knob went.)*
+- [ ] **The clock is not a second behind** — it advances four times a second.
+- [ ] **Swipe a device, tap Forget: the dialog stays** until answered, and
+      answering it actually forgets. *(Present since M1. The dialog was
+      attached to the row the swipe was removing, so it went with it.)*
+- [ ] **Errors are a normal iOS alert**, not a floating glass capsule.
+
+Still open, and not fixed in this build — see the end of this file: the widget
+extension, and BLE.
+
+
 Everything in this list is here because no gate reaches it. `cargo test`,
 `clippy`, `swift-test.sh`, `xcodegen-check.sh`, the M0/M1 acceptance runs and
 the macOS build are all green; none of them has a screen, a camera, a radio, or
@@ -175,3 +206,23 @@ These are Stage E items that are **not in this build**, so do not go looking:
   computer switched off stays in the phone's nearby list until the app filters
   it by age (5 minutes). A stale row costs a failed dial with a clear message,
   not a wrong pairing.
+
+## Two reports that are not what they look like
+
+**The widget extension is in the IPA.** I unpacked the artifact this build came
+from: `Payload/Acrylius.app/PlugIns/AcryliusWidgets.appex` is present, signed,
+`CFBundleIdentifier org.acrylius.app.widgets`, `MinimumOSVersion 17.0`, with
+`NSExtensionPointIdentifier = com.apple.widgetkit-extension`. CI also refuses to
+package a build without it. So SideStore not offering the extensions prompt is
+happening on the device side, not in the build — the usual cause is the free
+Apple ID's App ID budget, which is ten per week and needs a *second* one for the
+extension. Worth checking whether SideStore has a remembered "remove extensions"
+choice, and what its log says while installing.
+
+**"On this network" is empty because there is nothing to put in it.** The
+section lists devices this phone is *not paired with*, and you have one
+computer, already paired. It will appear when a second machine is on the
+network, or after forgetting the one you have. Two things also have to be true
+for the **waiting** mark: the desktop must be running an M3 daemon
+(`./scripts/install.sh` — `pair=1` is produced by nothing older), and the
+pairing window must actually be open.
