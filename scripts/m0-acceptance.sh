@@ -40,6 +40,15 @@ ready() { for i in $(seq 1 100); do "$BIN/acryliusctl" --state "$1" status >/dev
 ready $D/a || { echo "alpha never came up"; cat $D/a.log; exit 1; }
 ready $D/b || { echo "bravo never came up"; cat $D/b.log; exit 1; }
 
+# Built here rather than assumed, because nothing else in this script would
+# notice it was stale. A run against a binary from an earlier day reported a
+# failure that had been fixed hours before, and would just as happily report a
+# pass for a fix that is not in it.
+if ! cargo build --quiet; then
+  echo "  FAIL the workspace does not build; nothing to accept"
+  exit 1
+fi
+
 echo "### 1. both daemons up"
 "$BIN/acryliusctl" --state $D/a status
 "$BIN/acryliusctl" --state $D/b status
