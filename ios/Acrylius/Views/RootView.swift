@@ -50,14 +50,24 @@ struct RootView: View {
         .modifier(MinimizingTabBar())
         .sheet(isPresented: $showPair) { PairView() }
         .sheet(isPresented: .constant(model.pairingSas != nil)) { ConfirmPairingView() }
-        // Above the tabs rather than at the bottom of one list, because an
-        // error raised on any tab is worth seeing from all of them — a
-        // Bluetooth problem reported while looking at Files used to land in a
-        // footnote on Devices.
-        .safeAreaInset(edge: .top) {
-            if let error = model.lastError {
-                ErrorBanner(text: error) { model.dismissError() }
-            }
+        // A system alert, not a banner drawn by hand.
+        //
+        // It was a glass capsule floating over the tab bar, which looked like
+        // something the app had invented — because it was. An alert is the
+        // control iOS uses to say this, so it inherits the platform's shape,
+        // its dimming, its Dynamic Type and its VoiceOver behaviour, none of
+        // which the banner had.
+        .alert(
+            "Something went wrong",
+            isPresented: Binding(
+                get: { model.lastError != nil },
+                set: { if !$0 { model.dismissError() } }
+            ),
+            presenting: model.lastError
+        ) { _ in
+            Button("OK", role: .cancel) { model.dismissError() }
+        } message: { text in
+            Text(text)
         }
         // Restarted whenever a new error arrives, so the clock is always the
         // current error's. Nothing used to clear these at all.
@@ -90,31 +100,6 @@ private struct MinimizingTabBar: ViewModifier {
         } else {
             content
         }
-    }
-}
-
-/// One error, and a way to be rid of it.
-private struct ErrorBanner: View {
-    let text: String
-    let dismiss: () -> Void
-
-    var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 12) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(.orange)
-            Text(text)
-                .font(.footnote)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            Button("Dismiss", systemImage: "xmark") { dismiss() }
-                .labelStyle(.iconOnly)
-                .buttonStyle(.borderless)
-                .foregroundStyle(.secondary)
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-        .acrylicGlass(in: .rect(cornerRadius: 14))
-        .padding(.horizontal, 12)
     }
 }
 

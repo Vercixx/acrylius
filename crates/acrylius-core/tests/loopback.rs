@@ -1503,7 +1503,10 @@ fn the_pairing_window_expires_on_the_hosts_clock() {
         },
     );
 
-    // The core asked to be woken; honour that and no sooner.
+    // The core asked to be woken, and it now has more than one reason to be:
+    // the reconnect heartbeat runs on the same deadline, and is sooner. So the
+    // window's own budget is what this advances by, not whatever the next
+    // wake-up happens to be for.
     let out = net.b.handle(
         Now {
             monotonic_ms: net.now,
@@ -1511,10 +1514,12 @@ fn the_pairing_window_expires_on_the_hosts_clock() {
         },
         Event::Tick,
     );
-    let deadline = out.next_deadline_ms.expect("a window sets a deadline");
-    assert!(deadline > net.now);
+    assert!(
+        out.next_deadline_ms.is_some_and(|d| d > net.now),
+        "an open window means something is scheduled"
+    );
 
-    net.now = deadline;
+    net.now += CoreConfig::default().pairing_window_ms + 1;
     let out = net.b.handle(
         Now {
             monotonic_ms: net.now,
@@ -1703,15 +1708,7 @@ fn a_pairing_window_that_expires_stops_advertising_itself() {
     );
     assert!(net.b.pairing_open());
 
-    // Wake it exactly when it asked to be woken, the way the runtime does.
-    let out = net.b.handle(
-        Now {
-            monotonic_ms: net.now,
-            wall_ms: net.wall,
-        },
-        Event::Tick,
-    );
-    net.now = out.next_deadline_ms.expect("a window sets a deadline");
+    net.now += CoreConfig::default().pairing_window_ms + 1;
     let _ = net.b.handle(
         Now {
             monotonic_ms: net.now,
@@ -1723,6 +1720,81 @@ fn a_pairing_window_that_expires_stops_advertising_itself() {
     assert!(
         !net.b.pairing_open(),
         "an expired window must not still be advertised as open"
+    );
+}
+
+#[test]
+fn pairing_opens_a_session_rather_than_waiting_to_be_dialled() {
+    // Reported from a phone: pairing succeeded and the device then sat at
+    // "Not connected" until the app was force-quit.
+    //
+    // `confirm_pairing` closed the link and left it to the peer to open a
+    // session "when it wants one", which is only ever true between two
+    // computers. A phone always dials and is never dialled, so when the phone
+    // is the side confirming, nobody dials at all — and the relaunch that
+    // fixed it worked only because it produced a fresh sighting.
+    let (a, b) = (core("phone"), core("pc"));
+    let b_id = b.device_id();
+    let mut net = Net::new(a, b);
+
+    net.local(
+        Side::B,
+        LocalCommand::OpenPairingWindow {
+            code: CODE.to_string(),
+        },
+    );
+    net.local(
+        Side::A,
+        LocalCommand::RequestPairing {
+            transport: TRANSPORT,
+            addr: Side::B.addr().to_string(),
+            code: CODE.to_string(),
+        },
+    );
+    net.local(Side::A, LocalCommand::ConfirmPairing { accept: true });
+    net.local(Side::B, LocalCommand::ConfirmPairing { accept: true });
+
+    // The runtime is asked to wake immediately — `next_deadline` returns the
+    // armed heartbeat — so this is the tick that follows, not a wait.
+    net.queue.push_back((Side::A, Event::Tick));
+    net.run();
+
+    assert_eq!(
+        net.a.peer_state(&b_id),
+        PeerState::Reachable,
+        "the side that just paired must not have to wait for a sighting that may never come"
+    );
+}
+
+#[test]
+fn a_peer_nothing_can_reach_is_tried_again_without_a_new_sighting() {
+    // The other half of the same report: backgrounding the app, or putting the
+    // computer to sleep, left the phone unreachable for good.
+    //
+    // Auto-connect fires on a sighting, and mDNS resolves a service once and
+    // then says nothing. So every way of losing a session that does not end
+    // with a fresh advertisement had nothing scheduled to fix it.
+    let (mut net, _a_id, b_id) = paired();
+    discover(&mut net, Side::A, Side::B);
+    assert_eq!(net.a.peer_state(&b_id), PeerState::Reachable);
+
+    // The computer goes away, and says nothing more about itself. No second
+    // sighting follows, which is the whole point: mDNS resolved it once.
+    lose_link(&mut net, TRANSPORT);
+    assert_eq!(net.a.peer_state(&b_id), PeerState::Unreachable);
+
+    // Both clocks. The monotonic one is what the heartbeat is measured
+    // against; the wall clock is what the next session's `Hello` is stamped
+    // with, and one no newer than the last is refused as a replay.
+    net.now += CoreConfig::default().reconnect_every_ms + 1;
+    net.wall += CoreConfig::default().reconnect_every_ms + 1;
+    net.queue.push_back((Side::A, Event::Tick));
+    net.run();
+
+    assert_eq!(
+        net.a.peer_state(&b_id),
+        PeerState::Reachable,
+        "the address is still on file, so something must try it again"
     );
 }
 

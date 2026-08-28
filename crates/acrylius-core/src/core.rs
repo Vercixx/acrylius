@@ -208,6 +208,9 @@ pub struct Core {
     /// Bounded by the number of paired peers, and dropped when one is reached
     /// or forgotten.
     dial_trouble: BTreeMap<DeviceId, String>,
+    /// When to try the peers nothing can reach again. See
+    /// [`crate::config::CoreConfig::reconnect_every_ms`].
+    reconnect_at: Option<u64>,
     plugins: Vec<Box<dyn Plugin>>,
     /// Which plugin asked for an outstanding effect.
     effect_owner: BTreeMap<EffectToken, usize>,
@@ -457,6 +460,9 @@ impl Core {
     fn next_deadline(&self) -> Option<u64> {
         let mut best: Option<u64> = self.plugin_wake;
         let mut consider = |d: u64| best = Some(best.map_or(d, |b: u64| b.min(d)));
+        if let Some(r) = self.reconnect_at {
+            consider(r);
+        }
         if let Some(p) = &self.pairing {
             consider(p.deadline);
         }
@@ -1049,7 +1055,7 @@ impl Core {
             peer: id.clone(),
             name: a.record.name.clone(),
         });
-        self.peers.insert(id, a.record);
+        self.peers.insert(id.clone(), a.record);
         self.pairing = None;
         // The link stays up but unnegotiated. The peer will open a session when
         // it wants one; keeping pairing and session strictly separate means
@@ -1059,6 +1065,23 @@ impl Core {
             reason: LinkDownReason::Closed,
         });
         self.links.remove(&a.link);
+        // And ask to be woken at once, so something opens a session.
+        //
+        // "The peer will open a session when it wants one" was only ever true
+        // between two computers. A phone always dials and is never dialled —
+        // `NWTransport::advertise` is deliberately unimplemented — so when the
+        // phone is the side confirming, nobody dialled at all. Pairing
+        // succeeded and the device sat at "Not connected" until the app was
+        // force-quit, because a relaunch was the only thing that produced a
+        // fresh sighting to act on.
+        //
+        // The reconnect heartbeat rather than a dial from here, and that is
+        // deliberate: the two ends confirm at different moments, so whichever
+        // goes first would dial a peer that has not finished pairing yet and be
+        // refused as a stranger. Arming the timer instead means the attempt is
+        // repeated until it lands, on the one code path that already knows how
+        // to do that.
+        self.reconnect_at = Some(0);
     }
 
     fn pairing_attempt_failed(&mut self, link: LinkId, out: &mut Outcome) {
@@ -1896,6 +1919,33 @@ impl Core {
             }
         }
 
+        // Try again the peers nothing can reach.
+        //
+        // Auto-connect fires on a sighting, and there is no rule that says a
+        // sighting will ever happen again: mDNS resolves once and goes quiet,
+        // and a peripheral CoreBluetooth has already reported is reported
+        // again at its own discretion. Everything that ended a session without
+        // producing a fresh advertisement therefore left the device
+        // unreachable for good — a sleeping computer, a phone in a pocket, a
+        // Bluetooth link that dropped.
+        if self.reconnect_at.is_none_or(|at| now_ms >= at) {
+            self.reconnect_at = Some(now_ms + self.config.reconnect_every_ms);
+            // Only where there is somewhere to dial. A peer nothing has ever
+            // found has no address to try, and asking again every ten seconds
+            // would be a storm aimed at a machine that is simply off.
+            let waiting: Vec<DeviceId> = self
+                .peers
+                .keys()
+                .filter(|id| self.best_link(id).is_none() && self.addrs.contains_key(*id))
+                .cloned()
+                .collect();
+            for id in waiting {
+                // Not `by_hand`: nobody asked, so a failure is state and not
+                // news, and `connect_peer` drops it if a dial is already out.
+                self.connect_peer(id, out, false);
+            }
+        }
+
         if let Some(w) = self.plugin_wake
             && now_ms >= w
         {
@@ -2145,6 +2195,7 @@ impl CoreBuilder {
             pending_pair_dials: BTreeMap::new(),
             pending_peer_dials: BTreeMap::new(),
             dial_trouble: BTreeMap::new(),
+            reconnect_at: None,
             plugins,
             effect_owner: BTreeMap::new(),
             bulk_owner: BTreeMap::new(),

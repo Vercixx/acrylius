@@ -28,17 +28,7 @@ struct MediaSection: View {
                             .lineLimit(1)
                     }
                     if player.lengthMs > 0 {
-                        // Redrawn every second against the reading's own
-                        // timestamp, and re-read from the computer on the
-                        // interval below. Showing the last reported position
-                        // alone froze the clock until you pressed something;
-                        // advancing it without ever re-asking would drift and
-                        // would keep running after the music stopped somewhere
-                        // this phone cannot see. The refresh below is what
-                        // makes the estimate safe to draw.
-                        TimelineView(.periodic(from: .now, by: 1)) { tick in
-                            timeline(player, at: features.positionMs(at: tick.date))
-                        }
+                        timeline(player)
                     }
                 }
                 .padding(.vertical, 2)
@@ -84,6 +74,20 @@ struct MediaSection: View {
                     try? await Task.sleep(for: .milliseconds(Int(interval)))
                 }
             }
+            // Separate from the poll on purpose. One asks the computer where
+            // the track is; this works out where it has got to since, and only
+            // that one needs to be smooth.
+            .task(id: peer.deviceId) {
+                while !Task.isCancelled {
+                    // Never while a finger is down: the drag owns the knob
+                    // until it lets go, and a tick writing under it is what a
+                    // slider springing back actually looks like.
+                    if scrubbing == nil {
+                        shownMs = features.positionMs(at: Date())
+                    }
+                    try? await Task.sleep(for: Self.tick)
+                }
+            }
         }
     }
 
@@ -92,34 +96,47 @@ struct MediaSection: View {
     /// `canSeek` has been decoded off the wire since M2 and read by nothing.
     /// A player that cannot seek gets the bar it always had: a slider that
     /// silently refuses to move the track is worse than an honest readout.
+    ///
+    /// **Not inside a `TimelineView`.** It was, and that broke dragging twice
+    /// over: the periodic rebuild replaced the `Slider` mid-gesture, so the
+    /// drag was cancelled before it ended and `onEditingChanged(false)` never
+    /// arrived with a value; and the binding's getter closed over a position
+    /// computed once per rebuild, so it answered the same stale number however
+    /// far the knob had been moved. The clock advances from `shownMs` instead,
+    /// which is a value rather than a redraw, and the view keeps its identity
+    /// for as long as a finger is on it.
     @ViewBuilder
-    private func timeline(_ player: FfiMediaPlayer, at reported: UInt64) -> some View {
-        // While a finger is down, the drag is the truth. Otherwise the peer is.
-        let shown = scrubbing ?? Double(reported)
+    private func timeline(_ player: FfiMediaPlayer) -> some View {
         VStack(alignment: .leading, spacing: 4) {
             if player.canSeek {
                 Slider(
-                    value: Binding(get: { shown }, set: { scrubbing = $0 }),
-                    in: 0...Double(player.lengthMs)
+                    // Read live, not captured. While a finger is down the drag
+                    // is the truth; otherwise the peer is.
+                    value: Binding(
+                        get: { scrubbing ?? Double(shownMs) },
+                        set: { scrubbing = $0 }
+                    ),
+                    in: 0...Double(max(player.lengthMs, 1))
                 ) { editing in
                     // Sent on release. A drag emits a value per frame and each
                     // one here would be a round trip to another machine.
                     guard !editing, let target = scrubbing else { return }
                     Task {
+                        // Moved locally first. The computer takes a moment to
+                        // act and re-read, and a knob that springs back to the
+                        // old place for that moment reads as a seek that
+                        // failed even when it worked.
+                        shownMs = UInt64(target)
                         _ = await model.media(peer, "position", value: Int64(target))
-                        // Held until the answer lands, so the knob does not
-                        // snap back to the old position for the half second
-                        // before the new reading arrives — which reads exactly
-                        // like a seek that failed.
                         scrubbing = nil
                     }
                 }
                 .tint(.secondary)
             } else {
-                ProgressView(value: shown, total: Double(player.lengthMs))
+                ProgressView(value: Double(shownMs), total: Double(max(player.lengthMs, 1)))
                     .tint(.secondary)
             }
-            Text("\(clock(UInt64(shown))) / \(clock(player.lengthMs))")
+            Text("\(clock(scrubbing.map { UInt64($0) } ?? shownMs)) / \(clock(player.lengthMs))")
                 .font(.caption2.monospacedDigit())
                 .foregroundStyle(.tertiary)
         }
@@ -246,6 +263,22 @@ struct MediaSection: View {
     /// Where the timeline is while a finger is on it, `nil` when nobody is
     /// holding it and the peer's own reading should win.
     @State private var scrubbing: Double?
+
+    /// The position on screen, extrapolated from the last reading.
+    ///
+    /// A value rather than a redraw. The clock used to be a `TimelineView`
+    /// ticking once a second, which was visibly a second behind — the number
+    /// changed on the tick rather than when the position did, so a track
+    /// started at 0:00 sat there for most of a second. Four times a second is
+    /// under the threshold where a clock looks stuck and still cheap.
+    @State private var shownMs: UInt64 = 0
+
+    /// How often the displayed position is recomputed.
+    ///
+    /// Local arithmetic against a timestamp, not a request: this is what makes
+    /// the clock move between the readings that `interval` fetches, and it
+    /// costs nothing on the other machine.
+    private static let tick = Duration.milliseconds(250)
 
     @Environment(\.scenePhase) private var scenePhase
 

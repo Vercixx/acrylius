@@ -14,6 +14,17 @@ struct DeviceListView: View {
     @Binding var path: [String]
     @Binding var showPair: Bool
 
+    /// The device a confirmation is currently about.
+    ///
+    /// Held here rather than in the row, which is the whole of a bug that has
+    /// been in the app since M1: swiping a row and tapping Forget opened a
+    /// `confirmationDialog` *attached to that row*, and the swipe had already
+    /// begun removing the row. The dialog went with it about half a second
+    /// later, before anyone could answer, and the device stayed paired while
+    /// the list no longer listed it — which is why it came back on relaunch.
+    /// A dialog has to outlive the thing it is asking about.
+    @State private var forgetting: FfiPeer?
+
     var body: some View {
         NavigationStack(path: $path) {
             List {
@@ -30,6 +41,9 @@ struct DeviceListView: View {
                         ForEach(model.peers, id: \.deviceId) { peer in
                             NavigationLink(value: peer.deviceId) {
                                 PeerRow(peer: peer)
+                            }
+                            .swipeActions {
+                                Button("Forget", role: .destructive) { forgetting = peer }
                             }
                         }
                     }
@@ -70,6 +84,24 @@ struct DeviceListView: View {
             .toolbar {
                 Button("Pair", systemImage: "plus") { showPair = true }
             }
+            // On the List, which survives a row going away.
+            .confirmationDialog(
+                forgetting.map { "Forget \($0.name)?" } ?? "",
+                isPresented: Binding(
+                    get: { forgetting != nil },
+                    set: { if !$0 { forgetting = nil } }
+                ),
+                titleVisibility: .visible,
+                presenting: forgetting
+            ) { peer in
+                Button("Forget", role: .destructive) {
+                    Task { await model.forget(peer) }
+                    forgetting = nil
+                }
+                Button("Cancel", role: .cancel) { forgetting = nil }
+            } message: { peer in
+                Text("You'll need to pair \(peer.name) with this \(UIDevice.current.model) again.")
+            }
         }
     }
 }
@@ -77,8 +109,6 @@ struct DeviceListView: View {
 private struct PeerRow: View {
     @Environment(AppModel.self) private var model
     let peer: FfiPeer
-
-    @State private var confirmingForget = false
 
     var body: some View {
         HStack {
@@ -98,19 +128,6 @@ private struct PeerRow: View {
             case .unreachable:
                 Circle().fill(.secondary).frame(width: 8, height: 8)
             }
-        }
-        .swipeActions {
-            Button("Forget", role: .destructive) { confirmingForget = true }
-        }
-        .confirmationDialog(
-            "Forget \(peer.name)?",
-            isPresented: $confirmingForget,
-            titleVisibility: .visible
-        ) {
-            Button("Forget", role: .destructive) { Task { await model.forget(peer) } }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("You'll need to pair \(peer.name) with this \(UIDevice.current.model) again.")
         }
     }
 

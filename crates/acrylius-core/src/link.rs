@@ -7,6 +7,22 @@
 //! Swift over Network.framework while the Linux one is Rust over tokio, with no
 //! trait crossing the FFI boundary between them.
 
+/// How long a peer may stop answering before its socket is treated as broken.
+///
+/// Here, in the core, because **both** hosts have to bound this and only one of
+/// them was. The Linux runtime has derived TCP keepalive and `TCP_USER_TIMEOUT`
+/// from this budget since M2; the phone opened its connections with plain
+/// defaults, so a computer that went to sleep left the phone holding an
+/// ESTABLISHED socket it would never question — reported as "the app still
+/// thinks it's connected" long after the machine had gone.
+///
+/// Sleeping closes nothing, and neither does switching Wi-Fi off: the peer
+/// simply stops answering, and a kernel is extraordinarily patient about that
+/// by default. Twenty seconds is how long a link that is dead but still
+/// believed can go on being preferred over a Bluetooth link beside it that
+/// works.
+pub const DEAD_PEER_MS: u64 = 20_000;
+
 /// Host-assigned, unique for the lifetime of a process. The core treats it as
 /// opaque and never invents one.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]

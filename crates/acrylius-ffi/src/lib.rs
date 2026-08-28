@@ -211,6 +211,11 @@ impl AcryliusCore {
                 pairing_window_ms: config.pairing_window_ms,
                 max_pairing_attempts: config.max_pairing_attempts,
                 handshake_timeout_ms: config.handshake_timeout_ms,
+                // Not exposed through `FfiCoreConfig`. A phone is the device
+                // this matters most on and the one least able to choose a
+                // sensible number for itself, and nothing on that side has any
+                // reason to want a different one.
+                reconnect_every_ms: CoreConfig::default().reconnect_every_ms,
             },
         )
         // The same plugin list every device registers, which is the point of
@@ -451,6 +456,14 @@ pub fn session_unlock_budget_ms() -> u64 {
 #[must_use]
 pub fn media_command_budget_ms() -> u64 {
     acrylius_core::plugins::media::CONTROL_REPLY_BUDGET_MS
+}
+
+/// How long a peer may stop answering before its socket is treated as broken.
+/// See [`acrylius_core::link::DEAD_PEER_MS`].
+#[uniffi::export]
+#[must_use]
+pub fn dead_peer_ms() -> u64 {
+    acrylius_core::link::DEAD_PEER_MS
 }
 
 /// How often to re-read a peer's media while watching it play. See

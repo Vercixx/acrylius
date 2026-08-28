@@ -136,7 +136,30 @@ public final class NWTransport: Transport, @unchecked Sendable {
             }
             endpoint = .hostPort(host: .init(parts.dropLast().joined(separator: ":")), port: p)
         }
-        attach(NWConnection(to: endpoint, using: .tcp), dial: token)
+        attach(NWConnection(to: endpoint, using: Self.tcp), dial: token)
+    }
+
+    /// TCP with the same dead-peer budget the desktop uses.
+    ///
+    /// `.tcp` on its own is the default, and the default never questions an
+    /// idle connection at all: a computer that goes to sleep closes nothing, so
+    /// the phone went on holding an ESTABLISHED socket and reporting the peer
+    /// as connected indefinitely. The Linux runtime has bounded this since M2;
+    /// this is the same number, read from the core so the two cannot drift.
+    ///
+    /// `connectionDropTime` is the half `TCP_USER_TIMEOUT` covers on Linux —
+    /// bytes already in the send queue to a peer that has stopped answering,
+    /// which keepalive alone does not notice because the connection is not
+    /// idle.
+    private static var tcp: NWParameters {
+        let options = NWProtocolTCP.Options()
+        let budget = Int(deadPeerMs() / 1000)
+        options.enableKeepalive = true
+        options.keepaliveIdle = budget / 2
+        options.keepaliveInterval = max(budget / 4, 1)
+        options.keepaliveCount = 2
+        options.connectionDropTime = budget
+        return NWParameters(tls: nil, tcp: options)
     }
 
     public func send(link: UInt64, msg: Data) async {

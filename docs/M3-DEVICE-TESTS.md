@@ -38,9 +38,11 @@ before concluding the code did not run.
       so this is really a check that the installed build is the one CI made.)*
 - [ ] Under iOS 26: navigation bars, the tab bar and sheets look like Liquid
       Glass rather than flat iOS 17 chrome.
-- [ ] Under iOS 17–25, if you have such a device: the app still launches and
+- [ ] Under iOS 17 or 18, if you have such a device: the app still launches and
       nothing is invisible or unreadable. **Untested by anyone so far** — the
-      `#available` fallback path has only ever been compiled.
+      `#available` fallback path has only ever been compiled. *(There is no iOS
+      19–25; Apple went from 18 to 26. The floor is 17 and the guard is
+      `#available(iOS 26, *)`, so the fallback covers exactly 17 and 18.)*
 
 ## 2. The shape of the app (Stage B)
 

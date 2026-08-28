@@ -76,7 +76,9 @@ async fn read_frame(stream: &mut tokio::net::tcp::OwnedReadHalf) -> std::io::Res
 /// link that is dead but still believed carries every message into a hole, and
 /// the Bluetooth link sitting right beside it, connected and working, is never
 /// chosen. Twenty seconds is how long that can last.
-const DEAD_PEER: std::time::Duration = std::time::Duration::from_secs(20);
+/// The number now lives in the core, beside the reason both hosts need it.
+const DEAD_PEER: std::time::Duration =
+    std::time::Duration::from_millis(acrylius_core::link::DEAD_PEER_MS);
 
 /// How long to wait after a failed `accept` before trying again.
 ///
