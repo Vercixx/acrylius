@@ -136,5 +136,36 @@ if [ -z "$app_group" ] || [ "$app_group" != "$widget_group" ] || [ "$app_group" 
     exit 1
 fi
 
+# The icon is three things that have to agree: an appiconset, a file it names,
+# and a build setting naming the appiconset. Miss any one and the build is
+# clean, the IPA installs, and the home screen shows a blank square — which
+# reads as a signing problem and is not one.
+echo
+echo "app icon:"
+SET=ios/Acrylius/Assets.xcassets/AppIcon.appiconset
+named=$(grep -oE '"filename"[[:space:]]*:[[:space:]]*"[^"]+"' "$SET/Contents.json" \
+    | head -1 | cut -d'"' -f4)
+setting=$(grep -oE 'ASSETCATALOG_COMPILER_APPICON_NAME:[[:space:]]*[A-Za-z]+' ios/project.yml \
+    | head -1 | awk -F': *' '{print $2}')
+echo "  names        ${named:-nothing}"
+echo "  setting      ${setting:-unset}"
+[ -n "$named" ] && [ -f "$SET/$named" ] || {
+    echo "  the appiconset names a file that is not there"; exit 1
+}
+[ "$setting" = "AppIcon" ] || {
+    echo "  project.yml must set ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon"; exit 1
+}
+
+# An icon with an alpha channel is the classic one: iOS composites it over
+# black, so a transparent corner becomes a black corner and the rounding looks
+# broken. Read the colour type out of the PNG's IHDR rather than requiring an
+# image tool the CI container does not have. 4 and 6 are the two that carry
+# alpha.
+colour=$(od -An -tu1 -j 25 -N 1 "$SET/$named" | tr -d ' ')
+case "$colour" in
+    4|6) echo "  alpha        yes — iOS will composite it over black"; exit 1 ;;
+    *)   echo "  alpha        none" ;;
+esac
+
 echo
 echo "project.yml is valid."
