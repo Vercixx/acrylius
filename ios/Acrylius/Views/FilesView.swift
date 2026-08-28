@@ -93,11 +93,27 @@ private struct IncomingOfferRow: View {
             Text(ByteCountFormatter.string(fromByteCount: Int64(offer.size), countStyle: .file))
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            HStack {
-                TaskButton("Accept") { await model.accept(offer); return true }
-                    .buttonStyle(.borderedProminent)
-                TaskButton("Decline") { await model.decline(offer); return true }
-                    .buttonStyle(.bordered)
+            // Plain buttons, not `TaskButton`s.
+            //
+            // They were `TaskButton`s whose actions returned `true` without
+            // looking, so every tap drew a tick — the exact claim
+            // `TaskButton` documents itself as existing to avoid. Neither
+            // answer is knowable at the moment of the tap: accepting only
+            // submits, and the transfer ends minutes later. What is knowable
+            // is that this phone has agreed, so the row says that instead and
+            // the tick is gone.
+            if model.accepting.contains(offer.transfer) {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Receiving…").font(.callout).foregroundStyle(.secondary)
+                }
+            } else {
+                HStack {
+                    Button("Accept") { Task { await model.accept(offer) } }
+                        .buttonStyle(.borderedProminent)
+                    Button("Decline") { Task { await model.decline(offer) } }
+                        .buttonStyle(.bordered)
+                }
             }
         }
         .padding(.vertical, 4)

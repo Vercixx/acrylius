@@ -249,6 +249,17 @@ _ = catalog.ingest(.plugin(peer: "p", cap: capClipboard(), ty: "set",
                            body: encodeClipboard(text: "hello from the pc")))
 check(catalog["p"].clipboard == "hello from the pc", "a clipboard value is kept")
 
+// The button that fetches a clipboard reports whether an answer came back, and
+// it cannot do that by watching the value: asking twice for the same text is a
+// success both times. So the arrival is what moves, even when nothing else does.
+let firstArrival = catalog["p"].clipboardAt
+check(firstArrival != nil, "an arriving clipboard value is timestamped")
+_ = catalog.ingest(.plugin(peer: "p", cap: capClipboard(), ty: "set",
+                           body: encodeClipboard(text: "hello from the pc")))
+check(
+    catalog["p"].clipboardAt != firstArrival,
+    "the same text arriving again is still an answer, and must not look like silence")
+
 check(!catalog["p"].canWake, "a peer that never offered wake targets cannot be woken")
 
 // --- where the track has got to -----------------------------------------

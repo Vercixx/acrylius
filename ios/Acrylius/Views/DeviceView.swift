@@ -123,7 +123,7 @@ struct DeviceView: View {
             }
 
             Section {
-                TaskButton("Get remote clipboard") { await model.fetchClipboard(peer); return true }
+                TaskButton("Get remote clipboard") { await model.fetchClipboard(peer) }
                 if let value = features.clipboard {
                     Text(value)
                         .font(.callout)

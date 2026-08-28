@@ -414,6 +414,28 @@ pub fn media_command_budget_ms() -> u64 {
     acrylius_core::plugins::media::CONTROL_REPLY_BUDGET_MS
 }
 
+/// How often to re-read a peer's media while watching it play. See
+/// [`acrylius_core::plugins::media::WATCH_INTERVAL_MS`].
+#[uniffi::export]
+#[must_use]
+pub fn media_watch_interval_ms() -> u64 {
+    acrylius_core::plugins::media::WATCH_INTERVAL_MS
+}
+
+/// The same, over a link where a round trip is expensive — Bluetooth.
+#[uniffi::export]
+#[must_use]
+pub fn media_watch_slow_interval_ms() -> u64 {
+    acrylius_core::plugins::media::WATCH_INTERVAL_SLOW_MS
+}
+
+/// How often to re-read while nothing is playing.
+#[uniffi::export]
+#[must_use]
+pub fn media_idle_interval_ms() -> u64 {
+    acrylius_core::plugins::media::IDLE_INTERVAL_MS
+}
+
 /// Whether a reading taken after a command shows the player having acted on it.
 ///
 /// The same rule the desktop waits on, so the two ends cannot disagree about

@@ -23,6 +23,14 @@ public struct PeerFeatures: Equatable, Sendable {
     public var wake: FfiWolConfig?
     /// The last clipboard value this peer handed over.
     public var clipboard: String?
+    /// When that value arrived, by this device's clock.
+    ///
+    /// Kept for the same reason as `mediaAt`, but answering a different
+    /// question: whether a *reply* landed. Asking for the same text twice
+    /// leaves `clipboard` identical both times, so a caller comparing values
+    /// cannot tell a second success from no answer at all — which is exactly
+    /// the mistake the media plugin made before `landed()` existed.
+    public var clipboardAt: Date?
     /// What is playing there. Present once the peer has described its players,
     /// which it does on connect and after every command.
     public var media: FfiMediaState?
@@ -176,6 +184,7 @@ public struct PeerCatalog: Equatable, Sendable {
         } else if cap == capClipboard() {
             if ty == "set", let value = try? decodeClipboard(body: body) {
                 features.clipboard = value.text
+                features.clipboardAt = Date()
                 changed = true
             }
         } else if cap == capMedia() {

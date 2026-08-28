@@ -340,8 +340,26 @@ final class AppModel {
     /// The answer is displayed, not written to this device's pasteboard. Taking
     /// a value the user only asked to look at would be surprising, and it is
     /// what makes two devices fight over a selection.
-    func fetchClipboard(_ peer: FfiPeer) async {
+    /// Returns whether an answer actually came back.
+    ///
+    /// It used to return nothing and the button reported `true` regardless, so
+    /// asking a computer that was not listening drew a tick and then showed the
+    /// value from the last time it worked — which is the worst of the three
+    /// possible outcomes to be confident about.
+    @discardableResult
+    func fetchClipboard(_ peer: FfiPeer) async -> Bool {
+        let before = catalog[peer.deviceId].clipboardAt
         await send(peer, cap: capClipboard(), ty: "get", body: Data())
+        let deadline = ContinuousClock.now.advanced(
+            by: .milliseconds(Int(mediaCommandBudgetMs())))
+        while ContinuousClock.now < deadline {
+            // The arrival time, not the value: fetching the same text twice is
+            // a success both times, so what is being waited for is a *reply*
+            // having landed and not the text having changed.
+            if catalog[peer.deviceId].clipboardAt != before { return true }
+            try? await Task.sleep(for: .milliseconds(120))
+        }
+        return false
     }
 
     /// Push text to the peer.
@@ -410,16 +428,25 @@ final class AppModel {
     }
 
     /// Say yes to a file. This is what makes the phone bind a port and wait.
+    /// Transfers this phone has agreed to and not yet seen the end of.
+    ///
+    /// The row needs it: an accepted offer stays in the list while the bytes
+    /// move, and without this it goes on offering the same two buttons as
+    /// though nothing had been decided.
+    var accepting: Set<UInt64> = []
+
     func accept(_ offer: IncomingOffer) async {
         // Left in the list until the transfer actually ends, so the row does
         // not vanish the instant it is tapped and leave nothing to look at
         // while the bytes move.
+        accepting.insert(offer.transfer)
         await answer(offer, ty: "accept")
         activity = "Receiving \(offer.name)"
     }
 
     func decline(_ offer: IncomingOffer) async {
         incoming.removeAll { $0.transfer == offer.transfer }
+        accepting.remove(offer.transfer)
         await answer(offer, ty: "reject")
         activity = "Declined \(offer.name)"
     }
@@ -560,6 +587,7 @@ final class AppModel {
             if cap == capShare(), ty == "finished" || ty == "reject",
                let end = try? decodeShareFinished(body: body) {
                 incoming.removeAll { $0.transfer == end.transfer }
+                accepting.remove(end.transfer)
                 let name = sending.removeValue(forKey: end.transfer) ?? "the file"
                 if ty == "reject" {
                     activity = "\(name) was refused"
