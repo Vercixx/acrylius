@@ -1683,7 +1683,10 @@ fn a_peer_that_could_not_be_reached_records_why_without_announcing_it() {
 fn reaching_a_peer_forgets_what_went_wrong_before() {
     let (mut net, _a_id, b_id) = paired();
     discover_via(&mut net, Side::A, Side::B, TRANSPORT, "nowhere");
-    assert!(net.a.dial_trouble(&b_id).is_some(), "the failure is recorded");
+    assert!(
+        net.a.dial_trouble(&b_id).is_some(),
+        "the failure is recorded"
+    );
 
     // And now it turns up somewhere that answers.
     discover(&mut net, Side::A, Side::B);
