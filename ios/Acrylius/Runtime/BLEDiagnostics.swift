@@ -96,7 +96,13 @@ public final class BLEDiagnostics {
     /// it and the screen that offers the button — and a literal in both is a
     /// rename waiting to go wrong silently, since the only symptom would be a
     /// button that never appears.
-    public static let waitingForPermission = "waiting for permission"
+    /// `nonisolated` because the transport reads it, and the transport is not
+    /// on the main actor — it answers CoreBluetooth on its own queue. An
+    /// immutable `String` is Sendable, so there is nothing to protect; without
+    /// this the constant is main-actor isolated purely by living on an
+    /// `@Observable @MainActor` class, and the only compiler that would ever
+    /// say so is the macOS one.
+    public nonisolated static let waitingForPermission = "waiting for permission"
 
     /// Bluetooth is unusable and asking would still fix it.
     ///
