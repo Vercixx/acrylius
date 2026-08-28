@@ -657,13 +657,24 @@ final class AppModel {
             // knows whether it kept the file.
             if cap == capShare(), ty == "finished" || ty == "reject",
                let end = try? decodeShareFinished(body: body) {
+                // Which way this file was going, decided before either record
+                // is torn down. `sending` holds only what this phone offered,
+                // so a transfer missing from it came the other way — and an
+                // accepted offer stays in `incoming` while the bytes move,
+                // which is what makes its name available here.
+                //
+                // Read off `sending` alone, every ending read as a send: a file
+                // arriving on the phone finished as "Sent the file", naming
+                // neither the direction nor the file.
+                let offered = incoming.first { $0.transfer == end.transfer }?.name
                 incoming.removeAll { $0.transfer == end.transfer }
                 accepting.remove(end.transfer)
-                let name = sending.removeValue(forKey: end.transfer) ?? "the file"
+                let sent = sending.removeValue(forKey: end.transfer)
+                let name = sent ?? offered ?? "the file"
                 if ty == "reject" {
                     activity = "\(name) was refused"
                 } else if end.ok {
-                    activity = "Sent \(name)"
+                    activity = sent == nil ? "Saved \(name)" : "Sent \(name)"
                 } else {
                     activity = "\(name) failed"
                     lastError = end.detail.isEmpty ? nil : end.detail
