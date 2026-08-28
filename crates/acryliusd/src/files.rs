@@ -115,12 +115,27 @@ impl FileBulk {
             .map(|(_, o)| o.clone())
     }
 
-    /// Who offered a transfer, so an answer can be sent back to them.
-    pub fn peer_for(&self, transfer: u64) -> Option<String> {
+    /// The transfer a person meant, from the number they typed.
+    ///
+    /// An offer is listed under `TransferId::short`, so what comes back is
+    /// usually not the id this map is keyed by. Matched against the offers
+    /// actually waiting rather than by reconstructing one, so a number naming
+    /// nothing is refused rather than turned into something else.
+    pub fn resolve(&self, typed: u64) -> Option<TransferId> {
         self.offers
             .lock()
             .expect("bulk map poisoned")
-            .get(&TransferId(transfer))
+            .keys()
+            .find(|id| id.written_as(typed))
+            .copied()
+    }
+
+    /// Who offered a transfer, so an answer can be sent back to them.
+    pub fn peer_for(&self, transfer: TransferId) -> Option<String> {
+        self.offers
+            .lock()
+            .expect("bulk map poisoned")
+            .get(&transfer)
             .map(|(peer, _)| peer.clone())
     }
 
@@ -386,6 +401,36 @@ mod tests {
             perms.set_mode(0o755);
         }
         let _ = std::fs::set_permissions(b.dir(), perms);
+        let _ = std::fs::remove_dir_all(b.dir());
+    }
+
+    #[tokio::test]
+    async fn an_offer_is_answered_by_the_number_a_person_was_shown() {
+        // Listed short and typed back short. The marker saying which half of
+        // the range an id came from is not information anyone needs, and with
+        // it an offer is nineteen digits to retype off a screen.
+        let b = bulk_in("acr-files-f");
+        let id = TransferId(acrylius_core::vocab::MINTED_HERE | 3);
+        b.note_offer(
+            "peer",
+            Offer {
+                transfer: id.0,
+                name: "photo.bin".to_string(),
+                size: 4,
+                mime: String::new(),
+            },
+        );
+        assert_eq!(b.resolve(id.short()), Some(id), "the number as shown");
+        assert_eq!(
+            b.resolve(id.0),
+            Some(id),
+            "and the full one, which a script may have captured"
+        );
+        assert_eq!(
+            b.resolve(4242),
+            None,
+            "a number naming nothing is refused, not invented into one"
+        );
         let _ = std::fs::remove_dir_all(b.dir());
     }
 

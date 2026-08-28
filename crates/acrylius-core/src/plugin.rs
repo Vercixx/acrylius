@@ -119,10 +119,6 @@ pub struct Cx {
     peer_bulk: Option<crate::link::BulkSupport>,
 }
 
-/// The half of the transfer-id range the core mints from, leaving the rest to
-/// hosts that number their own. See [`Cx::new_transfer`].
-const MINTED_HERE: u64 = 1 << 63;
-
 /// A plugin asking for a side channel.
 ///
 /// It names a peer and a transfer and nothing else. The key is the core's to
@@ -297,7 +293,7 @@ impl Cx {
     /// worth on its own.
     pub fn new_transfer(&mut self) -> crate::vocab::TransferId {
         self.next_transfer += 1;
-        crate::vocab::TransferId(MINTED_HERE | self.next_transfer)
+        crate::vocab::TransferId(crate::vocab::MINTED_HERE | self.next_transfer)
     }
 
     pub fn ui(&mut self, e: UiEvent) {

@@ -51,6 +51,37 @@ pub struct EffectToken(pub u64);
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct TransferId(pub u64);
 
+/// The half of the range the core mints from, leaving the rest to hosts that
+/// number their own sends. See [`crate::plugin::Cx::new_transfer`].
+pub const MINTED_HERE: u64 = 1 << 63;
+
+impl TransferId {
+    /// The number to show a person, and the one they will type back.
+    ///
+    /// [`MINTED_HERE`] is there so an id minted by the core cannot collide with
+    /// one a host numbered itself, which matters because a transfer is keyed by
+    /// this alone — a collision cancels the wrong one. It is also nineteen
+    /// digits, and `acryliusctl accept` is a number a person reads off a screen
+    /// and retypes. Which half of the range an id came from is not something
+    /// they need to know, so it is not shown.
+    #[must_use]
+    pub fn short(self) -> u64 {
+        self.0 & !MINTED_HERE
+    }
+
+    /// Whether `typed` is a way of writing this id.
+    ///
+    /// Both forms: a script that captured the full one keeps working, and a
+    /// person reading the short one is understood. Matched against the
+    /// transfers actually waiting rather than by putting the marker back
+    /// blindly, so a number that names nothing is refused instead of quietly
+    /// becoming something else.
+    #[must_use]
+    pub fn written_as(self, typed: u64) -> bool {
+        typed == self.0 || typed == self.short()
+    }
+}
+
 /// Correlates an [`Action::Dial`] with the link it eventually produces.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct DialToken(pub u64);
