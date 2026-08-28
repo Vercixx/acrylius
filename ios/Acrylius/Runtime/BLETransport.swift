@@ -159,8 +159,8 @@ public final class BLETransport: NSObject, Transport, @unchecked Sendable {
             // Refusing here is the whole reason there is no prompt at launch: a
             // permission dialog with nothing on screen to explain it is one
             // people decline, and declining is undone only in Settings.
-            push(.state("waiting for permission", auth: Self.authorizationName()))
-            push(.note("not permitted yet; open the Bluetooth screen to allow"))
+            push(.state(BLEDiagnostics.waitingForPermission, auth: Self.authorizationName()))
+            push(.note("not permitted yet; the Devices screen offers the button that asks"))
             return
         }
         startManager()

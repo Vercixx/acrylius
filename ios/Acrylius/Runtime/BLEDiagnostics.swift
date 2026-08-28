@@ -88,6 +88,22 @@ public final class BLEDiagnostics {
     /// `CBManagerAuthorization`. Separate from the state because a user who
     /// denied the prompt can only fix it in Settings, and nothing else will.
     public var authorization: String = "unknown"
+
+    /// What the transport reports when it refused to build a
+    /// `CBCentralManager` because nobody has allowed Bluetooth yet.
+    ///
+    /// Spelled once. Two places compare against it — the transport that pushes
+    /// it and the screen that offers the button — and a literal in both is a
+    /// rename waiting to go wrong silently, since the only symptom would be a
+    /// button that never appears.
+    public static let waitingForPermission = "waiting for permission"
+
+    /// Bluetooth is unusable and asking would still fix it.
+    ///
+    /// Not the same as a refusal: that shows in `authorization` and is undone
+    /// only in Settings. This is the state where a button still means
+    /// something.
+    public var awaitingPermission: Bool { managerState == Self.waitingForPermission }
     public var scanning: Bool = false
     public var sightings: [BLESighting] = []
     /// Whether a link is up, and to whom.

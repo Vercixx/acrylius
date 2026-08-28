@@ -6,7 +6,7 @@ struct AcryliusApp: App {
 
     var body: some Scene {
         WindowGroup {
-            DeviceListView()
+            RootView()
                 .environment(model)
                 .task { await model.start() }
         }

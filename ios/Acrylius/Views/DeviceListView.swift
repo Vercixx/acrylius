@@ -5,38 +5,28 @@ import SwiftUI
 import UIKit
 #endif
 
+/// The computers this phone is paired with.
+///
+/// It owns nothing but the list now. Offers moved to Files and this phone's own
+/// details moved to Status, which leaves one screen answering one question.
 struct DeviceListView: View {
     @Environment(AppModel.self) private var model
-    @State private var showPair = false
-    /// Device ids. A path rather than plain links so a widget tap can push a
-    /// computer's screen without the user finding it in the list.
-    @State private var path: [String] = []
+    @Binding var path: [String]
+    @Binding var showPair: Bool
 
     var body: some View {
         NavigationStack(path: $path) {
             List {
-                // First, because it is the only thing here waiting on you. A
-                // transfer holds the sending computer open until it is answered.
-                if !model.incoming.isEmpty {
+                if model.peers.isEmpty {
                     Section {
-                        ForEach(model.incoming) { offer in
-                            IncomingOfferRow(offer: offer)
-                        }
-                    } header: {
-                        Text("Offered to this \(UIDevice.current.model)")
-                    } footer: {
-                        Text("Accepted files go to Acrylius in the Files app.")
-                    }
-                }
-
-                Section {
-                    if model.peers.isEmpty {
                         ContentUnavailableView(
                             "No devices",
                             systemImage: "desktopcomputer",
                             description: Text("Tap ＋ to get started.")
                         )
-                    } else {
+                    }
+                } else {
+                    Section {
                         ForEach(model.peers, id: \.deviceId) { peer in
                             NavigationLink(value: peer.deviceId) {
                                 PeerRow(peer: peer)
@@ -45,21 +35,26 @@ struct DeviceListView: View {
                     }
                 }
 
-                Section("This \(UIDevice.current.model)") {
-                    NavigationLink {
-                        DeviceInfoView()
-                    } label: {
-                        LabeledContent("Status", value: model.status)
-                    }
-                }
-
-                if let error = model.lastError {
+                // Bluetooth is asked for here rather than on a debug screen.
+                //
+                // `CBCentralManager` prompts the moment it is built, so the
+                // prompt has always been behind a tap. It used to be behind the
+                // Bluetooth diagnostics screen — which was fine while that
+                // screen was one tap from the root, and is not now that it is
+                // three taps into Status › Debug. A phone that is never granted
+                // Bluetooth simply stops working when Wi-Fi goes away, with
+                // nothing anywhere saying why.
+                if model.ble.awaitingPermission {
                     Section {
-                        Text(error).foregroundStyle(.secondary).font(.footnote)
+                        Button("Turn on Bluetooth", systemImage: "dot.radiowaves.left.and.right") {
+                            model.startBluetooth()
+                        }
+                    } footer: {
+                        Text("Lets this \(UIDevice.current.model) reach a computer when Wi-Fi is not available.")
                     }
                 }
             }
-            .navigationTitle("Acrylius")
+            .navigationTitle("Devices")
             .navigationDestination(for: String.self) { deviceId in
                 if let peer = model.peers.first(where: { $0.deviceId == deviceId }) {
                     DeviceView(peer: peer)
@@ -75,38 +70,7 @@ struct DeviceListView: View {
             .toolbar {
                 Button("Pair", systemImage: "plus") { showPair = true }
             }
-            .sheet(isPresented: $showPair) { PairView() }
-            .sheet(isPresented: .constant(model.pairingSas != nil)) { ConfirmPairingView() }
         }
-        .onOpenURL { url in
-            // acrylius://peer/<device-id>, which is what a widget carries.
-            guard url.scheme == "acrylius", url.host == "peer" else { return }
-            let deviceId = url.lastPathComponent
-            guard !deviceId.isEmpty else { return }
-            path = [deviceId]
-        }
-    }
-}
-
-/// One file a computer wants to send, and the two answers to it.
-private struct IncomingOfferRow: View {
-    @Environment(AppModel.self) private var model
-    let offer: AppModel.IncomingOffer
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(offer.name).font(.body)
-            Text(ByteCountFormatter.string(fromByteCount: Int64(offer.size), countStyle: .file))
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            HStack {
-                TaskButton("Accept") { await model.accept(offer); return true }
-                    .buttonStyle(.borderedProminent)
-                TaskButton("Decline") { await model.decline(offer); return true }
-                    .buttonStyle(.bordered)
-            }
-        }
-        .padding(.vertical, 4)
     }
 }
 
@@ -118,14 +82,22 @@ private struct PeerRow: View {
 
     var body: some View {
         HStack {
-            VStack(alignment: .leading) {
+            VStack(alignment: .leading, spacing: 2) {
                 Text(peer.name)
                 Text(summary).font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
-            Circle()
-                .fill(peer.reachable ? .green : .secondary)
-                .frame(width: 8, height: 8)
+            // Three states, not two. A peer part way through a handshake used
+            // to show the same grey dot as one that had given up, which is how
+            // a connection that was working perfectly well read as broken.
+            switch peer.state {
+            case .reachable:
+                Circle().fill(.green).frame(width: 8, height: 8)
+            case .connecting:
+                ProgressView().controlSize(.small)
+            case .unreachable:
+                Circle().fill(.secondary).frame(width: 8, height: 8)
+            }
         }
         .swipeActions {
             Button("Forget", role: .destructive) { confirmingForget = true }
@@ -145,13 +117,18 @@ private struct PeerRow: View {
     /// What this peer can do, from what it announced.
     private var summary: String {
         let features = model.catalog[peer.deviceId]
-        if !peer.reachable {
-            return features.canWake ? "Asleep or away, can be woken" : "Not connected"
+        switch peer.state {
+        case .connecting:
+            return "Connecting…"
+        case .unreachable:
+            if features.canWake { return "Asleep or away, can be woken" }
+            return "Not connected"
+        case .reachable:
+            var parts: [String] = []
+            if let session = features.session { parts.append(session.locked ? "Locked" : "Unlocked") }
+            if features.canRunCommands { parts.append("\(features.commands.count) commands") }
+            return parts.isEmpty ? peer.platform : parts.joined(separator: " · ")
         }
-        var parts: [String] = []
-        if let session = features.session { parts.append(session.locked ? "Locked" : "Unlocked") }
-        if features.canRunCommands { parts.append("\(features.commands.count) commands") }
-        return parts.isEmpty ? peer.platform : parts.joined(separator: " · ")
     }
 }
 

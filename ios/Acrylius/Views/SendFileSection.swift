@@ -89,7 +89,7 @@ struct SendFileSection: View {
                 }
             }
         } header: {
-            Text("Files")
+            Text("Send")
         }
         .fileImporter(isPresented: $browsing, allowedContentTypes: [.item]) { result in
             guard case let .success(url) = result else { return }

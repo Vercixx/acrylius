@@ -34,8 +34,57 @@ final class AppModel {
     var pairingPeerName: String?
     var pairingPeerFingerprint: String?
     var pairingCode: String?
-    var status: String = "starting"
-    var lastError: String?
+    /// What the app as a whole is doing.
+    ///
+    /// Not per-peer — that is `FfiPeer.state`, and conflating the two is what
+    /// this replaced. The old `status` was a free-form string written from a
+    /// dozen places, so "Receiving holiday.jpg" overwrote "connected to
+    /// desktop" in the one row that displayed either, and neither could be
+    /// tested for.
+    var status: AppStatus = .starting
+
+    /// The last thing that happened worth a line, and nothing a screen should
+    /// reason from. Transfers and one-shot actions land here.
+    var activity: String?
+
+    /// Something went wrong and the person should know.
+    ///
+    /// Stamped on write so it can expire. Nothing used to clear this: an error
+    /// from ten minutes ago sat at the bottom of a list as a grey footnote,
+    /// indistinguishable from one that had just happened.
+    var lastError: String? {
+        didSet { lastErrorAt = lastError == nil ? nil : Date() }
+    }
+
+    private(set) var lastErrorAt: Date?
+
+    /// How long an unacknowledged error stays on screen. Long enough to read a
+    /// sentence twice, short enough that it is gone before it starts lying
+    /// about the present.
+    static let errorLifetime: TimeInterval = 30
+
+    func dismissError() {
+        lastError = nil
+    }
+
+    /// What the app itself is doing. Deliberately small: anything that varies
+    /// per peer belongs on the peer.
+    enum AppStatus: Equatable {
+        case starting
+        case failedToStart
+        /// Running, with nothing paired yet.
+        case noDevices
+        case ready
+
+        var text: String {
+            switch self {
+            case .starting: "Starting…"
+            case .failedToStart: "Could not start"
+            case .noDevices: "No devices paired"
+            case .ready: "Ready"
+            }
+        }
+    }
     /// Files offered but not yet finished, by transfer id, so a screen can say
     /// what is in flight rather than going quiet between the tap and the reply.
     var sending: [UInt64: String] = [:]
@@ -128,9 +177,9 @@ final class AppModel {
             capsIn = await rt.capsIn()
             capsOut = await rt.capsOut()
             capsServed = await rt.capsServed()
-            status = peers.isEmpty ? "not paired" : "ready"
+            status = peers.isEmpty ? .noDevices : .ready
         } catch {
-            status = "failed to start"
+            status = .failedToStart
             lastError = String(describing: error)
         }
     }
@@ -147,9 +196,11 @@ final class AppModel {
         pairingSas = nil
     }
 
-    func connect(_ peer: FfiPeer) async {
-        await runtime?.submit(.connect(peer: peer.deviceId))
-    }
+    // No `connect(_:)`. Nothing in the app asks any more: the core dials the
+    // moment discovery names a paired device, and a second request while a
+    // dial is outstanding is dropped anyway. The App Intent still submits
+    // `.connect` directly, which is right — that one *is* a person asking, and
+    // it is the remaining caller that wants to be told when it fails.
 
     func ping(_ peer: FfiPeer) async {
         await send(peer, cap: capPing(), ty: "ping", body: Data("hello".utf8))
@@ -307,7 +358,7 @@ final class AppModel {
         // because reading the pasteboard here raises a system alert. A person
         // pressing Paste is not that, and was silently discarded by it.
         await send(peer, cap: capClipboard(), ty: "push", body: Data(text.utf8))
-        status = "Sent to \(peer.name)"
+        activity = "Sent to \(peer.name)"
         return true
     }
 
@@ -355,7 +406,7 @@ final class AppModel {
         sending[offer.transfer] = offer.name
         await send(peer, cap: capShare(), ty: "offer",
                    body: encodeShareOffer(offer: offer))
-        status = "Offered \(offer.name)"
+        activity = "Offered \(offer.name)"
     }
 
     /// Say yes to a file. This is what makes the phone bind a port and wait.
@@ -364,13 +415,13 @@ final class AppModel {
         // not vanish the instant it is tapped and leave nothing to look at
         // while the bytes move.
         await answer(offer, ty: "accept")
-        status = "Receiving \(offer.name)"
+        activity = "Receiving \(offer.name)"
     }
 
     func decline(_ offer: IncomingOffer) async {
         incoming.removeAll { $0.transfer == offer.transfer }
         await answer(offer, ty: "reject")
-        status = "Declined \(offer.name)"
+        activity = "Declined \(offer.name)"
     }
 
     /// An answer to an offer is the transfer's id and nothing more; the plugin
@@ -462,26 +513,29 @@ final class AppModel {
         case let .pairingComplete(_, name):
             pairingSas = nil
             pairingCode = nil
-            status = "paired with \(name)"
+            status = .ready
+            activity = "Paired with \(name)"
             Task { await refresh() }
         case let .pairingFailed(reason):
             pairingSas = nil
             pairingCode = nil
             lastError = reason
         case let .peerReachable(peer, name):
-            status = "connected to \(name)"
+            activity = "Connected to \(name)"
             Task {
                 await refresh()
                 await reacquaint(with: peer)
             }
         case .peerUnreachable:
-            status = "not connected"
+            // Nothing said here on purpose. Which peer went is already in
+            // `peers`, and why it went is `FfiPeer.trouble` — read by the row
+            // that draws it, so a peer dropping does not overwrite a line about
+            // some other peer.
             Task { await refresh() }
         // The peer is bound now: answering an offer means naming who made it,
         // and until this phone could receive a file there was nothing here that
         // needed to know.
         case let .plugin(peer, cap, ty, body):
-            if ty == "pong" { status = "pong" }
             // A computer wants to send this phone something. Recorded in two
             // places at once: the inbox settles where it would land, so a name
             // collision is resolved before anyone agrees to anything, and the
@@ -498,7 +552,7 @@ final class AppModel {
                 incoming.append(IncomingOffer(
                     transfer: offer.transfer, peer: peer,
                     name: bulkSafeName(offered: offer.name), size: offer.size))
-                status = "\(offer.name) offered"
+                activity = "\(offer.name) offered"
             }
             // Both ends report a transfer, because each knows only its own
             // half: this phone knows it finished writing, and only the computer
@@ -508,11 +562,11 @@ final class AppModel {
                 incoming.removeAll { $0.transfer == end.transfer }
                 let name = sending.removeValue(forKey: end.transfer) ?? "the file"
                 if ty == "reject" {
-                    status = "\(name) was refused"
+                    activity = "\(name) was refused"
                 } else if end.ok {
-                    status = "Sent \(name)"
+                    activity = "Sent \(name)"
                 } else {
-                    status = "\(name) failed"
+                    activity = "\(name) failed"
                     lastError = end.detail.isEmpty ? nil : end.detail
                 }
             }
@@ -526,7 +580,7 @@ final class AppModel {
                 #if canImport(UIKit)
                 UIPasteboard.general.string = value.text
                 #endif
-                status = "Copied to this phone"
+                activity = "Copied to this phone"
             }
         case let .error(code, detail):
             // Local Network permission is the failure users actually hit, and

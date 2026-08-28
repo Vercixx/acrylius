@@ -35,8 +35,28 @@ struct DeviceView: View {
 
     var body: some View {
         List {
+            // There is no Connect button.
+            //
+            // There never really was one: the core dials the moment discovery
+            // names a paired device, so pressing it repeated what had already
+            // happened. Worse, its action returned `true` without looking, so
+            // it went green whether or not a session opened — and a failed dial
+            // emits nothing, so the honest report was a tick followed by
+            // silence. What replaces it is saying what is actually going on.
             Section {
-                LabeledContent("Status", value: peer.reachable ? "Connected" : "Not connected")
+                switch peer.state {
+                case .reachable:
+                    LabeledContent("Status", value: "Connected")
+                case .connecting:
+                    LabeledContent("Status") {
+                        HStack(spacing: 6) {
+                            ProgressView().controlSize(.small)
+                            Text("Connecting…").foregroundStyle(.secondary)
+                        }
+                    }
+                case .unreachable:
+                    LabeledContent("Status", value: "Not connected")
+                }
                 // Which radio is carrying this. A second transport is only
                 // useful if it takes over quietly, and something that takes
                 // over quietly is indistinguishable from something broken
@@ -44,8 +64,13 @@ struct DeviceView: View {
                 if let over = Self.carrying(peer.transport) {
                     LabeledContent("Over", value: over)
                 }
-                if !peer.reachable {
-                    TaskButton("Connect") { await model.connect(peer); return true }
+            } footer: {
+                // Only once every route has been spent. A peer still being
+                // dialled has nothing to explain yet, and saying so while it
+                // came up normally is the flicker this whole arrangement
+                // exists to avoid.
+                if peer.state == .unreachable, let trouble = peer.trouble {
+                    Text(trouble)
                 }
             }
 
@@ -63,11 +88,10 @@ struct DeviceView: View {
 
             MediaSection(peer: peer)
 
-            // Only while there is a session. An offer travels over it, and a
-            // picker that leads to "unreachable" is worse than no picker.
-            if peer.reachable {
-                SendFileSection(peer: peer)
-            }
+            // Sending lives on the Files tab now, with the offers arriving the
+            // other way. Two halves of one thing, and only one of them could
+            // ever be here: an incoming offer is not about any particular
+            // computer's screen.
 
             // Whenever this phone is not talking to the computer, which is
             // exactly when waking it means something — and it must not depend
