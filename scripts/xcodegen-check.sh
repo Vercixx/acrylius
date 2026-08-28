@@ -17,34 +17,15 @@ set -euo pipefail
 export LOGNAME="${LOGNAME:-${USER:-builder}}"
 export USER="${USER:-$LOGNAME}"
 
-VERSION=${XCODEGEN_VERSION:-2.44.1}
-# The commit that tag pointed at when it was pinned. See the check below.
-COMMIT=${XCODEGEN_COMMIT:-21ac9944b0ab546a07422dbed86f33dd2ebd76f8}
-CACHE=${XCODEGEN_CACHE:-target/xcodegen}
-BIN="$CACHE/.build/release/xcodegen"
-
-if [ ! -x "$BIN" ]; then
-    echo "building XcodeGen $VERSION (once)…"
-    rm -rf "$CACHE"
-    git clone --depth 1 --branch "$VERSION" https://github.com/yonaskolb/XcodeGen.git "$CACHE"
-    # A tag is a name somebody else can repoint, and this clone is built and run
-    # on every push and every pull request. Checking the commit it resolved to
-    # is what makes the version above mean one particular tree.
-    got="$(cd "$CACHE" && git rev-parse HEAD)"
-    if [ "$got" != "$COMMIT" ]; then
-        echo "XcodeGen $VERSION is $got, expected $COMMIT" >&2
-        echo "If the bump is deliberate, update XCODEGEN_COMMIT in this script." >&2
-        rm -rf "$CACHE"
-        exit 1
-    fi
-    (cd "$CACHE" && swift build -c release)
-fi
+# The pin lives in one place, because the macOS job generates the project it
+# builds with the same one. See scripts/xcodegen-bin.sh.
+BIN="$("$(dirname "$0")/xcodegen-bin.sh")"
 
 # The manifest names the generated bindings; stand in for them so the path check
 # passes without having to run the whole Rust build first.
 mkdir -p ios/Generated && touch ios/Generated/acrylius_ffi.swift
 
-"$PWD/$BIN" generate --spec ios/project.yml --project ios
+"$BIN" generate --spec ios/project.yml --project ios
 echo
 echo "sources picked up:"
 # `sourcecode.swift` is a lastKnownFileType attribute, not a file.

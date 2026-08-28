@@ -1,8 +1,15 @@
 # Builds an unsigned IPA for SideStore to sign on-device with a free Apple ID.
 #
-# On demand and on tags only: macOS runners bill at a 10x multiplier on private
-# repositories. The image is pinned rather than `macos-latest`, so an Xcode bump
-# is a deliberate choice and not a surprise failure.
+# On demand and on tags only. This repository is public, so the minutes are free
+# — but a macOS job is minutes of somebody else's hardware, and a run triggered
+# on every push would be asking to be taken for abuse. Batch the work and
+# dispatch a stage at a time.
+#
+# Both the image and the Xcode inside it are pinned rather than `macos-latest`
+# and a bare `Xcode.app`, so a toolchain bump is a deliberate choice and not a
+# surprise failure. The image carries seven Xcode 26.x versions; naming one is
+# what stops a default change from silently recompiling the app with a different
+# Swift.
 name: ios-ipa
 
 on:
@@ -10,17 +17,25 @@ on:
   push:
     tags: ["v*"]
 
+env:
+  # Outside target/, which Swatinem/rust-cache prunes as its own.
+  XCODEGEN_CACHE: ${{ github.workspace }}/.xcodegen
+
 jobs:
   ipa:
-    runs-on: macos-15
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
 
       - name: Select Xcode
         run: |
-          sudo xcode-select -s /Applications/Xcode.app
+          sudo xcode-select -s /Applications/Xcode_26.6.app
           xcodebuild -version
           swift --version
+          # The iOS 26 SDK is what makes the standard controls adopt Liquid
+          # Glass. Say which one built this, so a report about how the app looks
+          # can be tied to a toolchain.
+          xcodebuild -showsdks | grep -i "iphoneos"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -41,10 +56,25 @@ jobs:
           mv ios/Generated/acrylius_ffiFFI.modulemap ios/Generated/module.modulemap
           ls -la ios/Generated
 
+      # Keyed on the pinned commit, so a deliberate XcodeGen bump misses the
+      # cache and rebuilds, and nothing else does.
+      - name: Cache XcodeGen
+        uses: actions/cache@v4
+        with:
+          # Spelled out rather than ${{ env.XCODEGEN_CACHE }}: it must agree
+          # with the env above, and `with:` is the one place a context is worth
+          # not relying on.
+          path: ${{ github.workspace }}/.xcodegen
+          key: xcodegen-${{ runner.os }}-21ac9944b0ab546a07422dbed86f33dd2ebd76f8
+
       - name: Generate the Xcode project
         run: |
-          brew install xcodegen
-          cd ios && xcodegen generate
+          # The same pinned generator scripts/xcodegen-check.sh validates with.
+          # `brew install xcodegen` used to stand here, which is not a version:
+          # it is whatever bottle this image happens to carry.
+          xcodegen="$(./scripts/xcodegen-bin.sh)"
+          "$xcodegen" --version
+          cd ios && "$xcodegen" generate
 
       - name: Show what the project offers
         run: xcodebuild -project ios/Acrylius.xcodeproj -list

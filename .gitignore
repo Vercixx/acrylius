@@ -14,7 +14,11 @@
 
 # UniFFI output, produced by the build.
 /ios/Generated
+
+# Pinned XcodeGen, built once by scripts/xcodegen-bin.sh. The macOS job puts it
+# outside target/, which Swatinem/rust-cache prunes as its own.
 /target/xcodegen
+/.xcodegen
 
 # cargo-mutants output. Regenerated on every run, and its lock.json records the
 # hostname and username of whoever ran it.
