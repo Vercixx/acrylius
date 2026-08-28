@@ -589,6 +589,218 @@ fn losing_one_of_two_routes_does_not_report_the_device_as_gone() {
     assert_eq!(net.a.peer_state(&b_id), PeerState::Reachable);
 }
 
+/// Switch Wi-Fi off on one side only, which is the only way it ever happens.
+///
+/// `lose_link` tells both ends at once, and that is the one thing losing an
+/// interface never does. The phone's socket dies with the interface and it knows
+/// immediately; this end keeps an ESTABLISHED socket to a peer that has simply
+/// stopped answering, and goes on believing in it until a keepalive says
+/// otherwise — twenty seconds later. So the wire is cut for both — sends into it
+/// vanish, the way a dead socket swallows them — and only `noticed_by` is told.
+fn wifi_goes_off(net: &mut Net, transport: TransportId, noticed_by: Side) {
+    let dead: Vec<(Side, u64)> = net
+        .links
+        .iter()
+        .filter(|(_, t, _)| *t == transport)
+        .map(|(s, _, l)| (*s, *l))
+        .collect();
+    assert!(!dead.is_empty(), "no link on {transport:?} to lose");
+    for (side, link) in &dead {
+        net.peer_link.remove(&(*side, *link));
+    }
+    net.links
+        .retain(|(s, t, _)| *t != transport || *s != noticed_by);
+    for (side, link) in dead {
+        if side == noticed_by {
+            net.queue.push_back((
+                side,
+                Event::LinkDown {
+                    link: LinkId(link),
+                    reason: LinkDownReason::Transport("the interface went away".to_string()),
+                },
+            ));
+        }
+    }
+    net.run();
+}
+
+/// Both routes up at once, which is what a phone beside a desktop always has.
+///
+/// It finds the radio before mDNS resolves anything, so Bluetooth comes up first
+/// and Wi-Fi is dialled alongside it. Reproduced in that order because the order
+/// is what decides which link is older, and the old routing rule cared.
+fn both_routes_up(net: &mut Net) {
+    discover_via(net, Side::A, Side::B, TRANSPORT, "not-listening");
+    discover_via(net, Side::A, Side::B, SLOWER, "B");
+    // A second session to one peer needs a strictly later opener timestamp than
+    // the last one seen, or it is indistinguishable from a replay of it.
+    net.wall += 1_000;
+    discover_via(net, Side::A, Side::B, TRANSPORT, "B");
+}
+
+#[test]
+fn the_route_a_peer_is_actually_using_is_the_one_it_is_answered_over() {
+    // The takeover, as the journal finally showed it happening. Bluetooth is
+    // already up when Wi-Fi dies, so nothing is dialled and no session is opened
+    // — this end is told nothing at all, and the only news it gets is that the
+    // questions have started arriving the other way.
+    //
+    // Preferring the better transport regardless meant answering into the dead
+    // socket until the keepalive expired. Reported from the phone as a
+    // now-playing timeline that runs on by itself and then corrects ten or
+    // twenty seconds later, which is that timer and nothing else.
+    let (mut net, a_id, b_id) = paired();
+    net.ble_transport = Some(SLOWER);
+    both_routes_up(&mut net);
+    assert_eq!(
+        net.b.transport_for(&a_id),
+        Some(TransportKind::UnixLoopback),
+        "both up, and the better one carries while both are proven"
+    );
+
+    wifi_goes_off(&mut net, TRANSPORT, Side::A);
+    assert_eq!(
+        net.b.transport_for(&a_id),
+        Some(TransportKind::UnixLoopback),
+        "the premise: this end has heard nothing and cannot yet know"
+    );
+
+    // Time passes, as it does between a handshake and the next poll. The
+    // harness's clock stands still unless a test moves it, and two links that
+    // last spoke in the same millisecond are equally proven — which is a tie,
+    // and a tie is what transport preference is for.
+    net.now += 2_000;
+
+    // What a now-playing screen does every two seconds. The question arrives the
+    // worse way, which is the peer saying that is where it lives now.
+    net.ui.clear();
+    net.local(
+        Side::A,
+        LocalCommand::Plugin {
+            peer: b_id,
+            cap: ping::CAP.to_string(),
+            ty: "ping".to_string(),
+            body: b"are-you-there".to_vec(),
+        },
+    );
+    assert!(
+        net.saw(Side::A, |e| {
+            matches!(e, UiEvent::Plugin { ty, body, .. }
+                if ty == "pong" && body == b"are-you-there")
+        }),
+        "the question arrived and the answer went into the dead socket"
+    );
+    assert_eq!(
+        net.b.transport_for(&a_id),
+        Some(TransportKind::BleGatt),
+        "and the screen names the route that is carrying"
+    );
+}
+
+#[test]
+fn a_route_that_is_merely_out_of_favour_is_never_torn_down() {
+    // The guard on the test above, and on the mistake made reaching it. An
+    // earlier attempt read the same evidence and *closed* the route it judged
+    // dead — which throws away a working Wi-Fi link whenever one stray Bluetooth
+    // frame lands in the moment between this end completing a handshake and the
+    // other end finishing it.
+    //
+    // Choosing wrong has to cost one message the slower way and nothing more, so
+    // that the route is still there the instant the peer uses it again.
+    let (mut net, a_id, b_id) = paired();
+    net.ble_transport = Some(SLOWER);
+    both_routes_up(&mut net);
+
+    // Both alive. The peer says something over the worse one anyway.
+    net.now += 1_000;
+    net.local(
+        Side::A,
+        LocalCommand::Plugin {
+            peer: b_id.clone(),
+            cap: ping::CAP.to_string(),
+            ty: "ping".to_string(),
+            body: b"over-bluetooth".to_vec(),
+        },
+    );
+
+    // Nothing was closed: Wi-Fi is still there, and one word over it is enough
+    // to have it carrying again.
+    net.now += 1_000;
+    net.local(
+        Side::B,
+        LocalCommand::Plugin {
+            peer: a_id.clone(),
+            cap: ping::CAP.to_string(),
+            ty: "ping".to_string(),
+            body: b"over-wifi".to_vec(),
+        },
+    );
+    assert!(
+        net.saw(Side::B, |e| {
+            matches!(e, UiEvent::Plugin { ty, body, .. }
+                if ty == "pong" && body == b"over-wifi")
+        }),
+        "the answer did not come back at all"
+    );
+    assert_eq!(
+        net.b.transport_for(&a_id),
+        Some(TransportKind::UnixLoopback),
+        "the peer answered over Wi-Fi, so Wi-Fi is proven again and carries"
+    );
+    assert_eq!(net.a.peer_state(&b_id), PeerState::Reachable);
+}
+
+#[test]
+fn a_peer_that_reconnects_is_not_answered_over_the_socket_it_abandoned() {
+    // Straight from the journal: `a route to a peer went away … now_on=Some(1)`
+    // — a second live route on the transport that had supposedly just gone. A
+    // phone whose Wi-Fi drops and returns leaves this end holding two sockets on
+    // one transport, the older of them dead, because nothing closed it and the
+    // peer had no way to say so.
+    //
+    // `min_by_key` kept the *older* of two equal transports, so the repair made
+    // no difference: every message went on into the socket that was already
+    // being ignored.
+    let (mut net, a_id, b_id) = paired();
+    net.ble_transport = Some(SLOWER);
+    both_routes_up(&mut net);
+
+    // Wi-Fi goes and comes back. Only the phone ever knew it went.
+    wifi_goes_off(&mut net, TRANSPORT, Side::A);
+    net.wall += 1_000;
+    net.now += 1_000;
+    discover_via(&mut net, Side::A, Side::B, TRANSPORT, "B");
+
+    let on_wifi = net
+        .links
+        .iter()
+        .filter(|(s, t, _)| *s == Side::B && *t == TRANSPORT)
+        .count();
+    assert!(
+        on_wifi >= 2,
+        "the premise: this end is holding the abandoned socket as well as the new one, and has {on_wifi}"
+    );
+
+    net.ui.clear();
+    net.local(
+        Side::B,
+        LocalCommand::Plugin {
+            peer: a_id,
+            cap: ping::CAP.to_string(),
+            ty: "ping".to_string(),
+            body: b"which-socket".to_vec(),
+        },
+    );
+    assert!(
+        net.saw(Side::B, |e| {
+            matches!(e, UiEvent::Plugin { ty, body, .. }
+                if ty == "pong" && body == b"which-socket")
+        }),
+        "answered over the abandoned socket rather than the one just proved"
+    );
+    assert_eq!(net.a.peer_state(&b_id), PeerState::Reachable);
+}
+
 #[test]
 fn a_session_dropped_over_a_bad_frame_says_the_device_has_gone() {
     // Dropping a link because the peer sent nonsense is right. Doing it in
@@ -994,6 +1206,65 @@ fn a_message_goes_to_the_peer_it_is_addressed_to() {
                 if body == b"for-c" && peer == &b_id)
         }),
         "a message addressed to one computer was answered by another"
+    );
+}
+
+#[test]
+fn the_peer_a_message_is_for_outranks_the_peer_we_heard_from_last() {
+    // The twin of the test above, and what it stopped catching the moment
+    // routing began to care about recency. That one relies on the addressed
+    // peer's link being the *newest*, so dropping the `peer` filter from
+    // `best_link` still happened to answer the right computer — a filter this
+    // suite has already caught being removed once.
+    //
+    // Here the other computer is the one we heard from most recently, so a walk
+    // that forgets who a link belongs to picks it, and a clipboard or a file
+    // meant for one machine arrives at another.
+    let (mut net, b_id, c_id) = paired_twice();
+    discover(&mut net, Side::A, Side::B);
+    net.wall += 1_000;
+    discover(&mut net, Side::A, Side::C);
+
+    // B speaks last, which under the old rule it never did. Sent *from* B, not
+    // asked for by A: a walk that has forgotten who a link belongs to answers
+    // every question wrong in the same direction, so driving this from A would
+    // only misroute the setup as well and leave the trap unsprung.
+    net.now += 1_000;
+    net.local(
+        Side::B,
+        LocalCommand::Plugin {
+            peer: net.a.device_id(),
+            cap: ping::CAP.to_string(),
+            ty: "ping".to_string(),
+            body: b"from-b".to_vec(),
+        },
+    );
+
+    net.now += 1_000;
+    net.ui.clear();
+    net.local(
+        Side::A,
+        LocalCommand::Plugin {
+            peer: c_id.clone(),
+            cap: ping::CAP.to_string(),
+            ty: "ping".to_string(),
+            body: b"for-c".to_vec(),
+        },
+    );
+
+    assert!(
+        net.saw(Side::A, |e| {
+            matches!(e, UiEvent::Plugin { peer, ty, body, .. }
+                if ty == "pong" && body == b"for-c" && peer == &c_id)
+        }),
+        "the pong did not come from the computer the ping was addressed to"
+    );
+    assert!(
+        !net.saw(Side::A, |e| {
+            matches!(e, UiEvent::Plugin { peer, body, .. }
+                if body == b"for-c" && peer == &b_id)
+        }),
+        "a message went to whichever computer had spoken most recently"
     );
 }
 

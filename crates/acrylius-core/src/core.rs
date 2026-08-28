@@ -90,6 +90,14 @@ struct UpLink {
     /// went unenforced until a second transport existed to notice.
     bulk: BulkSupport,
     max_message: u32,
+    /// When something last arrived over this link, on the host's monotonic
+    /// clock. The handshake counts, because it arrived here too.
+    ///
+    /// This is the only evidence a link is still carrying anything. Nothing
+    /// else in the core can tell a working socket from one whose far end has
+    /// vanished — that is a host's job, and the honest answer from a host takes
+    /// as long as a keepalive. See [`Core::best_link`], which routes by it.
+    last_recv_ms: u64,
     /// Which transport is carrying this session, and how it reads to a person.
     ///
     /// The id is what orders them: preference is ascending, which is how the
@@ -795,6 +803,11 @@ impl Core {
                 handshake_hash,
                 bulk: attrs.bulk,
                 max_message: attrs.max_message,
+                // The handshake came over this link a moment ago, so it is as
+                // proven as a link ever gets. Starting it at zero instead would
+                // make every new session lose to whatever was already there,
+                // which is the opposite of what just happened.
+                last_recv_ms: now_ms,
                 transport: attrs.transport,
                 kind: attrs.kind,
                 can_send,
@@ -1010,6 +1023,10 @@ impl Core {
         };
         let peer = u.peer.clone();
         let allowed = u.can_recv.clone();
+        // Recorded only once the frame has decrypted, so that noise on a socket
+        // cannot make a dead route look alive. Anything that gets this far came
+        // from the peer and from nobody else.
+        u.last_recv_ms = now_ms;
         self.links.insert(link, LinkState::Up(u));
 
         let Ok(env) = Envelope::decode(&plaintext) else {
@@ -1333,22 +1350,13 @@ impl Core {
         self.best_link(peer).map(|(_, u)| u.bulk)
     }
 
-    /// What a peer is currently reached over, if anything.
-    ///
-    /// `None` means no session is up — not that the transport is unknown.
-    ///
-    /// Deliberately the same walk `dispatch_send` makes: first match in
-    /// `LinkId` order, which is transport order, because the id's high bits are
-    /// the transport's. So with both a Wi-Fi and a Bluetooth session up this
-    /// answers Wi-Fi, and that is the one a message would take. Anything that
-    /// changes how a send picks its link has to change this too, or the screen
-    /// starts naming a transport nothing is using.
-    /// Which transport the link a message would take belongs to.
-    ///
-    /// The same walk as [`Self::transport_for`], answered as the id rather than
-    /// the kind, because deciding whether something better exists is a
-    /// comparison and only the id orders.
     /// The link a message to this peer would take.
+    ///
+    /// Two doc blocks left over from when `transport_for` and
+    /// `best_link_transport` were separate walks have been removed rather than
+    /// updated: both described choosing by `LinkId` order and said that with
+    /// Wi-Fi and Bluetooth both up this answers Wi-Fi, which is exactly the
+    /// behaviour below no longer has.
     ///
     /// One definition, because everything that asks about a peer's connection
     /// has to get the same answer: what a send goes over, what the screen
@@ -1357,8 +1365,36 @@ impl Core {
     /// `LinkId`s the way transports are numbered — true by convention in the
     /// daemon, and quietly false anywhere ids are minted another way.
     ///
-    /// Preference is ascending transport id: Wi-Fi before Bluetooth, which is
-    /// the order the hosts register them in.
+    /// **Most recently heard from first**, then the better transport, then the
+    /// newer link. Not transport preference alone, which is what this used to
+    /// be and what made a phone's now-playing screen stop moving whenever Wi-Fi
+    /// was switched off.
+    ///
+    /// Transport preference alone answers "which of these *would* be best",
+    /// and the core has no way to ask whether any of them still works. A socket
+    /// whose far end has vanished rather than closed stays `ESTABLISHED` and
+    /// accepts everything written to it; only a keepalive ends that, and only
+    /// after twenty seconds. Preferring it for those twenty seconds put every
+    /// reply and every announcement into it while a Bluetooth link sat beside it
+    /// working. Worse, a phone that re-dials Wi-Fi leaves the dead socket in
+    /// place next to the new one, and `min_by_key` kept the *older* of two equal
+    /// transports — so the dead one went on being chosen after the repair.
+    /// Observed as `a route to a peer went away … now_on=Some(1)`: a second live
+    /// route on the transport that had supposedly just gone.
+    ///
+    /// Which link a message arrived on is the one piece of evidence available
+    /// for free, and it is the peer's own answer to the question: it sends over
+    /// *its* best link, so hearing from it over Bluetooth is the peer saying
+    /// that is where it lives now. Recency decides, and transport preference
+    /// only breaks a tie between links equally proven — which is what two
+    /// freshly established sessions are.
+    ///
+    /// Deliberately a preference and never a teardown. An earlier attempt read
+    /// the same evidence and *closed* the route it thought was dead, which threw
+    /// away a perfectly good Wi-Fi link whenever one stray Bluetooth frame
+    /// landed in the moment between this end completing a handshake and the
+    /// other end finishing it. Getting this wrong should cost one message the
+    /// slower way, not a session.
     fn best_link(&self, peer: &DeviceId) -> Option<(LinkId, &UpLink)> {
         self.links
             .iter()
@@ -1366,7 +1402,11 @@ impl Core {
                 LinkState::Up(u) if &u.peer == peer => Some((*id, &**u)),
                 _ => None,
             })
-            .min_by_key(|(_, u)| u.transport)
+            // `Reverse` on the transport because a *lower* id is the better one,
+            // and the id last so that two links which are otherwise equal are
+            // still ordered — a peer that reconnects on one transport leaves
+            // both, and the newer of them is the one it just proved.
+            .max_by_key(|(id, u)| (u.last_recv_ms, std::cmp::Reverse(u.transport), *id))
     }
 
     fn best_link_transport(&self, peer: &DeviceId) -> Option<TransportId> {
@@ -1451,11 +1491,17 @@ impl Core {
         }
     }
 
+    /// The session a bulk key is derived from.
+    ///
+    /// `best_link`, not the first link that happens to match. Both ends derive
+    /// the key from the handshake hash of a session they must agree on, and a
+    /// peer reachable two ways has two of them — so picking by iteration order
+    /// meant one end could key a transfer from a session the other end was not
+    /// using, and nothing would decrypt. It went unnoticed while a peer only
+    /// ever had one link, which is the same reason `max_message` and
+    /// `BulkSupport` went unenforced.
     fn handshake_hash_for(&self, peer: &DeviceId) -> Option<Vec<u8>> {
-        self.links.values().find_map(|st| match st {
-            LinkState::Up(u) if &u.peer == peer => Some(u.handshake_hash.clone()),
-            _ => None,
-        })
+        self.best_link(peer).map(|(_, u)| u.handshake_hash.clone())
     }
 }
 
