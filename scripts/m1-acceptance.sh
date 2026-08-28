@@ -176,12 +176,28 @@ else
   # reading taken before the player acted. Asserting on that reply would be
   # asserting the announcement rather than the state, which is the mistake
   # this project keeps relearning.
+  # Which track a position is a position *in*.
+  #
+  # A seek names `mpris:trackid`, so one that arrives after the track has
+  # changed is meant to be ignored — that is the whole reason the id is in the
+  # call. A real player left running through this script does change track, and
+  # when it did, this failed for exactly the right reason at the wrong moment.
+  # The track's length stands in for its identity: it is on the line already.
+  status_line() {
+    "$BIN/acryliusctl" --state $D/a play status "$B_ID" 2>&1 | grep -F "$SEEKABLE"
+  }
+  track_of() { printf '%s' "$1" | grep -oE '/[0-9]+:[0-9]{2}\]' | tr -d '/]'; }
   for MS in 30000 0; do
+    WAS=$(track_of "$(status_line)")
     "$BIN/acryliusctl" --state $D/a play position "$B_ID" $MS \
       --player "$SEEKABLE" >/dev/null 2>&1
     sleep 1
-    AT=$("$BIN/acryliusctl" --state $D/a play status "$B_ID" 2>&1 \
-      | grep -F "$SEEKABLE" | grep -oE '\[[0-9]+:[0-9]{2}/' | tr -d '[/')
+    LINE=$(status_line)
+    if [ "$(track_of "$LINE")" != "$WAS" ]; then
+      echo "  skip  the track changed while seeking; a stale track id is ignored on purpose"
+      continue
+    fi
+    AT=$(printf '%s' "$LINE" | grep -oE '\[[0-9]+:[0-9]{2}/' | tr -d '[/')
     # Seconds, with room to move. A playing track advances while this is being
     # read, so an exact match would be a test of how fast the machine is.
     NOW=$(( $(echo "${AT:-0:00}" | cut -d: -f1) * 60 + $(echo "${AT:-0:00}" | cut -d: -f2 | sed 's/^0//;s/^$/0/') ))
