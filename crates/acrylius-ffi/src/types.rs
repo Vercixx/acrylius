@@ -212,6 +212,12 @@ pub enum FfiEvent {
         transport: u16,
         peer: FfiDiscoveredPeer,
     },
+    /// Something discovery had found is gone. See
+    /// [`acrylius_core::vocab::Event::Undiscovered`].
+    Undiscovered {
+        transport: u16,
+        addr: String,
+    },
     Tick,
     OpenPairingWindow {
         code: String,
@@ -343,6 +349,10 @@ impl TryFrom<FfiEvent> for cv::Event {
                     addr: peer.addr,
                     pairing: peer.pairing,
                 },
+            },
+            FfiEvent::Undiscovered { transport, addr } => Self::Undiscovered {
+                transport: cl::TransportId(transport),
+                addr,
             },
             FfiEvent::Tick => Self::Tick,
             FfiEvent::OpenPairingWindow { code } => Self::Local(L::OpenPairingWindow { code }),
@@ -538,6 +548,11 @@ pub enum FfiUiEvent {
         transport: u32,
         pairing: bool,
     },
+    /// A device that was nearby is not any more. See
+    /// [`acrylius_core::vocab::UiEvent::Undiscovered`].
+    Undiscovered {
+        fingerprint: String,
+    },
     PeerReachable {
         peer: String,
         name: String,
@@ -582,6 +597,9 @@ impl From<cv::UiEvent> for FfiUiEvent {
                 addr,
                 transport: u32::from(transport.0),
                 pairing,
+            },
+            cv::UiEvent::Undiscovered { fingerprint } => Self::Undiscovered {
+                fingerprint: fingerprint.to_string(),
             },
             cv::UiEvent::PairingSas {
                 name,

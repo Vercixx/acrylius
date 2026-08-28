@@ -33,6 +33,10 @@ public final class NWTransport: Transport, @unchecked Sendable {
     /// Whether the last path we were told about was a local network, so that
     /// only changes are acted on rather than every interface update.
     private var onLan = false
+    /// Addresses this transport has told the core about, so that it can take
+    /// them back. Only what we actually announced: withdrawing something never
+    /// mentioned would be noise, and the core would have nothing to remove.
+    private var announced: Set<String> = []
     private let queue = DispatchQueue(label: "org.acrylius.transport")
 
     public static let maxFrame: UInt32 = 1 << 20
@@ -308,6 +312,14 @@ public final class NWTransport: Transport, @unchecked Sendable {
         m.start(queue: queue)
     }
 
+    /// Record what is on the network now, and hand back what has gone.
+    private func withdraw(keeping present: Set<String>) -> [String] {
+        lock.lock(); defer { lock.unlock() }
+        let gone = announced.subtracting(present)
+        announced = present
+        return Array(gone)
+    }
+
     /// Whether this is a change, rather than the same answer again.
     private func noteLan(_ now: Bool) -> Bool {
         lock.lock(); defer { lock.unlock() }
@@ -360,21 +372,34 @@ public final class NWTransport: Transport, @unchecked Sendable {
         }
         b.browseResultsChangedHandler = { [weak self] results, _ in
             guard let self else { return }
+            var present: Set<String> = []
             for r in results {
                 guard case let .service(name, _, _, _) = r.endpoint else { continue }
                 var txt: NWTXTRecord?
                 if case let .bonjour(record) = r.metadata { txt = record }
+                // Hand the instance name back, not a resolved address. See
+                // `dial`.
+                let addr = "bonjour:\(name)"
+                present.insert(addr)
                 self.fire(.discovered(
                     transport: self.transportId,
                     peer: FfiDiscoveredPeer(
                         fingerprint: txt?["fp"],
                         name: txt?["n"] ?? name,
-                        // Hand the instance name back, not a resolved address.
-                        // See `dial`.
-                        addr: "bonjour:\(name)",
+                        addr: addr,
                         pairing: txt?["pair"] == "1"
                     )
                 ))
+            }
+            // Whatever we used to say was there and is not in this set.
+            //
+            // From the difference rather than from the `changes` argument, and
+            // deliberately: `results` is the complete current set, so this is
+            // also right the first time a replacement browse reports — a browse
+            // that failed and was rebuilt never delivers removals for what the
+            // dead one had found, and those would otherwise be offered forever.
+            for addr in self.withdraw(keeping: present) {
+                self.fire(.undiscovered(transport: self.transportId, addr: addr))
             }
         }
         b.start(queue: queue)

@@ -615,6 +615,11 @@ final class AppModel {
             // A machine that is waiting for somebody sorts first: it is the one
             // the person is most likely holding the phone for.
             nearby.sort { ($0.pairing ? 0 : 1, $0.name) < ($1.pairing ? 0 : 1, $1.name) }
+        case let .undiscovered(fingerprint):
+            // The other half of a sighting, and it had none: this list only
+            // ever grew, so a computer that had been switched off stayed on
+            // offer as something to pair with until the app was restarted.
+            nearby.removeAll { $0.fingerprint == fingerprint }
         case let .pairingComplete(_, name):
             pairingSas = nil
             pairingCode = nil

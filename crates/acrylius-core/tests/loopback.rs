@@ -1929,12 +1929,59 @@ fn an_automatic_dial_waits_for_the_one_already_out() {
 
     // Nor does a person asking start a second one on top. What they asked for
     // is already under way, and the screen is now showing them that.
-    net.local(Side::A, LocalCommand::Connect { peer: b_id });
+    net.ui.clear();
+    net.local(Side::A, LocalCommand::Connect { peer: b_id.clone() });
     assert_eq!(
         net.dialed.len(),
         1,
         "a request piled a second dial onto one already in flight: {:?}",
         net.dialed
+    );
+
+    // But they are owed the outcome. Standing down silently is how they stopped
+    // getting one: the attempt already running was automatic, an automatic
+    // attempt says nothing when it runs out of routes, and so whoever asked
+    // waited on an event that was never coming — which is `acryliusctl device
+    // connect` timing out after ten seconds against a machine that is simply
+    // not there.
+    net.now += CoreConfig::default().dial_timeout_ms + 1;
+    net.wall += CoreConfig::default().dial_timeout_ms + 1;
+    net.queue.push_back((Side::A, Event::Tick));
+    net.run();
+    assert!(
+        net.saw(Side::A, |e| matches!(
+            e,
+            UiEvent::PeerUnreachable { peer } if *peer == b_id
+        )),
+        "a person asked, the attempt ended, and nothing told them"
+    );
+}
+
+#[test]
+fn asking_for_a_peer_that_is_already_connected_is_answered_at_once() {
+    // The same debt, settled the other way. The answer arrived before the
+    // question, so repeating it is the only way whoever asked can hear it —
+    // otherwise the request meets a peer that needs no dialling, nothing is
+    // emitted, and the caller waits out its whole timeout to be told nothing.
+    let (mut net, _a_id, b_id) = paired();
+    discover_via(&mut net, Side::A, Side::B, TRANSPORT, "B");
+    assert_eq!(net.a.peer_state(&b_id), PeerState::Reachable);
+
+    net.dialed.clear();
+    net.ui.clear();
+    net.local(Side::A, LocalCommand::Connect { peer: b_id.clone() });
+
+    assert!(
+        net.dialed.is_empty(),
+        "a connected peer was dialled again: {:?}",
+        net.dialed
+    );
+    assert!(
+        net.saw(Side::A, |e| matches!(
+            e,
+            UiEvent::PeerReachable { peer, .. } if *peer == b_id
+        )),
+        "nothing answered a request about a peer that was already there"
     );
 }
 
@@ -2140,6 +2187,190 @@ fn reconsidering_routes_leaves_a_peer_already_on_the_best_one_alone() {
         net.dialed
     );
     assert_eq!(net.a.peer_state(&b_id), PeerState::Reachable);
+}
+
+#[test]
+fn a_machine_that_leaves_the_network_stops_being_offered() {
+    // Sightings were one-way. Nothing was ever un-discovered, so a computer
+    // that had been switched off went on being listed as something to pair
+    // with — and the list is the pairing screen, so it was offering to pair
+    // with a machine that was not there.
+    let (mut net, _a_id, _b_id) = paired();
+    let stranger = net.c.fingerprint();
+
+    net.queue.push_back((
+        Side::A,
+        Event::Discovered {
+            transport: TRANSPORT,
+            peer: DiscoveredPeer {
+                fingerprint: Some(stranger.clone()),
+                name: "bravo".to_string(),
+                addr: "10.0.0.9:1971".to_string(),
+                pairing: false,
+            },
+        },
+    ));
+    net.run();
+    assert!(
+        net.saw(Side::A, |e| matches!(e, UiEvent::Discovered { .. })),
+        "a stranger on the network is worth mentioning"
+    );
+
+    net.ui.clear();
+    net.queue.push_back((
+        Side::A,
+        Event::Undiscovered {
+            transport: TRANSPORT,
+            addr: "10.0.0.9:1971".to_string(),
+        },
+    ));
+    net.run();
+
+    assert!(
+        net.saw(Side::A, |e| matches!(
+            e,
+            UiEvent::Undiscovered { fingerprint } if *fingerprint == stranger
+        )),
+        "nothing took the machine back off the list"
+    );
+}
+
+#[test]
+fn a_withdrawal_naming_an_older_address_leaves_a_newer_one_alone() {
+    // Discovery is chatty and out of order: a machine that changes address is
+    // resolved at the new one and *then* withdrawn at the old. Removing by
+    // transport alone would drop the answer that works and un-list a computer
+    // sitting on the network.
+    let (mut net, _a_id, _b_id) = paired();
+    let stranger = net.c.fingerprint();
+
+    for addr in ["10.0.0.9:1971", "10.0.0.12:1971"] {
+        net.queue.push_back((
+            Side::A,
+            Event::Discovered {
+                transport: TRANSPORT,
+                peer: DiscoveredPeer {
+                    fingerprint: Some(stranger.clone()),
+                    name: "bravo".to_string(),
+                    addr: addr.to_string(),
+                    pairing: false,
+                },
+            },
+        ));
+    }
+    net.run();
+    net.ui.clear();
+
+    net.queue.push_back((
+        Side::A,
+        Event::Undiscovered {
+            transport: TRANSPORT,
+            addr: "10.0.0.9:1971".to_string(),
+        },
+    ));
+    net.run();
+
+    assert!(
+        !net.saw(Side::A, |e| matches!(e, UiEvent::Undiscovered { .. })),
+        "the old address expiring took the machine off the list with it"
+    );
+}
+
+#[test]
+fn a_machine_seen_two_ways_stays_listed_while_either_can_see_it() {
+    // A desktop beside a phone is on Wi-Fi and Bluetooth at once, and the two
+    // come and go independently. Wi-Fi lapsing says nothing about whether the
+    // machine is there — Bluetooth is still looking straight at it — so taking
+    // it off the list would be removing something the user can plainly see.
+    let (mut net, _a_id, _b_id) = paired();
+    let stranger = net.c.fingerprint();
+
+    for (transport, addr) in [(TRANSPORT, "10.0.0.9:1971"), (SLOWER, "ble:abcd")] {
+        net.queue.push_back((
+            Side::A,
+            Event::Discovered {
+                transport,
+                peer: DiscoveredPeer {
+                    fingerprint: Some(stranger.clone()),
+                    name: "bravo".to_string(),
+                    addr: addr.to_string(),
+                    pairing: false,
+                },
+            },
+        ));
+    }
+    net.run();
+    net.ui.clear();
+
+    // Wi-Fi loses it.
+    net.queue.push_back((
+        Side::A,
+        Event::Undiscovered {
+            transport: TRANSPORT,
+            addr: "10.0.0.9:1971".to_string(),
+        },
+    ));
+    net.run();
+    assert!(
+        !net.saw(Side::A, |e| matches!(e, UiEvent::Undiscovered { .. })),
+        "one radio losing sight of a machine took it off the list entirely"
+    );
+
+    // And now the other one does too, which is the machine actually being gone.
+    net.queue.push_back((
+        Side::A,
+        Event::Undiscovered {
+            transport: SLOWER,
+            addr: "ble:abcd".to_string(),
+        },
+    ));
+    net.run();
+    assert!(
+        net.saw(Side::A, |e| matches!(
+            e,
+            UiEvent::Undiscovered { fingerprint } if *fingerprint == stranger
+        )),
+        "nothing can see it any more and it is still on offer"
+    );
+}
+
+#[test]
+fn a_paired_peer_leaving_the_network_is_not_announced_as_a_stranger() {
+    // `Undiscovered` answers `Discovered`, and a paired peer was never in that
+    // list: it has a row of its own, whose state comes from whether a session
+    // is up rather than from what mDNS can currently see. Saying it here would
+    // ask a host to remove something it never added.
+    let (mut net, _a_id, b_id) = paired();
+    discover_via(&mut net, Side::A, Side::B, TRANSPORT, "B");
+    net.ui.clear();
+
+    net.queue.push_back((
+        Side::A,
+        Event::Undiscovered {
+            transport: TRANSPORT,
+            addr: "B".to_string(),
+        },
+    ));
+    net.run();
+
+    assert!(
+        !net.saw(Side::A, |e| matches!(e, UiEvent::Undiscovered { .. })),
+        "a paired peer was reported as a stranger leaving"
+    );
+    // And the address it was last reached at survives, because that is a
+    // different claim from what is on the air right now — the retry heartbeat
+    // has nothing else to go on.
+    assert_eq!(net.a.peer_state(&b_id), PeerState::Reachable);
+    net.dialed.clear();
+    lose_link(&mut net, TRANSPORT);
+    net.now += CoreConfig::default().reconnect_every_ms + 1;
+    net.wall += CoreConfig::default().reconnect_every_ms + 1;
+    net.queue.push_back((Side::A, Event::Tick));
+    net.run();
+    assert!(
+        net.dialed.contains(&(TRANSPORT, "B".to_string())),
+        "an mDNS record lapsing threw away the address a paired peer works at"
+    );
 }
 
 #[test]

@@ -111,6 +111,65 @@ fn bound_the_wait_for_a_dead_peer(stream: &TcpStream) {
     let _ = sock.set_tcp_user_timeout(Some(DEAD_PEER));
 }
 
+/// What a browse event means to the core, if anything.
+///
+/// Free rather than buried in the browse task, because everything interesting
+/// about discovery is decided here — whether a record is us, which address to
+/// prefer, whether a withdrawal names anything we ever spoke about — and none
+/// of it was reachable by a test while it lived inside a `tokio::spawn` fed by
+/// a live mDNS daemon. `reported` is the memory that makes a withdrawal
+/// possible at all, and it is threaded through rather than captured so that a
+/// test can watch it.
+fn discovery_event(
+    id: TransportId,
+    mine: &Fingerprint,
+    reported: &mut HashMap<String, String>,
+    ev: mdns_sd::ServiceEvent,
+) -> Option<Event> {
+    match ev {
+        // Only if we ever spoke about it. A removal for something never
+        // reported — our own advertisement, or one that never resolved — is
+        // not news, and the core would have nothing to take off any list.
+        mdns_sd::ServiceEvent::ServiceRemoved(_, fullname) => Some(Event::Undiscovered {
+            transport: id,
+            addr: reported.remove(&fullname)?,
+        }),
+        mdns_sd::ServiceEvent::ServiceResolved(info) => {
+            let fp = info
+                .get_property_val_str("fp")
+                .and_then(|s| Fingerprint::parse(s).ok());
+            // Do not report ourselves back to the core.
+            if fp.as_ref() == Some(mine) {
+                return None;
+            }
+            // Prefer IPv4. IPv6 link-local addresses carry a scope id that has
+            // to travel with them to be dialable, and nothing in M1 needs v6 on
+            // a LAN.
+            let addrs = info.get_addresses();
+            let addr = addrs
+                .iter()
+                .find(|a| a.is_ipv4())
+                .or_else(|| addrs.iter().next())
+                .map(|a| a.to_ip_addr())?;
+            let sa = SocketAddr::new(addr, info.get_port());
+            reported.insert(info.get_fullname().to_string(), sa.to_string());
+            Some(Event::Discovered {
+                transport: id,
+                peer: DiscoveredPeer {
+                    fingerprint: fp,
+                    name: info
+                        .get_property_val_str("n")
+                        .unwrap_or_default()
+                        .to_string(),
+                    addr: sa.to_string(),
+                    pairing: info.get_property_val_str("pair") == Some("1"),
+                },
+            })
+        }
+        _ => None,
+    }
+}
+
 async fn serve(
     link: LinkId,
     stream: TcpStream,
@@ -323,41 +382,17 @@ impl Transport for TcpTransport {
                         let id = self.id;
                         let mine = self.fingerprint.clone();
                         tokio::spawn(async move {
+                            // What was reported for each instance, so that a
+                            // withdrawal can name it the same way.
+                            //
+                            // mDNS withdraws a *name*; the core was told an
+                            // address. Nothing else can bridge the two: the
+                            // record is gone by the time it is withdrawn, so
+                            // there is nothing left to resolve.
+                            let mut reported: HashMap<String, String> = HashMap::new();
                             while let Ok(ev) = rx.recv_async().await {
-                                if let mdns_sd::ServiceEvent::ServiceResolved(info) = ev {
-                                    let fp = info
-                                        .get_property_val_str("fp")
-                                        .and_then(|s| Fingerprint::parse(s).ok());
-                                    // Do not report ourselves back to the core.
-                                    if fp.as_ref() == Some(&mine) {
-                                        continue;
-                                    }
-                                    // Prefer IPv4. IPv6 link-local addresses
-                                    // carry a scope id that has to travel with
-                                    // them to be dialable, and nothing in M1
-                                    // needs v6 on a LAN.
-                                    let addrs = info.get_addresses();
-                                    let Some(addr) = addrs
-                                        .iter()
-                                        .find(|a| a.is_ipv4())
-                                        .or_else(|| addrs.iter().next())
-                                        .map(|a| a.to_ip_addr())
-                                    else {
-                                        continue;
-                                    };
-                                    let sa = SocketAddr::new(addr, info.get_port());
-                                    let _ = sink.send(Event::Discovered {
-                                        transport: id,
-                                        peer: DiscoveredPeer {
-                                            fingerprint: fp,
-                                            name: info
-                                                .get_property_val_str("n")
-                                                .unwrap_or_default()
-                                                .to_string(),
-                                            addr: sa.to_string(),
-                                            pairing: info.get_property_val_str("pair") == Some("1"),
-                                        },
-                                    });
+                                if let Some(event) = discovery_event(id, &mine, &mut reported, ev) {
+                                    let _ = sink.send(event);
                                 }
                             }
                         });
@@ -384,4 +419,150 @@ fn hostname() -> String {
 #[must_use]
 pub fn default_port() -> u16 {
     DEFAULT_PORT
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const ID: TransportId = TransportId(1);
+
+    fn fp(byte: u8) -> Fingerprint {
+        let mut key = [0u8; 32];
+        key[31] = byte;
+        Fingerprint::of(&key)
+    }
+
+    fn resolved(name: &str, ip: &str, props: &[(&str, &str)]) -> mdns_sd::ServiceEvent {
+        let props: Vec<(String, String)> = props
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect();
+        let info = mdns_sd::ServiceInfo::new(
+            "_acrylius._tcp.local.",
+            name,
+            "host.local.",
+            ip,
+            1971,
+            &props[..],
+        )
+        .expect("a service record");
+        mdns_sd::ServiceEvent::ServiceResolved(Box::new(info.as_resolved_service()))
+    }
+
+    fn removed(name: &str) -> mdns_sd::ServiceEvent {
+        mdns_sd::ServiceEvent::ServiceRemoved(
+            "_acrylius._tcp.local.".to_string(),
+            format!("{name}._acrylius._tcp.local."),
+        )
+    }
+
+    #[test]
+    fn a_resolved_service_becomes_an_address_to_try() {
+        let mut reported = HashMap::new();
+        let ev = discovery_event(
+            ID,
+            &fp(1),
+            &mut reported,
+            resolved(
+                "bravo",
+                "10.0.0.9",
+                &[("fp", fp(2).as_str()), ("n", "bravo")],
+            ),
+        );
+        let Some(Event::Discovered { peer, transport }) = ev else {
+            panic!("a stranger on the network is a sighting, got {ev:?}");
+        };
+        assert_eq!(transport, ID);
+        assert_eq!(peer.addr, "10.0.0.9:1971");
+        assert_eq!(peer.name, "bravo");
+        assert_eq!(peer.fingerprint, Some(fp(2)));
+        assert!(!peer.pairing, "nothing said it was waiting to pair");
+    }
+
+    #[test]
+    fn a_pairing_window_is_carried_only_when_it_says_so() {
+        let mut reported = HashMap::new();
+        let waiting = discovery_event(
+            ID,
+            &fp(1),
+            &mut reported,
+            resolved(
+                "bravo",
+                "10.0.0.9",
+                &[("fp", fp(2).as_str()), ("pair", "1")],
+            ),
+        );
+        assert!(
+            matches!(waiting, Some(Event::Discovered { peer, .. }) if peer.pairing),
+            "a machine advertising an open window was not reported as one"
+        );
+        // Anything else is not an invitation. The flag decides whether a phone
+        // offers to pair, so a value that merely exists must not do.
+        let not = discovery_event(
+            ID,
+            &fp(1),
+            &mut HashMap::new(),
+            resolved(
+                "bravo",
+                "10.0.0.9",
+                &[("fp", fp(2).as_str()), ("pair", "0")],
+            ),
+        );
+        assert!(
+            matches!(not, Some(Event::Discovered { peer, .. }) if !peer.pairing),
+            "pair=0 was read as an open pairing window"
+        );
+    }
+
+    #[test]
+    fn this_machine_is_not_reported_back_to_itself() {
+        let mine = fp(1);
+        let mut reported = HashMap::new();
+        let ev = discovery_event(
+            ID,
+            &mine,
+            &mut reported,
+            resolved("alpha", "10.0.0.9", &[("fp", mine.as_str())]),
+        );
+        assert!(ev.is_none(), "the daemon discovered itself, got {ev:?}");
+        assert!(
+            reported.is_empty(),
+            "and it must not be remembered either, or its own record lapsing \
+             would be announced as a machine leaving"
+        );
+    }
+
+    #[test]
+    fn a_withdrawal_names_the_address_the_sighting_did() {
+        // The whole reason `reported` exists: mDNS withdraws an instance name,
+        // and by then the record is gone, so there is nothing left to resolve
+        // an address from. Only what was remembered at resolve time can say
+        // which address has stopped working.
+        let mut reported = HashMap::new();
+        discovery_event(
+            ID,
+            &fp(1),
+            &mut reported,
+            resolved("bravo", "10.0.0.9", &[("fp", fp(2).as_str())]),
+        );
+        let ev = discovery_event(ID, &fp(1), &mut reported, removed("bravo"));
+        assert!(
+            matches!(&ev, Some(Event::Undiscovered { addr, transport })
+                     if addr == "10.0.0.9:1971" && *transport == ID),
+            "a service going away did not take its address with it, got {ev:?}"
+        );
+        assert!(reported.is_empty(), "and it is not withdrawn twice");
+    }
+
+    #[test]
+    fn a_withdrawal_for_something_never_reported_is_not_news() {
+        // Our own advertisement is withdrawn on shutdown like any other, and a
+        // record can lapse having never resolved. Neither is a machine leaving,
+        // and announcing one would ask the core to remove something it was
+        // never told about.
+        let mut reported = HashMap::new();
+        let ev = discovery_event(ID, &fp(1), &mut reported, removed("someone-else"));
+        assert!(ev.is_none(), "invented a departure, got {ev:?}");
+    }
 }

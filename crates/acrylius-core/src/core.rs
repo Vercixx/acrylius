@@ -447,6 +447,39 @@ impl Core {
                     }
                 }
             }
+            Event::Undiscovered { transport, addr } => {
+                // Only `seen`, never `addrs`.
+                //
+                // `seen` is a cache of what is on the network right now, and it
+                // is what "on this network" is drawn from — so a machine that
+                // has gone has to leave it, or it is offered forever. `addrs`
+                // is the last place a *paired* peer worked, which is a
+                // different claim and still the best guess there is: an mDNS
+                // record that lapses does not mean the computer moved, and
+                // throwing the address away would leave the retry heartbeat
+                // with nothing to try and no way to get it back.
+                let gone: Vec<Fingerprint> = self
+                    .seen
+                    .iter_mut()
+                    .filter_map(|(fp, routes)| {
+                        (routes.forget(transport, &addr) && routes.is_empty()).then(|| fp.clone())
+                    })
+                    .collect();
+                for fp in gone {
+                    self.seen.remove(&fp);
+                    // Said only for machines that were offered in the first
+                    // place. A paired peer was never in that list — it has its
+                    // own row, whose state comes from whether a session is up
+                    // and not from whether mDNS can currently see it.
+                    if !self
+                        .peers
+                        .values()
+                        .any(|r| r.fingerprint().as_ref() == Some(&fp))
+                    {
+                        out.ui(UiEvent::Undiscovered { fingerprint: fp });
+                    }
+                }
+            }
             Event::BulkListening { transfer, endpoint } => {
                 self.dispatch_to_transfer_owner(now_ms, transfer, &mut out, |p, cx| {
                     p.on_bulk_listening(cx, transfer, &endpoint);
@@ -1428,6 +1461,32 @@ impl Core {
         });
     }
 
+    /// Make an attempt already under way count as one a person asked for.
+    ///
+    /// The flag decides one thing: whether running out of routes is announced.
+    /// An automatic attempt keeps quiet, because it runs on every sighting and
+    /// saying "unreachable" each time would flicker an error at a device that
+    /// is coming up perfectly normally. A requested one has to speak, or
+    /// whoever asked is left waiting on silence.
+    ///
+    /// Both places an attempt can be living: a dial that has not landed, and a
+    /// handshake carrying the routes it has not tried yet.
+    fn adopt_attempt(&mut self, peer: &DeviceId) {
+        for (_, (p, _, by_hand)) in self.pending_peer_dials.values_mut() {
+            if p == peer {
+                *by_hand = true;
+            }
+        }
+        for st in self.links.values_mut() {
+            if let LinkState::Handshaking(h) = st
+                && let Some((p, _, by_hand)) = h.fallback.as_mut()
+                && p == peer
+            {
+                *by_hand = true;
+            }
+        }
+    }
+
     fn connect_peer(&mut self, now_ms: u64, peer: DeviceId, out: &mut Outcome, by_hand: bool) {
         if !by_hand
             && self
@@ -1450,10 +1509,22 @@ impl Core {
         match self.peer_state(&peer) {
             PeerState::Unreachable => {}
             // A dial or a handshake is already in flight. Let it finish —
-            // including when a person asked, because what they asked for is
-            // already happening and a second attempt would not make it
-            // happen sooner.
-            PeerState::Connecting => return,
+            // what was asked for is already happening, and a second attempt
+            // would not make it happen sooner.
+            //
+            // But a person who asked is owed an answer, and standing down
+            // silently is how they stopped getting one: an automatic attempt
+            // reports nothing when it fails, by design, so `acryliusctl device
+            // connect` sat waiting on an event that was never going to come and
+            // gave up after ten seconds. So the attempt already running is
+            // adopted — it becomes the one this person asked for, and it will
+            // say how it ended.
+            PeerState::Connecting => {
+                if by_hand {
+                    self.adopt_attempt(&peer);
+                }
+                return;
+            }
             PeerState::Reachable => {
                 // Reachable is not the same as reachable *well*, and treating
                 // them as one thing is what put a phone on Bluetooth and left
@@ -1472,7 +1543,17 @@ impl Core {
                 // and picks the lowest — so the better link takes over by
                 // existing, and the worse one stays as the fallback it already
                 // was.
+                // Someone asking for a peer that is already connected is
+                // answered with that, rather than left waiting. The answer
+                // arrived before they asked, so repeating it is the only way
+                // they can hear it.
                 if by_hand {
+                    let name = self
+                        .peers
+                        .get(&peer)
+                        .map(|r| r.name.clone())
+                        .unwrap_or_default();
+                    out.ui(UiEvent::PeerReachable { peer, name });
                     return;
                 }
                 let Some(current) = self.best_link_transport(&peer) else {

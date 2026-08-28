@@ -122,6 +122,20 @@ pub enum Event {
         transport: TransportId,
         peer: DiscoveredPeer,
     },
+    /// Something discovery had found is no longer there.
+    ///
+    /// By address, because that is the one thing a transport can be sure of
+    /// when a service goes away: mDNS withdraws an instance, not a fingerprint,
+    /// and the record it withdraws may carry no TXT at all.
+    ///
+    /// Sightings used to be one-way. Nothing was ever un-discovered, so the
+    /// list of machines on the network only grew: a computer that was switched
+    /// off went on being offered as something to pair with until the app was
+    /// restarted.
+    Undiscovered {
+        transport: TransportId,
+        addr: String,
+    },
     /// The single host timer fired. See [`Outcome::next_deadline_ms`].
     Tick,
     /// A host has somewhere for the other end to connect for a bulk transfer.
@@ -427,6 +441,12 @@ pub enum UiEvent {
         transport: TransportId,
         /// Whether it says it has a pairing window open right now.
         pairing: bool,
+    },
+    /// A machine that was on the network is not any more, and should stop being
+    /// offered. The counterpart to [`UiEvent::Discovered`], and said only for
+    /// devices that were reported through it.
+    Undiscovered {
+        fingerprint: Fingerprint,
     },
     PeerReachable {
         peer: DeviceId,

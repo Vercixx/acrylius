@@ -96,6 +96,22 @@ impl Routes {
         self.0.insert(transport, addr);
     }
 
+    /// Forget this transport's address, if it is the one given.
+    ///
+    /// Checked rather than removed outright: a withdrawal names an address, and
+    /// by the time it arrives that transport may already have found the machine
+    /// somewhere else. Dropping the newer answer because an older one expired
+    /// would lose a route that works.
+    ///
+    /// Returns whether anything was removed.
+    pub fn forget(&mut self, transport: TransportId, addr: &str) -> bool {
+        if self.0.get(&transport).is_some_and(|a| a == addr) {
+            self.0.remove(&transport);
+            return true;
+        }
+        false
+    }
+
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()

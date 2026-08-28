@@ -132,6 +132,7 @@ fn about(e: &UiEvent, who: &DeviceId) -> bool {
         // Nobody's request. A sighting is news about a stranger, and the
         // control socket's waits are all about a device already paired.
         UiEvent::Discovered { .. }
+        | UiEvent::Undiscovered { .. }
         | UiEvent::PairingWindowOpen { .. }
         | UiEvent::PairingSas { .. }
         | UiEvent::PairingFailed { .. } => false,
@@ -166,6 +167,7 @@ fn render(e: &UiEvent) -> String {
             "found {name} at {addr}{}",
             if *pairing { ", waiting to pair" } else { "" }
         ),
+        UiEvent::Undiscovered { fingerprint } => format!("{fingerprint} has left the network"),
         UiEvent::PairingComplete { peer, name } => format!("paired with {name} ({peer})"),
         UiEvent::PairingFailed { reason } => format!("pairing failed: {reason}"),
         UiEvent::PeerReachable { peer, name } => format!("{name} ({peer}) is reachable"),
@@ -1113,6 +1115,20 @@ mod tests {
         };
         assert!(!about(&theirs, &who('A')));
         assert!(about(&theirs, &who('B')));
+    }
+
+    #[test]
+    fn a_machine_leaving_the_network_reads_as_a_sentence() {
+        // `acryliusctl` prints these verbatim, and a sighting and its
+        // withdrawal are the pair a person watches to see discovery working.
+        let fp = acrylius_core::proto::ids::Fingerprint::of(&[7u8; 32]);
+        let line = render(&UiEvent::Undiscovered {
+            fingerprint: fp.clone(),
+        });
+        assert!(
+            line.contains(fp.as_str()) && line.contains("left"),
+            "a withdrawal has to name what left and say that it did: {line}"
+        );
     }
 
     #[test]
