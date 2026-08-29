@@ -418,6 +418,14 @@ pub enum UiEvent {
         peer: DeviceId,
         name: String,
     },
+    /// A peer has been forgotten, and its record is gone.
+    ///
+    /// A host that asks for a revoke and then reads the peer list back is
+    /// racing the core, because asking is one-way. This is the answer arriving,
+    /// and the only reliable moment to redraw.
+    Revoked {
+        peer: DeviceId,
+    },
     PairingFailed {
         reason: String,
     },

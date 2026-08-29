@@ -204,6 +204,56 @@ fn snapshot_devices(core: &acrylius_core::core::Core) -> Vec<control::Device> {
         .collect()
 }
 
+/// What to call this machine when nobody has said.
+///
+/// The pretty hostname first. It is the one a person chose — `hostnamectl
+/// set-hostname --pretty "Кухня"` — and the only one that may contain spaces,
+/// punctuation or non-Latin characters. The static hostname is a DNS label and
+/// is conventionally restricted to letters, digits and hyphens, so reading only
+/// that made a phone show `vercixx-pc` however the machine had been named.
+///
+/// Read out of `/etc/machine-info` rather than asked of `hostnamed` over D-Bus:
+/// it is a plain `KEY=value` file, it is where `hostnamectl` writes, and the
+/// daemon starts before there is any reason to assume a system bus.
+fn machine_name() -> String {
+    if let Ok(info) = std::fs::read_to_string("/etc/machine-info") {
+        for line in info.lines() {
+            let Some(value) = line.trim().strip_prefix("PRETTY_HOSTNAME=") else {
+                continue;
+            };
+            // Quoted or not, both of which `hostnamectl` writes depending on
+            // what is in the value.
+            let value = value.trim().trim_matches(['"', '\'']).trim();
+            if !value.is_empty() {
+                return value.to_string();
+            }
+        }
+    }
+    std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .map(|s| s.trim().to_string())
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "acrylius".to_string())
+}
+
+/// What is on this network that this machine is not paired with.
+///
+/// `acryliusctl pair with` has always taken an address, and until now nothing
+/// would tell you one — the core knew every acrylius machine on the network and
+/// had no way to say so. This is that gap closed on the desktop side; the phone
+/// gets the same facts as `UiEvent::Discovered`.
+fn snapshot_nearby(core: &acrylius_core::core::Core) -> Vec<control::Nearby> {
+    core.nearby()
+        .map(|n| control::Nearby {
+            fingerprint: n.fingerprint.to_string(),
+            name: n.name.to_string(),
+            addr: n.addr,
+            transport: n.transport.0,
+            pairing: n.pairing,
+        })
+        .collect()
+}
+
 /// Config maintenance, and then exit. Nothing here starts a daemon or touches
 /// the network.
 fn run_config_action(action: &ConfigAction, path: &std::path::Path) -> anyhow::Result<()> {
@@ -342,11 +392,10 @@ async fn main() -> anyhow::Result<()> {
     let identity = load_identity(&state)?;
     let store = FileStore::open(&state)?;
     let peers = store.load_peers()?;
-    let name = args.name.or_else(|| cfg.name.clone()).unwrap_or_else(|| {
-        std::fs::read_to_string("/proc/sys/kernel/hostname")
-            .map(|s| s.trim().to_string())
-            .unwrap_or_else(|_| "acrylius".to_string())
-    });
+    let name = args
+        .name
+        .or_else(|| cfg.name.clone())
+        .unwrap_or_else(machine_name);
 
     tracing::info!(
         %name,
@@ -443,6 +492,7 @@ async fn main() -> anyhow::Result<()> {
     let fingerprint = core.fingerprint();
     let status = Arc::new(Mutex::new(Some(status)));
     let devices = Arc::new(Mutex::new(snapshot_devices(&core)));
+    let nearby = Arc::new(Mutex::new(snapshot_nearby(&core)));
 
     let mut rt = Runtime::new(core, effector, Box::new(store));
 
@@ -451,10 +501,14 @@ async fn main() -> anyhow::Result<()> {
     // here, which is what keeps the single-serial-executor rule intact.
     {
         let devices = devices.clone();
+        let nearby = nearby.clone();
         let status = status.clone();
         rt.observe(move |core| {
             if let Ok(mut d) = devices.try_lock() {
                 *d = snapshot_devices(core);
+            }
+            if let Ok(mut n) = nearby.try_lock() {
+                *n = snapshot_nearby(core);
             }
             if let Ok(mut s) = status.try_lock()
                 && let Some(s) = s.as_mut()
@@ -624,6 +678,7 @@ async fn main() -> anyhow::Result<()> {
             ui: ui_tx,
             status,
             devices,
+            nearby,
         },
     )
     .await?;

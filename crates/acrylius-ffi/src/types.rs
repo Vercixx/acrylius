@@ -524,6 +524,10 @@ pub enum FfiUiEvent {
         peer: String,
         name: String,
     },
+    /// A peer has been forgotten. See [`acrylius_core::vocab::UiEvent::Revoked`].
+    Revoked {
+        peer: String,
+    },
     PairingFailed {
         reason: String,
     },
@@ -600,6 +604,9 @@ impl From<cv::UiEvent> for FfiUiEvent {
             cv::UiEvent::PairingComplete { peer, name } => Self::PairingComplete {
                 peer: peer.to_string(),
                 name,
+            },
+            cv::UiEvent::Revoked { peer } => Self::Revoked {
+                peer: peer.to_string(),
             },
             cv::UiEvent::PairingFailed { reason } => Self::PairingFailed { reason },
             cv::UiEvent::PeerReachable { peer, name } => Self::PeerReachable {

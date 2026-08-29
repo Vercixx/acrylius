@@ -24,6 +24,8 @@ pub enum Request {
     Approve,
     Deny,
     Devices,
+    /// What is on this network and not paired with.
+    Nearby,
     Revoke {
         device: String,
     },
@@ -104,6 +106,23 @@ pub struct Device {
     pub reachable: bool,
 }
 
+/// A machine on this network that this one is not paired with.
+///
+/// No device id: that is derived from a static key, and nothing has exchanged
+/// keys with this machine yet. A fingerprint is what an advertisement carries
+/// and all there is to tell two rows apart by.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct Nearby {
+    pub fingerprint: String,
+    pub name: String,
+    /// Ready to hand to `pair with`.
+    pub addr: String,
+    pub transport: u16,
+    /// Whether it says it is already busy pairing with somebody.
+    pub pairing: bool,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum Response {
@@ -115,6 +134,9 @@ pub enum Response {
     /// silently closed the connection with no reply.
     Devices {
         devices: Vec<Device>,
+    },
+    Nearby {
+        nearby: Vec<Nearby>,
     },
     /// Anything the core wanted a human to see, forwarded verbatim.
     Event {

@@ -174,6 +174,37 @@ struct PairingWindow {
     awaiting: Option<AwaitingConfirm>,
 }
 
+/// A machine on the network that this one is not paired with.
+///
+/// Borrowed from the core rather than cloned: this is read to answer a question
+/// and then dropped.
+#[derive(Clone, Debug)]
+pub struct Nearby<'a> {
+    pub fingerprint: &'a Fingerprint,
+    pub name: &'a str,
+    /// Transport-defined and opaque, and the best route known for it.
+    pub addr: String,
+    pub transport: TransportId,
+    pub pairing: bool,
+}
+
+/// A machine discovery has shown us, and what it said about itself.
+///
+/// This used to be a bare [`Routes`], which was enough while nothing but a dial
+/// ever read it. It is now also the answer to "what is on this network", and
+/// that needs a name — so a device can be re-offered later without waiting for a
+/// sighting that may never come again. Both transports resolve a machine once
+/// and then stay quiet, so "later" is otherwise never.
+#[derive(Clone, Debug)]
+struct Sighting {
+    routes: Routes,
+    /// Advertised, therefore untrusted. It reaches a screen and nothing else;
+    /// who is actually there is settled by the handshake.
+    name: String,
+    /// Whether it said it was already busy pairing with somebody.
+    pairing: bool,
+}
+
 pub struct Core {
     identity: Identity,
     config: CoreConfig,
@@ -189,7 +220,7 @@ pub struct Core {
     /// about it changes, so an announcement that arrives before pairing is the
     /// only one there will be. Dropping it because the sender was not yet a
     /// peer meant the address was gone for good.
-    seen: BTreeMap<Fingerprint, Routes>,
+    seen: BTreeMap<Fingerprint, Sighting>,
     pairing: Option<PairingWindow>,
     /// Monotonic time before which no pairing handshake is answered.
     ///
@@ -354,6 +385,59 @@ impl Core {
         None
     }
 
+    /// Offer a machine discovery has seen, on the best route known for it.
+    ///
+    /// Does nothing for a machine already paired: that one has its own row,
+    /// whose state comes from whether a session is up rather than from whether
+    /// discovery can currently see it.
+    fn announce(&self, fp: &Fingerprint, out: &mut Outcome) {
+        let Some(s) = self.seen.get(fp) else { return };
+        let Some((transport, addr)) = s.routes.in_preference_order().next() else {
+            return;
+        };
+        if self
+            .peers
+            .values()
+            .any(|r| r.fingerprint().as_ref() == Some(fp))
+        {
+            return;
+        }
+        out.ui(UiEvent::Discovered {
+            fingerprint: fp.clone(),
+            name: s.name.clone(),
+            addr,
+            transport,
+            pairing: s.pairing,
+        });
+    }
+
+    /// Every machine discovery can currently see that this one is not paired
+    /// with, on the best route known for each.
+    ///
+    /// The desktop's answer to "what could I pair with", which until now had
+    /// none: this map had no accessor and held no name, so `acryliusctl pair
+    /// with` could be told an address and there was nothing that would tell you
+    /// one.
+    pub fn nearby(&self) -> impl Iterator<Item = Nearby<'_>> {
+        self.seen.iter().filter_map(|(fp, s)| {
+            if self
+                .peers
+                .values()
+                .any(|r| r.fingerprint().as_ref() == Some(fp))
+            {
+                return None;
+            }
+            let (transport, addr) = s.routes.in_preference_order().next()?;
+            Some(Nearby {
+                fingerprint: fp,
+                name: &s.name,
+                addr,
+                transport,
+                pairing: s.pairing,
+            })
+        })
+    }
+
     /// Claim the pairing slot, from either direction.
     ///
     /// Called before the first frame rather than after the handshake completes,
@@ -476,10 +560,17 @@ impl Core {
                     if self.seen.len() >= MAX_SEEN && !self.seen.contains_key(&fp) {
                         self.seen.clear();
                     }
-                    self.seen
-                        .entry(fp.clone())
-                        .or_default()
-                        .set(transport, peer.addr.clone());
+                    let sighting = self.seen.entry(fp.clone()).or_insert_with(|| Sighting {
+                        routes: Routes::default(),
+                        name: peer.name.clone(),
+                        pairing: peer.pairing,
+                    });
+                    sighting.routes.set(transport, peer.addr.clone());
+                    // The newest answer wins for both, because both can change:
+                    // a machine can be renamed, and `pair=1` goes up and down as
+                    // somebody pairs with it.
+                    sighting.name = peer.name.clone();
+                    sighting.pairing = peer.pairing;
                     if let Some(rec) = self
                         .peers
                         .values()
@@ -511,13 +602,14 @@ impl Core {
                         // machine on the network and had no way to mention one.
                         // That is the whole gap between "discovery works" and
                         // "you can pick a computer to pair with".
-                        out.ui(UiEvent::Discovered {
-                            fingerprint: fp,
-                            name: peer.name,
-                            addr: peer.addr,
-                            transport,
-                            pairing: peer.pairing,
-                        });
+                        //
+                        // The *best* route, not the one that just arrived. A
+                        // screen keys this by fingerprint and the last answer
+                        // wins, so announcing whichever transport spoke most
+                        // recently meant Bluetooth — which repeats — quietly
+                        // replaced a working Wi-Fi address, and a tap then
+                        // paired over the slower radio.
+                        self.announce(&fp, &mut out);
                     }
                 }
             }
@@ -535,8 +627,9 @@ impl Core {
                 let gone: Vec<Fingerprint> = self
                     .seen
                     .iter_mut()
-                    .filter_map(|(fp, routes)| {
-                        (routes.forget(transport, &addr) && routes.is_empty()).then(|| fp.clone())
+                    .filter_map(|(fp, s)| {
+                        (s.routes.forget(transport, &addr) && s.routes.is_empty())
+                            .then(|| fp.clone())
                     })
                     .collect();
                 for fp in gone {
@@ -1172,7 +1265,10 @@ impl Core {
         {
             // They dialled us, so we have no address of theirs from the
             // handshake. Discovery may still have shown us one.
-            self.addrs.entry(id.clone()).or_default().merge_from(&via);
+            self.addrs
+                .entry(id.clone())
+                .or_default()
+                .merge_from(&via.routes);
         }
         let (key, value) = Self::peer_blob(&a.record);
         out.push(Action::Persist {
@@ -1571,7 +1667,7 @@ impl Core {
         // shown us, or nothing.
         let known = self.addrs.get(&peer).cloned().or_else(|| {
             let fp = self.peers.get(&peer)?.fingerprint()?;
-            self.seen.get(&fp).cloned()
+            self.seen.get(&fp).map(|s| s.routes.clone())
         });
         let mut routes: Vec<(TransportId, String)> =
             known.iter().flat_map(Routes::in_preference_order).collect();
@@ -1962,6 +2058,9 @@ impl Core {
     }
 
     fn handle_revoke(&mut self, now_ms: u64, peer: &DeviceId, out: &mut Outcome) {
+        // Kept before the record goes: `announce` below needs it to find the
+        // machine in `seen`, and by then there is nothing left to ask.
+        let fingerprint = self.peers.get(peer).and_then(PeerRecord::fingerprint);
         // Drop the record first, so a race cannot leave a live session against a
         // peer we have decided to forget.
         self.peers.remove(peer);
@@ -1984,6 +2083,21 @@ impl Core {
                 reason: LinkDownReason::Protocol(ErrorCode::NotPaired),
             });
             self.on_link_down(now_ms, l, out);
+        }
+
+        // Said out loud, so a screen can stop drawing it without having to
+        // guess when the core got round to this. Nothing announced a revoke,
+        // and a host that asked for one and then read the peer list back
+        // usually read it before this had run.
+        out.ui(UiEvent::Revoked { peer: peer.clone() });
+
+        // And offer it again. A machine that is still on the network is a
+        // machine you may want to pair with a second time — but discovery
+        // resolves once and then stays quiet, so nothing would ever mention it
+        // again and the app had to be force-quit to see it. We already know
+        // where it is; this is only the part where we say so.
+        if let Some(fp) = fingerprint {
+            self.announce(&fp, out);
         }
     }
 

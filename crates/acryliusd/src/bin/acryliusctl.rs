@@ -113,6 +113,11 @@ struct Device {
 enum DeviceCmd {
     /// Paired devices.
     List,
+    /// Machines on this network that are not paired with.
+    ///
+    /// The other half of `pair with`, which takes an address and had nothing
+    /// anywhere that would tell you one.
+    Nearby,
     /// Forget one. Its next connection is a stranger's.
     Forget {
         #[arg(allow_hyphen_values = true)]
@@ -377,6 +382,7 @@ async fn main() -> anyhow::Result<()> {
         },
         Top::Device(d) => match d.what {
             DeviceCmd::List => (Request::Devices, false),
+            DeviceCmd::Nearby => (Request::Nearby, false),
             DeviceCmd::Forget { device } => (Request::Revoke { device }, false),
             DeviceCmd::Connect { device, addr } => (Request::Connect { device, addr }, false),
             DeviceCmd::Ping { device } => (Request::Ping { device }, false),
@@ -502,6 +508,22 @@ async fn main() -> anyhow::Result<()> {
                     );
                     outln!("  fingerprint {}", x.fingerprint);
                 }
+            }
+            Response::Nearby { nearby } if nearby.is_empty() => {
+                outln!("nothing nearby that is not already paired");
+            }
+            Response::Nearby { nearby } => {
+                for x in nearby {
+                    outln!(
+                        "{}  {}{}",
+                        x.addr,
+                        x.name,
+                        if x.pairing { "  (busy pairing)" } else { "" }
+                    );
+                    outln!("  fingerprint {}", x.fingerprint);
+                }
+                outln!();
+                outln!("Pair with one: acryliusctl pair with <address>");
             }
             Response::Event { text } => outln!("{text}"),
             Response::Confirm {
@@ -689,7 +711,7 @@ mod tests {
                 DeviceCmd::Forget { device }
                 | DeviceCmd::Connect { device, .. }
                 | DeviceCmd::Ping { device } => device,
-                DeviceCmd::List => return None,
+                DeviceCmd::List | DeviceCmd::Nearby => return None,
             },
             Top::Screen(s) => s.what.parts().0,
             Top::Clip(c) => match c.what {

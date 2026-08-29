@@ -555,9 +555,17 @@ final class AppModel {
         #endif
     }
 
+    /// Forget a device.
+    ///
+    /// No refresh here on purpose. `submit` only queues — the pump does the
+    /// work — so reading the peer list back on the next line usually read it
+    /// before the core had removed anything. It looked right whenever the
+    /// device happened to be connected, because closing its link announced
+    /// `peerUnreachable` and *that* refreshed; forgetting a device that was
+    /// already unreachable left the row on screen. The core now says when it
+    /// has done it, and `.revoked` is what redraws.
     func forget(_ peer: FfiPeer) async {
         await runtime?.submit(.revoke(peer: peer.deviceId))
-        await refresh()
     }
 
     private func refresh() async {
@@ -635,6 +643,12 @@ final class AppModel {
             status = .ready
             activity = "Paired with \(name)"
             Task { await refresh() }
+        case let .revoked(peer):
+            // The device is gone from the core, so it can go from the screen.
+            // Dropped here rather than re-read, because the answer is already
+            // in hand and a round trip would only be a second chance to race.
+            peers.removeAll { $0.deviceId == peer }
+            publishSnapshot()
         case let .pairingFailed(reason):
             pairingSas = nil
             lastError = reason

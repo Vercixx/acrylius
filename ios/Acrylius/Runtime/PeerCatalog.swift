@@ -130,6 +130,15 @@ public struct PeerCatalog: Equatable, Sendable {
     @discardableResult
     public mutating func ingest(_ event: FfiUiEvent) -> Bool {
         guard case let .plugin(peer, cap, ty, body) = event else {
+            if case let .revoked(peer) = event {
+                // Everything here was something that device told us about
+                // itself. Forgetting the device and keeping its command list,
+                // its wake targets and whatever went wrong with it last would
+                // leave all of that to be handed straight back if it were ever
+                // paired again.
+                byPeer.removeValue(forKey: peer)
+                return true
+            }
             if case let .peerUnreachable(peer) = event {
                 // Keep what the peer told us. A wake target is only useful once
                 // the machine is gone, and a command list does not change while

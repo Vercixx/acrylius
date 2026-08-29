@@ -25,7 +25,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, mpsc};
 
 // One definition, shared with the CLI. See `crate::ipc`.
-pub use acryliusd::ipc::{Command, Device, Player, Report, Request, Response, Status};
+pub use acryliusd::ipc::{Command, Device, Nearby, Player, Report, Request, Response, Status};
 
 /// A live control socket. Unlinked on drop, but only if we are the instance
 /// that bound it.
@@ -139,6 +139,7 @@ fn about(e: &UiEvent, who: &DeviceId) -> bool {
         // control socket's waits are all about a device already paired.
         UiEvent::Discovered { .. }
         | UiEvent::Undiscovered { .. }
+        | UiEvent::Revoked { .. }
         | UiEvent::PairingSas { .. }
         | UiEvent::PairingFailed { .. } => false,
     }
@@ -165,6 +166,7 @@ fn render(e: &UiEvent) -> String {
         ),
         UiEvent::Undiscovered { fingerprint } => format!("{fingerprint} has left the network"),
         UiEvent::PairingComplete { peer, name } => format!("paired with {name} ({peer})"),
+        UiEvent::Revoked { peer } => format!("forgot {peer}"),
         UiEvent::PairingFailed { reason } => format!("pairing failed: {reason}"),
         UiEvent::PeerReachable { peer, name } => format!("{name} ({peer}) is reachable"),
         UiEvent::PeerUnreachable { peer } => format!("{peer} is unreachable"),
@@ -182,6 +184,7 @@ pub struct Handles {
     pub ui: broadcast::Sender<UiEvent>,
     pub status: std::sync::Arc<tokio::sync::Mutex<Option<Status>>>,
     pub devices: std::sync::Arc<tokio::sync::Mutex<Vec<Device>>>,
+    pub nearby: std::sync::Arc<tokio::sync::Mutex<Vec<Nearby>>>,
 }
 
 pub async fn serve(path: PathBuf, handles: Handles) -> anyhow::Result<ControlSocket> {
@@ -223,6 +226,7 @@ pub async fn serve(path: PathBuf, handles: Handles) -> anyhow::Result<ControlSoc
                 ui: handles.ui.clone(),
                 status: handles.status.clone(),
                 devices: handles.devices.clone(),
+                nearby: handles.nearby.clone(),
             };
             tokio::spawn(async move {
                 if let Err(e) = handle_conn(stream, h).await {
@@ -289,6 +293,10 @@ async fn handle_conn(stream: UnixStream, h: Handles) -> anyhow::Result<()> {
             Request::Devices => {
                 let d = h.devices.lock().await.clone();
                 write(&mut wr, &Response::Devices { devices: d }).await?;
+            }
+            Request::Nearby => {
+                let n = h.nearby.lock().await.clone();
+                write(&mut wr, &Response::Nearby { nearby: n }).await?;
             }
             // Nothing to arm: any device may start a pairing handshake, so this
             // only subscribes and waits for one. It is what answers a pairing

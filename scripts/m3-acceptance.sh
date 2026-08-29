@@ -150,6 +150,33 @@ settle
 [ -z "$(digits a)" ]; check $? "and the next attempt is refused, not merely slower"
 
 echo
+echo "### finding something to pair with"
+# The other half of `pair with`, which takes an address and until now had
+# nothing anywhere that would tell you one.
+#
+# Polled, and skipped rather than failed when nothing at all turns up: this
+# needs mDNS to actually work on the machine running the script, which is not
+# something the script can arrange. A list that has *something* in it and not
+# the machine we want is a real failure and is still reported as one.
+# Matched on the port, not on `127.0.0.1:port`. Discovery advertises the
+# address the machine is actually reachable at, which on a machine with a real
+# network card is its LAN address — the loopback address is what this script
+# *dials*, not what mDNS hands back.
+for _ in $(seq 1 60); do
+  "$BIN/acryliusctl" --state $D/a device nearby | grep -q ":$PORT_C " && break
+  sleep 0.25
+done
+NEARBY=$("$BIN/acryliusctl" --state $D/a device nearby)
+if ! echo "$NEARBY" | grep -q "fingerprint"; then
+  skip "mDNS found nothing on this machine; the nearby list cannot be checked"
+else
+  echo "$NEARBY" | grep -q ":$PORT_C "
+  check $? "c is listed as nearby, with the address pair with takes"
+  echo "$NEARBY" | grep -q ":$PORT_B "; RC=$?
+  [ $RC -ne 0 ]; check $? "and b is not, because a is already paired with it"
+fi
+
+echo
 echo "### the CLI surface"
 "$BIN/acryliusctl" pair --help 2>&1 | grep -q -- '--code'; RC=$?
 [ $RC -ne 0 ]; check $? "no --code flag survives on \`pair\`"

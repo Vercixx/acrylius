@@ -1396,6 +1396,140 @@ fn a_pairing_we_started_does_not_answer_anybody_elses_handshake() {
     assert_eq!(net.b.peers().count(), 1);
 }
 
+/// The best route a side was last offered for a machine, and on which transport.
+fn offered(net: &Net, side: Side) -> Option<(TransportId, String)> {
+    net.ui.iter().rev().find_map(|(s, e)| match e {
+        UiEvent::Discovered {
+            addr, transport, ..
+        } if *s == side => Some((*transport, addr.clone())),
+        _ => None,
+    })
+}
+
+#[test]
+fn a_worse_transport_seeing_a_machine_does_not_replace_its_better_address() {
+    // A screen keys "on this network" by fingerprint and the last answer wins,
+    // so announcing whichever transport spoke most recently was enough to break
+    // this: Bluetooth repeats and Bonjour does not, so the slower radio's
+    // address quietly replaced the working one and a tap paired over it.
+    let (a, b) = (core("phone"), core("pc"));
+    let mut net = Net::new(a, b);
+
+    discover_via(&mut net, Side::A, Side::B, TRANSPORT, "b-over-wifi");
+    assert_eq!(
+        offered(&net, Side::A),
+        Some((TRANSPORT, "b-over-wifi".to_string()))
+    );
+
+    // The same machine, seen again on the worse transport.
+    discover_via(&mut net, Side::A, Side::B, SLOWER, "b-over-bluetooth");
+    assert_eq!(
+        offered(&net, Side::A),
+        Some((TRANSPORT, "b-over-wifi".to_string())),
+        "a sighting on a worse transport must not become the offered route"
+    );
+
+    // And the worse one is still remembered, so losing Wi-Fi falls back to it
+    // rather than losing the machine.
+    discover_via(&mut net, Side::A, Side::B, SLOWER, "b-over-bluetooth");
+    net.queue.push_back((
+        Side::A,
+        Event::Undiscovered {
+            transport: TRANSPORT,
+            addr: "b-over-wifi".to_string(),
+        },
+    ));
+    net.run();
+    discover_via(&mut net, Side::A, Side::B, SLOWER, "b-over-bluetooth");
+    assert_eq!(
+        offered(&net, Side::A),
+        Some((SLOWER, "b-over-bluetooth".to_string())),
+        "with the better route gone, the worse one is what is left"
+    );
+}
+
+#[test]
+fn what_is_nearby_is_what_is_not_already_paired() {
+    // The desktop's answer to "what could I pair with". Getting the test round
+    // the wrong way would offer every machine already paired and none of the
+    // ones you could actually do something about — and since the only thing
+    // this list is *for* is handing an address to `pair with`, that is a list
+    // of addresses that will all be refused.
+    let (mut net, _a_id, _b_id) = paired();
+    discover(&mut net, Side::A, Side::B);
+    discover_via(&mut net, Side::A, Side::C, TRANSPORT, "c-over-wifi");
+
+    let nearby: Vec<String> = net.a.nearby().map(|n| n.addr.clone()).collect();
+    assert_eq!(
+        nearby,
+        vec!["c-over-wifi".to_string()],
+        "only the machine that is not paired, and on the route to reach it"
+    );
+
+    // Pair with it too, and there is nothing left to offer.
+    net.local(
+        Side::A,
+        LocalCommand::RequestPairing {
+            transport: TRANSPORT,
+            addr: Side::C.addr().to_string(),
+        },
+    );
+    net.local(Side::A, LocalCommand::ConfirmPairing { accept: true });
+    net.local(Side::C, LocalCommand::ConfirmPairing { accept: true });
+    assert_eq!(
+        net.a.nearby().count(),
+        0,
+        "a machine becomes un-offerable the moment it is paired"
+    );
+}
+
+#[test]
+fn forgetting_a_device_says_so_and_offers_it_again() {
+    // Two bugs in one flow, both reported from a phone.
+    //
+    // Asking to revoke is one-way, so a host that read the peer list back on
+    // the next line usually read it before the core had removed anything. It
+    // looked right whenever the device was connected, because closing its link
+    // announced `PeerUnreachable` and *that* refreshed — forgetting an
+    // unreachable device left the row on screen.
+    //
+    // And nothing offered the machine again afterwards. Discovery resolves once
+    // and then stays quiet, so a computer you had just forgotten could not be
+    // paired with again until the app was force-quit.
+    let (mut net, _a_id, b_id) = paired();
+    discover(&mut net, Side::A, Side::B);
+    net.ui.clear();
+
+    net.local(Side::A, LocalCommand::Revoke { peer: b_id.clone() });
+
+    assert!(
+        net.saw(
+            Side::A,
+            |e| matches!(e, UiEvent::Revoked { peer } if peer == &b_id)
+        ),
+        "a revoke must announce itself, or a screen can only guess when it happened"
+    );
+    assert!(
+        offered(&net, Side::A).is_some(),
+        "and the machine is on the network still, so it must be offered again"
+    );
+    assert_eq!(net.a.peers().count(), 0, "and it really is forgotten");
+}
+
+#[test]
+fn a_machine_never_seen_is_not_offered_after_forgetting_one() {
+    // The other half: `announce` reads a cache of sightings, and a peer paired
+    // by typing an address was never in it. Offering something that had never
+    // been discovered would be inventing a machine.
+    let (mut net, _a_id, b_id) = paired();
+    net.ui.clear();
+    net.local(Side::A, LocalCommand::Revoke { peer: b_id });
+    assert!(
+        offered(&net, Side::A).is_none(),
+        "nothing discovery has not seen may be offered"
+    );
+}
+
 #[test]
 fn nobody_had_to_open_anything_for_a_tap_to_reach_a_screen() {
     // The whole point of the change: B did not open a window, was not asked to,

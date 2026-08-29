@@ -71,6 +71,14 @@ public final class BLETransport: NSObject, Transport, @unchecked Sendable {
         var pending: [Data] = []
         var fingerprint: String?
         var name: String = "unnamed"
+        /// Whether the core has been told this machine is on the network.
+        ///
+        /// Kept so it can be told when it is not. Nothing here ever withdrew a
+        /// sighting — `NWTransport` was the only place in the app that did — and
+        /// because the core only drops a machine from "on this network" once
+        /// *every* transport has withdrawn it, one Bluetooth sighting pinned
+        /// every entry forever, however correctly Bonjour withdrew its own.
+        var announced = false
 
         init(_ p: CBPeripheral) { self.peripheral = p }
     }
@@ -508,12 +516,21 @@ extension BLETransport: CBCentralManagerDelegate {
         lock.lock()
         let p = peers[id]
         let link = p?.link
+        let wasAnnounced = p?.announced ?? false
+        p?.announced = false
         p?.link = nil
         p?.rx = nil
         p?.tx = nil
         p?.reassembler = nil
         p?.pending.removeAll()
         lock.unlock()
+        // Before the link check, and deliberately: a machine is announced when
+        // its identity is read, which happens whether or not the core ever
+        // opened a link to it. Withdrawing only alongside a link would leave
+        // every machine that was merely looked at on the list for good.
+        if wasAnnounced {
+            fire(.undiscovered(transport: transportId, addr: "\(Self.addrPrefix)\(id.uuidString)"))
+        }
         guard let link else { return false }
         fire(
             .linkDown(
@@ -617,6 +634,7 @@ extension BLETransport: CBPeripheralDelegate {
             let name = fields["n"] ?? p.name
             p.fingerprint = fp
             p.name = name
+            p.announced = true
             push(.note("identity: \(fp.map { String($0.prefix(8)) } ?? "none")"))
             fire(
                 .discovered(
