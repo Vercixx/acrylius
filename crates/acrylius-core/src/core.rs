@@ -1575,9 +1575,8 @@ impl Core {
             // No mention of a command-line flag: this reaches a phone screen as
             // often as a terminal, and advice about `--addr` there is advice
             // about a thing that is not on the device reading it.
-            const NOWHERE: &str = "Nothing has found it yet — it may be switched off, on \
-                                   another network, or a device that only ever dials out, \
-                                   which is never discovered at all.";
+            const NOWHERE: &str = "Device is asleep or unreachable. It might be off or on \
+                                   another network.";
             // Kept whoever asked. This is the most common reason a peer sits
             // there not connecting, and the screen saying so is the only place
             // it now gets explained.
@@ -1705,8 +1704,8 @@ impl Core {
                 peer: Some(peer.clone()),
                 code: ErrorCode::NotAllowed,
                 detail: format!(
-                    "the link to {peer} cannot carry files. Reach it over the \
-                     network for that."
+                    "transport for connection to {peer} does not support file transfers. \
+                     change transports and try again."
                 ),
             });
             // Reported finished-and-failed as well, so whichever plugin asked
@@ -2051,7 +2050,7 @@ impl Core {
             if let Some(LinkState::Handshaking(h)) = was
                 && let Some(pending) = h.fallback
             {
-                self.try_next_route(now_ms, pending, "it answered, then stopped part way", out);
+                self.try_next_route(now_ms, pending, "got answer that cut off half way", out);
             }
         }
 
@@ -2078,7 +2077,7 @@ impl Core {
             let Some((_, pending)) = self.pending_peer_dials.remove(&d) else {
                 continue;
             };
-            self.try_next_route(now_ms, pending, "it never answered", out);
+            self.try_next_route(now_ms, pending, "peer didn't answer", out);
         }
 
         // Try again the peers nothing can reach.
@@ -2135,7 +2134,7 @@ impl Core {
                     self.try_next_route(
                         now_ms,
                         pending,
-                        "the connection closed before it opened",
+                        "connection closed before session was established",
                         out,
                     );
                 }
@@ -2165,7 +2164,7 @@ impl Core {
             peer = %u.peer,
             transport = u.transport.0,
             now_on = ?self.best_link(&u.peer).map(|(_, b)| b.transport.0),
-            "a route to a peer went away"
+            "lost route to peer"
         );
 
         if self.best_link(&u.peer).is_some() {
@@ -2342,7 +2341,7 @@ impl CoreBuilder {
             } else {
                 tracing::debug!(
                     plugin = m.id,
-                    "this host cannot serve requests for this capability, only send them"
+                    "this host cannot serve requests for this capability"
                 );
             }
             caps_out.extend(m.outgoing.iter().map(|s| (*s).to_string()));

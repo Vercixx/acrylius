@@ -71,7 +71,7 @@ struct DeviceView: View {
                 // over quietly is indistinguishable from something broken
                 // unless it says so somewhere.
                 if let over = Self.carrying(peer.transport) {
-                    LabeledContent("Over", value: over)
+                    LabeledContent("Transport", value: over)
                 }
             } footer: {
                 // Only once every route has been spent. A peer still being

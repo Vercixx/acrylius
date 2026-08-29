@@ -29,8 +29,6 @@ struct DebugView: View {
                     .textSelection(.enabled)
             } header: {
                 Text("Fingerprint")
-            } footer: {
-                Text("Compare this with what the computer shows when pairing.")
             }
 
             Section {
@@ -69,11 +67,6 @@ struct DebugView: View {
 
             Section {
                 NavigationLink("Bluetooth") { BluetoothView() }
-            } footer: {
-                // The permission prompt is no longer raised by opening this
-                // screen — the Devices tab offers a button for that — so this
-                // is only the transcript now.
-                Text("What the radio is doing, and every note it has made.")
             }
         }
         .navigationTitle("Debug")

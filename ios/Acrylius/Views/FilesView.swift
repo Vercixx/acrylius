@@ -44,7 +44,7 @@ struct FilesView: View {
                     } header: {
                         Text("Offered to this \(UIDevice.current.model)")
                     } footer: {
-                        Text("Accepted files go to Acrylius in the Files app.")
+                        Text("Incoming files are stored in \"Acrylius\" folder in the Files app.")
                     }
                 }
 
@@ -70,9 +70,9 @@ struct FilesView: View {
                         // offer travels, so the failure would arrive well after
                         // the part that felt like the decision.
                         ContentUnavailableView(
-                            "Nothing connected",
+                            "Nothing is connected",
                             systemImage: "arrow.up.arrow.down",
-                            description: Text("Connect a computer to send it a file.")
+                            description: Text("Connect a device to begin transfering.")
                         )
                     }
                 }
