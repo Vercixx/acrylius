@@ -533,7 +533,13 @@ pub enum FfiUiEvent {
         fingerprint: String,
         name: String,
         addr: String,
-        transport: u32,
+        /// `u16`, like every other transport id across this boundary.
+        ///
+        /// It was widened to `u32` while nothing read it. A tap now pairs over
+        /// whichever transport saw the machine, so this is handed straight back
+        /// as `FfiEvent::RequestPairing`'s `transport` — and a type that did not
+        /// match its only destination is a cast waiting to be written wrong.
+        transport: u16,
         pairing: bool,
     },
     /// A device that was nearby is not any more. See
@@ -576,7 +582,7 @@ impl From<cv::UiEvent> for FfiUiEvent {
                 fingerprint: fingerprint.to_string(),
                 name,
                 addr,
-                transport: u32::from(transport.0),
+                transport: transport.0,
                 pairing,
             },
             cv::UiEvent::Undiscovered { fingerprint } => Self::Undiscovered {

@@ -18,7 +18,11 @@ struct PairView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @State private var addr = ""
-    @State private var manual = false
+    /// Whether this screen has asked for a pairing yet.
+    ///
+    /// Only so that an error arriving from somewhere else — a transfer, a
+    /// media reading — does not close a screen the person is still reading.
+    @State private var asked = false
 
     /// Machines seen recently enough to still be worth offering.
     ///
@@ -49,6 +53,7 @@ struct PairView: View {
                             Button {
                                 // The whole gesture. Everything a pairing needs
                                 // comes from the handshake this starts.
+                                asked = true
                                 Task { await model.pair(at: pc.addr, transport: pc.transport) }
                             } label: {
                                 HStack {
@@ -80,12 +85,16 @@ struct PairView: View {
                     }
                 }
 
-                Section(isExpanded: $manual) {
+                // Not an expandable section: `Section(isExpanded:)` has no
+                // initializer that takes a footer, and the footer is the part
+                // that says when this is for.
+                Section {
                     TextField("192.168.1.10:1971", text: $addr)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .keyboardType(.URL)
                     Button("Pair with this address") {
+                        asked = true
                         Task { await model.pair(at: addr) }
                     }
                     .disabled(addr.isEmpty)
@@ -99,7 +108,6 @@ struct PairView: View {
                     Text("Only needed if this \(deviceKind()) cannot find the computer by itself.")
                 }
             }
-            .formStyle(.grouped)
             .navigationTitle("Pair another device")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -111,6 +119,13 @@ struct PairView: View {
             // would leave the confirmation behind this one.
             .onChange(of: model.pairingSas) {
                 if model.pairingSas != nil { dismiss() }
+            }
+            // And when the answer is no. A refusal — the far end busy, or
+            // cooling down after a mismatch — reaches `RootView`'s alert, which
+            // is *behind* this sheet and cannot be seen until it closes. Without
+            // this a tap that was turned away looks like a tap that did nothing.
+            .onChange(of: model.lastErrorAt) {
+                if asked { dismiss() }
             }
         }
     }
