@@ -176,34 +176,38 @@ Mostly covered by the M0/M1 acceptance runs, which pass. What they do not cover:
 
 ## 6. Pairing (Stage E)
 
-The half that is done: a desktop advertises an open window, the phone lists what
-is nearby and marks which machines are waiting, and a QR replaces typing.
+**Tap a computer, compare six digits, press a button on each end.** Nothing is
+typed and nothing is scanned. The code, the QR and the scanner are all gone.
 
-- [ ] `acryliusctl pair` draws a QR in the terminal above the code.
-- [ ] The QR is scannable from a phone camera at arm's length. *If it is not,
-      the error-correction level is `L` and can be raised.*
-- [ ] Over SSH, the QR still renders (it is text, not an image).
+Most of this is automated by `./scripts/m3-acceptance.sh`; run that first, and
+run it with `ACRYLIUS_M3_PHONE=1` to print the phone half as a checklist.
+
 - [ ] On the phone: Pair shows an **On this network** section listing the
-      desktop, with the desktop's name and address.
-- [ ] While `acryliusctl pair` is running, that row is marked **waiting**;
-      within a few seconds of the window closing, the mark goes away. *This is
-      `pair=1`, which has been specified since M0 and produced by nothing until
-      now — both ends have been reading a flag that was always false.*
-- [ ] Tapping a nearby row fills in the address.
-- [ ] **Scan the QR.** Pairing completes with nothing typed, and the six-digit
-      SAS on the phone matches the terminal.
-- [ ] A QR that is not ours — a Wi-Fi code, a URL — says "That is not an
-      Acrylius pairing code" rather than failing silently or crashing.
-- [ ] First scan raises the camera permission prompt with the wording from
-      `Info.plist`. **The app has never asked for the camera before**; a missing
-      usage string is a crash, so this is worth doing on a clean install.
-- [ ] Deny camera access, then open Scan again: it explains rather than showing
-      a black rectangle.
+      desktop, with its name and address. There is **no** code field and **no**
+      scan button anywhere on the screen.
+- [ ] Tapping the row pairs outright rather than filling in a text field.
+- [ ] Six digits appear on the phone **and** as a desktop notification, and
+      they match.
+- [ ] The notification carries **They match** and **They don't** as buttons.
+- [ ] Pressing **They match** on both ends pairs, and a session comes up without
+      force-quitting the app.
+- [ ] Pressing **They don't** on either end pairs nothing, and a second attempt
+      from the phone is refused for a few minutes afterwards. *This cooldown is
+      load-bearing: see PROTOCOL.md § 8.*
+- [ ] While the desktop is showing digits, its row on a **second** phone is
+      greyed out and marked **busy**. *This is `pair=1`, which now means busy
+      rather than ready.*
+- [ ] With `[share] enabled = false` in the desktop config, the pairing
+      notification still appears. *It used to be built only alongside file
+      sharing, so turning sharing off silently cost every desktop prompt.*
+- [ ] Kill the notification daemon, then pair: the desktop degrades to a
+      notification-free flow that `acryliusctl pair` can still answer, rather
+      than losing the pairing.
+- [ ] Over SSH with no desktop at all, `acryliusctl pair` waits, prints the
+      digits when a phone asks, and `pair approve` answers it.
 - [ ] A device name with punctuation or non-Latin characters — rename the
-      desktop to something like `Vercixx's PC` or `кухня` — survives the QR
-      round trip. *Unit-tested, but never through a real camera.*
-- [ ] Typing the code by hand still works, and `pair approve` still answers a
-      non-terminal `pair`.
+      desktop to something like `Vercixx's PC` or `кухня` — renders correctly in
+      the notification summary and in the phone's list.
 
 ## 7. Nothing broke
 
@@ -217,21 +221,16 @@ is nearby and marks which machines are waiting, and a QR replaces typing.
 
 ---
 
-## Known not done
+## Deliberately not built
 
-These are Stage E items that are **not in this build**, so do not go looking:
+Two things the M3 plan called for do not exist, and are not pending work — the
+design that replaced them does not need either:
 
-- **`PairRequest` (protocol kind byte 4).** Tapping a nearby computer fills in
-  its address; it does not open a pairing window on that computer. The window
-  still has to be opened at the keyboard with `acryliusctl pair`. This is the
-  piece that would make the phone-initiated flow complete, and it is the only
-  remaining wire change in M3.
-- **The Qt6 pairing window.** Pairing on Linux is still the terminal. The
-  notification path for file offers is unchanged and still works.
-- **`ServiceRemoved` handling.** mDNS never withdraws a service here, so a
-  computer switched off stays in the phone's nearby list until the app filters
-  it by age (5 minutes). A stale row costs a failed dial with a clear message,
-  not a wrong pairing.
+- **`PairRequest` (protocol kind byte 4).** It existed only because an unpaired
+  phone had no pre-shared key and therefore nothing it could say. Pairing has no
+  key at all now, so the pairing handshake — kind byte 1 — *is* the request.
+- **The Qt6 pairing window.** A notification carries six digits and two buttons,
+  which is the whole ceremony. No new workspace member, no cxx-qt, no CMake.
 
 ## Two reports that are not what they look like
 
@@ -248,7 +247,6 @@ choice, and what its log says while installing.
 **"On this network" is empty because there is nothing to put in it.** The
 section lists devices this phone is *not paired with*, and you have one
 computer, already paired. It will appear when a second machine is on the
-network, or after forgetting the one you have. Two things also have to be true
-for the **waiting** mark: the desktop must be running an M3 daemon
-(`./scripts/install.sh` — `pair=1` is produced by nothing older), and the
-pairing window must actually be open.
+network, or after forgetting the one you have. For the **busy** mark the desktop
+must also be running an M3 daemon (`./scripts/install.sh` — `pair=1` is produced
+by nothing older) and be mid-pairing with somebody else at that moment.
