@@ -13,11 +13,13 @@ print("device id:      \(core.deviceId())")
 print("service type:   \(serviceType())  port \(defaultPort())")
 print("caps in/out:    \(core.capsIn()) / \(core.capsOut())")
 
-// Open a pairing window and read back what the UI would show.
-let out = try! core.handle(monotonicMs: 1000, wallMs: 1_700_000_000_000, event: .openPairingWindow(code: "ABCD1234"))
+// Ask to pair, and read back what the host would be told to do about it.
+let out = try! core.handle(
+    monotonicMs: 1000, wallMs: 1_700_000_000_000,
+    event: .requestPairing(transport: 1, addr: "127.0.0.1:1971"))
 for a in out.actions {
-    if case let .ui(event) = a, case let .pairingWindowOpen(code, ms) = event {
-        print("ui:             window open, code \(code), \(ms/1000)s")
+    if case let .dial(transport, addr, _) = a {
+        print("ui:             dialling \(addr) on transport \(transport)")
     }
 }
 print("deadline:       \(out.nextDeadlineMs.map(String.init) ?? "none")")

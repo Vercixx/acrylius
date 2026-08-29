@@ -7,24 +7,23 @@
 //!
 //! ## Two patterns, and why each
 //!
-//! Pairing is `XXpsk0`. Plain `XX` would authenticate nothing until a human
-//! compared a short string carefully, and humans do not. We already have an
-//! out-of-band channel, the code `acryliusctl pair` prints, so the code is
-//! mixed in as a pre-shared key. `XX` also means neither side needs to know the
-//! other's static key in advance, which is exactly the situation on first
-//! contact.
+//! Pairing is plain `XX`: neither side knows the other's static key in advance,
+//! which is exactly the situation on first contact, and there is no pre-shared
+//! key because there is nothing for a person to type. Pairing begins by tapping
+//! a machine, so the only out-of-band channel is the pair of screens, and the
+//! six digits of `pairing::sas` are what crosses it.
 //!
-//! The PSK goes at position 0, not 3, and the difference is not cosmetic.
-//! `psk3` mixes the key into message 3, which the initiator writes, so it
-//! proves to the responder that the initiator knew the code and proves nothing
-//! in the other direction. An initiator talking to the wrong machine would
-//! complete its side, display a short authentication string, and sit waiting for
-//! a human to approve a peer that had never demonstrated knowing anything.
-//! `psk0` mixes the code into the chaining key before the first message, so
-//! every encrypted payload in either direction depends on it: a wrong code means
-//! message 1 does not decrypt, no reply is ever sent, and no code is displayed
-//! anywhere. The loopback suite pins this as
-//! `a_wrong_pairing_code_does_not_pair`.
+//! That makes the SAS the security mechanism rather than a cross-check. An
+//! active attacker can run two `XX` handshakes and relay between them; what
+//! stops it is that the two handshake hashes differ, so the digits differ and a
+//! person says so. Its only win is the two SAS values coinciding, one in a
+//! million per attempt — which is why the core rate-limits who may raise a
+//! confirmation, and why that limit is a security control rather than a
+//! politeness.
+//!
+//! This used to be `XXpsk0`, keyed by a code typed off the other machine's
+//! screen. The trade was deliberate: a code authenticated the handshake outright,
+//! but it could only be read by somebody already looking at that screen.
 //!
 //! Sessions are `IKpsk2`. The initiator already knows the responder's static
 //! key from pairing, so the session is up in one round trip, which matters
@@ -47,12 +46,12 @@ use crate::link::LinkAttrs;
 /// Noise's own hard limit on a single message.
 pub const MAX_NOISE_MESSAGE: usize = 65535;
 
-const PAIR_PARAMS: &str = "Noise_XXpsk0_25519_ChaChaPoly_SHA256";
+const PAIR_PARAMS: &str = "Noise_XX_25519_ChaChaPoly_SHA256";
 const SESSION_PARAMS: &str = "Noise_IKpsk2_25519_ChaChaPoly_SHA256";
 
-/// PSK positions, from the pattern names above. Getting these wrong is a silent
-/// interop failure rather than a compile error, so they are named once here.
-const PAIR_PSK_INDEX: u8 = 0;
+/// The session PSK's position, from the pattern name above. Getting it wrong is
+/// a silent interop failure rather than a compile error, so it is named once
+/// here. Pairing has no PSK at all.
 const SESSION_PSK_INDEX: u8 = 2;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -71,11 +70,9 @@ impl Mode {
         }
     }
 
+    /// Only meaningful for `Session`; `Pair` has no PSK and never asks.
     fn psk_index(self) -> u8 {
-        match self {
-            Self::Pair => PAIR_PSK_INDEX,
-            Self::Session => SESSION_PSK_INDEX,
-        }
+        SESSION_PSK_INDEX
     }
 
     /// The prologue, mixed into the handshake hash by both sides.
@@ -191,14 +188,17 @@ pub struct Handshake {
 }
 
 impl Handshake {
-    /// Start a pairing handshake. `psk` comes from the pairing code, and with
-    /// `psk0` it is required before either side can read anything at all.
-    pub fn pair_initiator(id: &Identity, psk: &[u8; 32]) -> Result<Self, NoiseError> {
-        Self::build(Mode::Pair, id, psk, None, true)
+    /// Start a pairing handshake.
+    ///
+    /// No key of any kind: anybody may complete one of these. What it buys is a
+    /// handshake hash, and the six digits both ends derive from it. Nothing is
+    /// written to the trust store until a person has compared them.
+    pub fn pair_initiator(id: &Identity) -> Result<Self, NoiseError> {
+        Self::build(Mode::Pair, id, None, None, true)
     }
 
-    pub fn pair_responder(id: &Identity, psk: &[u8; 32]) -> Result<Self, NoiseError> {
-        Self::build(Mode::Pair, id, psk, None, false)
+    pub fn pair_responder(id: &Identity) -> Result<Self, NoiseError> {
+        Self::build(Mode::Pair, id, None, None, false)
     }
 
     /// Start a session handshake with an already-paired peer.
@@ -207,11 +207,11 @@ impl Handshake {
         psk: &[u8; 32],
         peer_static: &[u8; 32],
     ) -> Result<Self, NoiseError> {
-        Self::build(Mode::Session, id, psk, Some(peer_static), true)
+        Self::build(Mode::Session, id, Some(psk), Some(peer_static), true)
     }
 
     pub fn session_responder(id: &Identity, psk: &[u8; 32]) -> Result<Self, NoiseError> {
-        Self::build(Mode::Session, id, psk, None, false)
+        Self::build(Mode::Session, id, Some(psk), None, false)
     }
 
     /// Learn who is calling, before we know which PSK to answer with.
@@ -230,7 +230,7 @@ impl Handshake {
     /// only used to choose a PSK, and if the choice is wrong, message 2 fails
     /// on the initiator exactly as it should.
     pub fn session_identify(id: &Identity, msg1: &[u8]) -> Result<[u8; 32], NoiseError> {
-        let mut probe = Self::build(Mode::Session, id, &[0u8; 32], None, false)?;
+        let mut probe = Self::build(Mode::Session, id, Some(&[0u8; 32]), None, false)?;
         probe.read(msg1)?;
         probe.peer_static().ok_or(NoiseError::NotComplete)
     }
@@ -238,15 +238,19 @@ impl Handshake {
     fn build(
         mode: Mode,
         id: &Identity,
-        psk: &[u8; 32],
+        psk: Option<&[u8; 32]>,
         peer_static: Option<&[u8; 32]>,
         initiator: bool,
     ) -> Result<Self, NoiseError> {
         let prologue = mode.prologue();
         let mut b = Builder::new(mode.params().parse().expect("static pattern parses"))
             .prologue(&prologue)?
-            .local_private_key(id.private())?
-            .psk(mode.psk_index(), psk)?;
+            .local_private_key(id.private())?;
+        // Only sessions carry one. `snow` rejects a PSK the pattern has no slot
+        // for, so this is not merely skipped work.
+        if let Some(psk) = psk {
+            b = b.psk(mode.psk_index(), psk)?;
+        }
         if let Some(rs) = peer_static {
             b = b.remote_public_key(rs)?;
         }
@@ -398,15 +402,10 @@ mod tests {
         LinkAttrs::loopback(TransportId(0))
     }
 
-    /// Drive a full XXpsk3 pairing to completion, returning both halves.
-    fn pair(
-        a: &Identity,
-        b: &Identity,
-        psk_a: &[u8; 32],
-        psk_b: &[u8; 32],
-    ) -> Result<(Handshake, Handshake), NoiseError> {
-        let mut i = Handshake::pair_initiator(a, psk_a)?;
-        let mut r = Handshake::pair_responder(b, psk_b)?;
+    /// Drive a full `XX` pairing to completion, returning both halves.
+    fn pair(a: &Identity, b: &Identity) -> Result<(Handshake, Handshake), NoiseError> {
+        let mut i = Handshake::pair_initiator(a)?;
+        let mut r = Handshake::pair_responder(b)?;
         let m1 = i.write(b"")?;
         r.read(&m1)?;
         let m2 = r.write(b"responder hello")?;
@@ -452,8 +451,7 @@ mod tests {
     #[test]
     fn pairing_completes_and_both_sides_agree_on_the_hash() {
         let (a, b) = (Identity::generate().unwrap(), Identity::generate().unwrap());
-        let psk = pairing::psk(&pairing::normalize("ABCD1234").unwrap());
-        let (i, r) = pair(&a, &b, &psk, &psk).unwrap();
+        let (i, r) = pair(&a, &b).unwrap();
 
         assert!(i.is_complete() && r.is_complete());
         assert_eq!(i.handshake_hash().unwrap(), r.handshake_hash().unwrap());
@@ -465,8 +463,7 @@ mod tests {
     #[test]
     fn both_ends_display_the_same_sas() {
         let (a, b) = (Identity::generate().unwrap(), Identity::generate().unwrap());
-        let psk = pairing::psk(&pairing::normalize("ABCD1234").unwrap());
-        let (i, r) = pair(&a, &b, &psk, &psk).unwrap();
+        let (i, r) = pair(&a, &b).unwrap();
         // The property the whole pairing screen rests on.
         assert_eq!(
             pairing::sas(&i.handshake_hash().unwrap()),
@@ -475,25 +472,39 @@ mod tests {
     }
 
     #[test]
-    fn a_wrong_pairing_code_fails_at_the_very_first_message() {
-        let (a, b) = (Identity::generate().unwrap(), Identity::generate().unwrap());
-        let right = pairing::psk(&pairing::normalize("ABCD1234").unwrap());
-        let wrong = pairing::psk(&pairing::normalize("ABCD1235").unwrap());
-        // Not "a check returns false": the handshake cannot start.
-        assert!(pair(&a, &b, &right, &wrong).is_err());
-
-        // Specifically: the responder cannot even read message 1, so it never
-        // replies and the initiator never reaches a state where it would show a
-        // code. With psk3 this would have failed three messages later, after the
-        // initiator had already completed and displayed a SAS.
-        let mut i = Handshake::pair_initiator(&a, &right).unwrap();
-        let mut r = Handshake::pair_responder(&b, &wrong).unwrap();
-        let m1 = i.write(b"").unwrap();
-        assert!(
-            r.read(&m1).is_err(),
-            "message 1 must already depend on the code"
+    fn two_separate_pairings_do_not_show_the_same_digits() {
+        // What a person comparing six digits is detecting. A relay is two
+        // handshakes, not one: it pairs with each side separately, so it holds
+        // two different hashes and cannot make both screens agree except by
+        // luck. If this ever passed, the SAS would be authenticating nothing.
+        let (a, b, m) = (
+            Identity::generate().unwrap(),
+            Identity::generate().unwrap(),
+            Identity::generate().unwrap(),
         );
-        assert!(!i.is_complete());
+        // The shape of a relay: `m` in the middle, one handshake each way.
+        let (left, _) = pair(&a, &m).unwrap();
+        let (_, right) = pair(&m, &b).unwrap();
+        assert_ne!(
+            pairing::sas(&left.handshake_hash().unwrap()),
+            pairing::sas(&right.handshake_hash().unwrap()),
+            "a relay must not be able to show both ends the same digits"
+        );
+    }
+
+    #[test]
+    fn any_two_devices_can_complete_a_pairing_handshake() {
+        // Stated as a test because it is the security model, not an oversight.
+        // `XXpsk0` made a stranger's handshake fail at message 1; plain `XX`
+        // lets anybody finish one. Nothing on the wire distinguishes the machine
+        // somebody tapped from one that answered instead — that is what the six
+        // digits are for, and what `Core::why_not_pair` bounds.
+        //
+        // If this ever starts failing, pairing has grown a secret again and the
+        // SAS ceremony can be reconsidered.
+        let (a, b) = (Identity::generate().unwrap(), Identity::generate().unwrap());
+        let (i, r) = pair(&a, &b).expect("no key is required to pair");
+        assert!(i.is_complete() && r.is_complete());
     }
 
     #[test]
@@ -501,9 +512,8 @@ mod tests {
         // This is why a pairing decision cannot be made early: for most of XX
         // there is simply nobody identified to decide about.
         let (a, b) = (Identity::generate().unwrap(), Identity::generate().unwrap());
-        let psk = pairing::psk(&pairing::normalize("ABCD1234").unwrap());
-        let mut i = Handshake::pair_initiator(&a, &psk).unwrap();
-        let mut r = Handshake::pair_responder(&b, &psk).unwrap();
+        let mut i = Handshake::pair_initiator(&a).unwrap();
+        let mut r = Handshake::pair_responder(&b).unwrap();
 
         let m1 = i.write(b"").unwrap();
         r.read(&m1).unwrap();
@@ -531,8 +541,7 @@ mod tests {
     #[test]
     fn the_handshake_hash_is_refused_before_completion() {
         let a = Identity::generate().unwrap();
-        let psk = [0u8; 32];
-        let hs = Handshake::pair_initiator(&a, &psk).unwrap();
+        let hs = Handshake::pair_initiator(&a).unwrap();
         assert!(matches!(hs.handshake_hash(), Err(NoiseError::NotComplete)));
     }
 
@@ -597,7 +606,7 @@ mod tests {
         // pairing. Different patterns AND a different prologue both refuse it.
         let (a, b) = (Identity::generate().unwrap(), Identity::generate().unwrap());
         let psk = [3u8; 32];
-        let mut i = Handshake::pair_initiator(&a, &psk).unwrap();
+        let mut i = Handshake::pair_initiator(&a).unwrap();
         let mut r = Handshake::session_responder(&b, &psk).unwrap();
         let m1 = i.write(b"").unwrap();
         assert!(r.read(&m1).is_err());
@@ -667,7 +676,7 @@ mod tests {
     #[test]
     fn an_incomplete_handshake_cannot_become_a_session() {
         let a = Identity::generate().unwrap();
-        let hs = Handshake::pair_initiator(&a, &[0u8; 32]).unwrap();
+        let hs = Handshake::pair_initiator(&a).unwrap();
         assert!(matches!(
             hs.into_session(&loopback()),
             Err(NoiseError::NotComplete)

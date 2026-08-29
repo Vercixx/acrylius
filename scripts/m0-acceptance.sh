@@ -57,10 +57,10 @@ A_ID=$("$BIN/acryliusctl" --state $D/a status | head -1 | awk '{print $2}')
 B_ID=$("$BIN/acryliusctl" --state $D/b status | head -1 | awk '{print $2}')
 
 echo
-echo "### 2. bravo opens a pairing window; alpha dials it"
-"$BIN/acryliusctl" --state $D/b pair --code ABCD1234 > $D/b.pair 2>&1 &
+echo "### 2. bravo waits to be asked; alpha dials it"
+"$BIN/acryliusctl" --state $D/b pair > $D/b.pair 2>&1 &
 sleep 0.5
-"$BIN/acryliusctl" --state $D/a pair with 127.0.0.1:$PORT_B ABCD1234 > $D/a.pair 2>&1 &
+"$BIN/acryliusctl" --state $D/a pair with 127.0.0.1:$PORT_B > $D/a.pair 2>&1 &
 sleep 1.5
 
 echo "--- what bravo shows ---"; cat $D/b.pair

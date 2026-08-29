@@ -5,10 +5,16 @@
 //! socket is `0600` inside `$XDG_RUNTIME_DIR`, and every connection's peer
 //! credentials are checked against our own uid before a single byte is read.
 //!
-//! `pair` has no network route at all. Not a protected one: none. That is
-//! the single best structural idea carried over from `pc-helper-ios`: a future
-//! plugin cannot accidentally expose pairing, because there is nothing to
-//! expose it through.
+//! Pairing used to have no network route at all — not a protected one, none —
+//! and that was the single best structural idea carried over from
+//! `pc-helper-ios`. M3 gave up half of it deliberately: a phone can now start a
+//! pairing handshake, because requiring a code off this machine's screen is
+//! exactly what stops somebody pairing by tapping.
+//!
+//! The half worth keeping is here. **Approving** a pairing has no network route.
+//! A handshake from a stranger costs a notification and nothing else; only
+//! `Approve` writes a peer to the trust store, and it arrives only through this
+//! socket, so a future plugin still cannot expose it.
 
 use std::path::{Path, PathBuf};
 
@@ -133,7 +139,6 @@ fn about(e: &UiEvent, who: &DeviceId) -> bool {
         // control socket's waits are all about a device already paired.
         UiEvent::Discovered { .. }
         | UiEvent::Undiscovered { .. }
-        | UiEvent::PairingWindowOpen { .. }
         | UiEvent::PairingSas { .. }
         | UiEvent::PairingFailed { .. } => false,
     }
@@ -142,15 +147,6 @@ fn about(e: &UiEvent, who: &DeviceId) -> bool {
 /// Render a UI event as a line a human can read.
 fn render(e: &UiEvent) -> String {
     match e {
-        UiEvent::PairingWindowOpen {
-            code,
-            expires_in_ms,
-        } => {
-            format!(
-                "pairing window open, code {code}, for {}s",
-                expires_in_ms / 1000
-            )
-        }
         UiEvent::PairingSas {
             name,
             fingerprint,
@@ -294,12 +290,12 @@ async fn handle_conn(stream: UnixStream, h: Handles) -> anyhow::Result<()> {
                 let d = h.devices.lock().await.clone();
                 write(&mut wr, &Response::Devices { devices: d }).await?;
             }
-            Request::Pair { code } => {
-                let code = code.unwrap_or_else(random_code);
+            // Nothing to arm: any device may start a pairing handshake, so this
+            // only subscribes and waits for one. It is what answers a pairing
+            // over SSH, where there is no notification daemon to press.
+            Request::Pair => {
                 let mut rx = h.ui.subscribe();
-                h.events
-                    .send(Event::Local(LocalCommand::OpenPairingWindow { code }))?;
-                stream_pairing(&mut wr, &mut rx, &h.status).await?;
+                stream_pairing(&mut wr, &mut rx).await?;
             }
             Request::Approve => {
                 h.events
@@ -327,14 +323,13 @@ async fn handle_conn(stream: UnixStream, h: Handles) -> anyhow::Result<()> {
                     .await?
                 }
             },
-            Request::PairWith { addr, code } => {
+            Request::PairWith { addr } => {
                 let mut rx = h.ui.subscribe();
                 h.events.send(Event::Local(LocalCommand::RequestPairing {
                     transport: h.transport,
                     addr,
-                    code,
                 }))?;
-                stream_pairing(&mut wr, &mut rx, &h.status).await?;
+                stream_pairing(&mut wr, &mut rx).await?;
             }
             Request::Connect { device, addr } => match DeviceId::parse(&device) {
                 Ok(id) => {
@@ -980,7 +975,6 @@ fn report(cap: &str, ty: &str, body: &[u8]) -> Report {
 async fn stream_pairing(
     wr: &mut tokio::net::unix::OwnedWriteHalf,
     rx: &mut broadcast::Receiver<UiEvent>,
-    status: &std::sync::Arc<tokio::sync::Mutex<Option<Status>>>,
 ) -> anyhow::Result<()> {
     while let Ok(e) = rx.recv().await {
         let done = matches!(
@@ -988,20 +982,6 @@ async fn stream_pairing(
             UiEvent::PairingComplete { .. } | UiEvent::PairingFailed { .. }
         );
         match &e {
-            UiEvent::PairingWindowOpen {
-                code,
-                expires_in_ms,
-            } => {
-                write(
-                    wr,
-                    &Response::Pairing {
-                        code: code.clone(),
-                        expires_in_ms: *expires_in_ms,
-                        qr: pairing_qr(status, code).await,
-                    },
-                )
-                .await?;
-            }
             UiEvent::PairingSas {
                 name,
                 fingerprint,
@@ -1026,31 +1006,6 @@ async fn stream_pairing(
     Ok(())
 }
 
-/// The payload a phone can scan instead of somebody reading a code aloud.
-///
-/// `None` rather than an error when this machine cannot name a routable
-/// address for itself: the code still works typed, and a pairing window that
-/// refused to open because it could not draw a picture would be worse than one
-/// that opens without the picture.
-async fn pairing_qr(
-    status: &std::sync::Arc<tokio::sync::Mutex<Option<Status>>>,
-    code: &str,
-) -> Option<String> {
-    let s = status.lock().await.clone()?;
-    let host = crate::netself::routed_ipv4()?;
-    Some(
-        acrylius_core::proto::qr::PairingQr {
-            name: s.name,
-            host,
-            port: s.port,
-            device_id: DeviceId::parse(&s.device_id).ok()?,
-            fingerprint: acrylius_core::proto::ids::Fingerprint::parse(&s.fingerprint).ok()?,
-            code: code.to_string(),
-        }
-        .encode(),
-    )
-}
-
 async fn write(wr: &mut tokio::net::unix::OwnedWriteHalf, r: &Response) -> anyhow::Result<()> {
     let mut line = serde_json::to_string(r)?;
     line.push('\n');
@@ -1058,8 +1013,6 @@ async fn write(wr: &mut tokio::net::unix::OwnedWriteHalf, r: &Response) -> anyho
     Ok(())
 }
 
-/// A fresh pairing code from the Crockford-minus-`ILOU` alphabet.
-#[must_use]
 /// A size a person reads rather than counts.
 fn human(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
@@ -1077,13 +1030,6 @@ fn human(bytes: u64) -> String {
 }
 
 // `clock` moved to `ipc`, beside the rendering that is now its only caller.
-
-#[must_use]
-pub fn random_code() -> String {
-    use rand::Rng;
-    let bits: u64 = rand::rng().random::<u64>() & 0xFF_FFFF_FFFF;
-    acrylius_core::proto::pairing::encode(bits)
-}
 
 #[cfg(test)]
 mod tests {
@@ -1266,13 +1212,14 @@ mod tests {
 
     #[test]
     fn pairing_events_answer_no_ones_request() {
-        // They are about a window, not a device, and there is no peer to
-        // compare: a pairing window opening must not satisfy a `session query`
-        // that happens to be outstanding.
+        // They are about a stranger, not a paired device, and there is no peer
+        // to compare against: somebody asking to pair must not satisfy a
+        // `session query` that happens to be outstanding.
         assert!(!about(
-            &UiEvent::PairingWindowOpen {
-                code: "ABCD1234".to_string(),
-                expires_in_ms: 1,
+            &UiEvent::PairingSas {
+                name: "someone".to_string(),
+                fingerprint: acrylius_core::proto::ids::Fingerprint::of(&[0u8; 32]),
+                sas: "605 480".to_string(),
             },
             &who('A')
         ));

@@ -42,7 +42,6 @@ pub struct FfiConfig {
     pub name: String,
     pub platform: String,
     pub pairing_window_ms: u64,
-    pub max_pairing_attempts: u8,
     pub handshake_timeout_ms: u64,
 }
 
@@ -53,7 +52,6 @@ impl Default for FfiConfig {
             name: d.name,
             platform: "ios".to_string(),
             pairing_window_ms: d.pairing_window_ms,
-            max_pairing_attempts: d.max_pairing_attempts,
             handshake_timeout_ms: d.handshake_timeout_ms,
         }
     }
@@ -102,45 +100,6 @@ fn identity(key: &[u8]) -> Result<Identity, FfiError> {
         detail: "an identity key is 32 bytes".to_string(),
     })?;
     Ok(Identity::from_private(key))
-}
-
-/// What a scanned pairing QR carried.
-///
-/// Nothing here is trusted. It is a candidate address to dial and a code to
-/// derive the PSK from; the fingerprint is checked against the one the
-/// handshake produces and a mismatch aborts.
-#[derive(uniffi::Record, Clone, Debug)]
-pub struct FfiPairingQr {
-    pub name: String,
-    /// `host:port`, ready to dial.
-    pub addr: String,
-    pub device_id: String,
-    pub fingerprint: String,
-    pub code: String,
-}
-
-/// Read a pairing payload off a scanned QR.
-///
-/// The same code the desktop used to build it — `acrylius_proto::qr` — so the
-/// two cannot drift. A camera sees a great many things that are not this, so
-/// the failure is ordinary rather than exceptional and says which kind it was.
-///
-/// # Errors
-///
-/// [`FfiError::BadInput`] when the payload is not an acrylius one, is from a
-/// newer version, or is malformed.
-#[uniffi::export]
-pub fn decode_pairing_qr(text: String) -> Result<FfiPairingQr, FfiError> {
-    let q = acrylius_core::proto::qr::PairingQr::decode(&text).map_err(|e| FfiError::BadInput {
-        detail: e.to_string(),
-    })?;
-    Ok(FfiPairingQr {
-        name: q.name.clone(),
-        addr: q.addr(),
-        device_id: q.device_id.to_string(),
-        fingerprint: q.fingerprint.to_string(),
-        code: q.code.clone(),
-    })
 }
 
 /// A paired device, for the UI.
@@ -209,7 +168,6 @@ impl AcryliusCore {
                 name: config.name,
                 platform: config.platform,
                 pairing_window_ms: config.pairing_window_ms,
-                max_pairing_attempts: config.max_pairing_attempts,
                 handshake_timeout_ms: config.handshake_timeout_ms,
                 // Not exposed through `FfiCoreConfig`. A phone is the device
                 // this matters most on and the one least able to choose a
@@ -220,6 +178,13 @@ impl AcryliusCore {
                 // that fails to bound its own dial, so it is the core's business
                 // and not the host's. See [`dial_timeout_ms`].
                 dial_timeout_ms: CoreConfig::default().dial_timeout_ms,
+                // A phone is never dialled — `NWTransport::advertise` is
+                // deliberately unimplemented — so nothing can raise a pairing
+                // prompt on it uninvited and there is no door here to shut.
+                // These bound the phone's own attempts instead.
+                accept_pair_requests: CoreConfig::default().accept_pair_requests,
+                pair_cooldown_ms: CoreConfig::default().pair_cooldown_ms,
+                pair_denied_cooldown_ms: CoreConfig::default().pair_denied_cooldown_ms,
             },
         )
         // The same plugin list every device registers, which is the point of

@@ -7,11 +7,32 @@ pub struct CoreConfig {
     pub name: String,
     /// `"linux"`, `"ios"`. Advisory; used for icons and copy, never for policy.
     pub platform: String,
-    /// How long a pairing window stays open.
+    /// How long a person has to compare six digits before the pairing lapses.
     ///
     /// Measured by the host on a monotonic clock, so that changing the wall
     /// clock cannot extend it. That lesson is carried over from `pc-helper-ios`.
     pub pairing_window_ms: u64,
+    /// Whether this device will answer a pairing handshake at all.
+    ///
+    /// `false` is the door shut: a machine that is already paired with
+    /// everything it wants to be, or one on a network it does not trust to be
+    /// allowed to raise a dialog on it.
+    pub accept_pair_requests: bool,
+    /// How long to ignore further pairing handshakes after one lapses or is
+    /// abandoned.
+    ///
+    /// Anyone may start a handshake now, so without this a hostile device on the
+    /// network is a dialog every two minutes forever.
+    pub pair_cooldown_ms: u64,
+    /// How long to ignore pairing handshakes after a person says the digits
+    /// *differ*.
+    ///
+    /// Longer than [`Self::pair_cooldown_ms`], and the asymmetry is the point.
+    /// Since the SAS is the security mechanism, a mismatch is not somebody
+    /// fumbling — it is the one observable signal that something is relaying
+    /// between two handshakes, and its next attempt is another one-in-a-million
+    /// try at the same trick. Slow it down.
+    pub pair_denied_cooldown_ms: u64,
     /// How often to try a paired device again that nothing can currently reach.
     ///
     /// Auto-connect fires on a *sighting*, and a sighting is not a heartbeat:
@@ -22,11 +43,6 @@ pub struct CoreConfig {
     /// spending a minute in a pocket, Wi-Fi coming back — left the device
     /// unreachable with nothing scheduled to fix it. This is that heartbeat.
     pub reconnect_every_ms: u64,
-    /// How many failed handshakes close the window entirely.
-    ///
-    /// A correct code with a failed handshake is not a typo; it means the code
-    /// reached someone who could not complete with it. Burn the window.
-    pub max_pairing_attempts: u8,
     /// How long an unfinished handshake may hold a link.
     pub handshake_timeout_ms: u64,
     /// How long the core waits for a transport to answer a dial before giving
@@ -46,11 +62,17 @@ impl Default for CoreConfig {
             name: "acrylius".to_string(),
             platform: "unknown".to_string(),
             pairing_window_ms: 120_000,
+            accept_pair_requests: true,
+            // One dialog, then quiet for a while. Long enough that a device
+            // trying repeatedly is not a stream of notifications, short enough
+            // that a person who tapped the wrong machine and wants to try again
+            // is not left wondering whether it is broken.
+            pair_cooldown_ms: 30_000,
+            pair_denied_cooldown_ms: 300_000,
             // Long enough that a machine which is simply off is not dialled
             // constantly, short enough that coming back from a locked phone
             // feels like it reconnected rather than like it was fixed.
             reconnect_every_ms: 10_000,
-            max_pairing_attempts: 3,
             handshake_timeout_ms: 15_000,
             // Derived rather than chosen, so the two cannot drift apart into
             // the order that makes this useless: a backstop that fires first

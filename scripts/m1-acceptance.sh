@@ -102,9 +102,11 @@ B_ID=$("$BIN/acryliusctl" --state $D/b status | head -1 | awk '{print $2}')
 
 echo
 echo "### pair"
-"$BIN/acryliusctl" --state $D/b pair --code ACRYLIUS > $D/b.pair 2>&1 &
+# Nothing is armed and nothing is typed. Bravo only watches for the question;
+# alpha asks it by dialling, and the six digits are what both ends compare.
+"$BIN/acryliusctl" --state $D/b pair > $D/b.pair 2>&1 &
 sleep 0.5
-"$BIN/acryliusctl" --state $D/a pair with 127.0.0.1:$PORT_B ACRYLIUS > $D/a.pair 2>&1 &
+"$BIN/acryliusctl" --state $D/a pair with 127.0.0.1:$PORT_B > $D/a.pair 2>&1 &
 sleep 1.5
 SAS_A=$(grep -o 'It should be showing:  *[0-9 ]*' $D/a.pair | head -1)
 SAS_B=$(grep -o 'It should be showing:  *[0-9 ]*' $D/b.pair | head -1)

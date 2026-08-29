@@ -29,11 +29,12 @@ final class AppModel {
     /// The subset of `capsIn` this phone can act on rather than only ask for.
     var capsServed: [String] = []
 
-    /// The code shown during pairing. Both ends show it; the user compares.
+    /// The six digits shown during pairing. Both ends show them; the user
+    /// compares them, and that comparison is what authenticates the pairing —
+    /// see `ConfirmPairingView`.
     var pairingSas: String?
     var pairingPeerName: String?
     var pairingPeerFingerprint: String?
-    var pairingCode: String?
     /// What the app as a whole is doing.
     ///
     /// Not per-peer — that is `FfiPeer.state`, and conflating the two is what
@@ -113,7 +114,14 @@ final class AppModel {
         let fingerprint: String
         let name: String
         let addr: String
-        /// Whether it says it has a pairing window open right now.
+        /// Which transport saw it, and therefore which one can reach it.
+        ///
+        /// Carried because a tap now pairs outright. The old flow filled in an
+        /// address for a person to press Pair on and hardcoded transport 1, so
+        /// a machine found over Bluetooth could be listed and never paired
+        /// with — the address was a `ble:` one handed to the Wi-Fi transport.
+        let transport: UInt16
+        /// Whether it says it is already busy pairing with somebody.
         var pairing: Bool
         var seen: Date
     }
@@ -228,8 +236,12 @@ final class AppModel {
     /// Retained because `UiSink` is held weakly by the runtime.
     private var sink: Sink?
 
-    func pair(withCode code: String, at addr: String) async {
-        await runtime?.submit(.requestPairing(transport: 1, addr: addr, code: code))
+    /// Start pairing with a machine. The whole gesture is the tap.
+    ///
+    /// There is nothing to type: six digits come back from the handshake and a
+    /// person on each end confirms they match.
+    func pair(at addr: String, transport: UInt16 = 1) async {
+        await runtime?.submit(.requestPairing(transport: transport, addr: addr))
     }
 
     func confirmPairing(_ accept: Bool) async {
@@ -593,28 +605,26 @@ final class AppModel {
         // changed only its position, so this is not once a second.
         if catalog.ingest(event) { publishSnapshot() }
         switch event {
-        case let .pairingWindowOpen(code, _):
-            pairingCode = code
         case let .pairingSas(name, fp, sas):
             pairingPeerName = name
             pairingPeerFingerprint = fp
             pairingSas = sas
-        case let .discovered(fingerprint, name, addr, _, pairing):
+        case let .discovered(fingerprint, name, addr, transport, pairing):
             // Keyed by fingerprint, because mDNS re-resolves the same machine
             // whenever anything about it changes — including the `pair` flag
             // going up — and a list that appended would show one computer
             // several times, each row claiming something different.
             let found = Nearby(
                 fingerprint: fingerprint, name: name, addr: addr,
-                pairing: pairing, seen: Date())
+                transport: transport, pairing: pairing, seen: Date())
             if let at = nearby.firstIndex(where: { $0.fingerprint == fingerprint }) {
                 nearby[at] = found
             } else {
                 nearby.append(found)
             }
-            // A machine that is waiting for somebody sorts first: it is the one
-            // the person is most likely holding the phone for.
-            nearby.sort { ($0.pairing ? 0 : 1, $0.name) < ($1.pairing ? 0 : 1, $1.name) }
+            // A machine already busy pairing sorts last: it is the one a tap
+            // will be refused by, so it is the least useful row to offer.
+            nearby.sort { ($0.pairing ? 1 : 0, $0.name) < ($1.pairing ? 1 : 0, $1.name) }
         case let .undiscovered(fingerprint):
             // The other half of a sighting, and it had none: this list only
             // ever grew, so a computer that had been switched off stayed on
@@ -622,13 +632,11 @@ final class AppModel {
             nearby.removeAll { $0.fingerprint == fingerprint }
         case let .pairingComplete(_, name):
             pairingSas = nil
-            pairingCode = nil
             status = .ready
             activity = "Paired with \(name)"
             Task { await refresh() }
         case let .pairingFailed(reason):
             pairingSas = nil
-            pairingCode = nil
             lastError = reason
         case let .peerReachable(peer, name):
             activity = "Connected to \(name)"

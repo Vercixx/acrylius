@@ -5,19 +5,20 @@ import SwiftUI
 import UIKit
 #endif
 
-/// Pick a computer, scan its code, or type both.
+/// Pick a computer. That is the whole thing.
 ///
-/// Three ways in, in the order they cost the person something. Discovery has
-/// always known which machines are on the network; until M3 nothing could ask
-/// it, so this screen opened on an empty text field and an IP address to type
-/// on a phone keyboard.
+/// There is nothing to type and nothing to scan. Tapping a machine runs the
+/// handshake, six digits appear here and on that machine's screen, and a person
+/// at each end says whether they match. This screen used to open on an empty
+/// text field and an IP address to type on a phone keyboard; then on a field for
+/// an eight-character code read off the other screen. Both were asking somebody
+/// to be at the computer already, which is the one thing pairing a phone to a
+/// computer across the room cannot assume.
 struct PairView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
-    @State private var code = ""
     @State private var addr = ""
-    @State private var scanning = false
-    @State private var scanTrouble: String?
+    @State private var manual = false
 
     /// Machines seen recently enough to still be worth offering.
     ///
@@ -32,29 +33,23 @@ struct PairView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section {
-                    Button {
-                        scanning = true
-                    } label: {
-                        Label("Scan the code on your computer", systemImage: "qrcode.viewfinder")
+                if fresh.isEmpty {
+                    Section {
+                        ContentUnavailableView(
+                            "No computers found",
+                            systemImage: "desktopcomputer.trianglebadge.exclamationmark",
+                            description: Text(
+                                "Make sure acryliusd is running and that this \(deviceKind()) is on the same Wi-Fi network."
+                            )
+                        )
                     }
-                } footer: {
-                    if let scanTrouble {
-                        Text(scanTrouble).foregroundStyle(.orange)
-                    } else {
-                        Text("Run `acryliusctl pair` on the computer to show one.")
-                    }
-                }
-
-                if !fresh.isEmpty {
+                } else {
                     Section {
                         ForEach(fresh) { pc in
                             Button {
-                                // Fills the form rather than pairing outright:
-                                // the code is the pre-shared key and discovery
-                                // does not carry it, so there is still one
-                                // thing only the computer's screen can supply.
-                                addr = pc.addr
+                                // The whole gesture. Everything a pairing needs
+                                // comes from the handshake this starts.
+                                Task { await model.pair(at: pc.addr, transport: pc.transport) }
                             } label: {
                                 HStack {
                                     VStack(alignment: .leading) {
@@ -65,74 +60,58 @@ struct PairView: View {
                                     }
                                     Spacer()
                                     if pc.pairing {
-                                        Text("waiting")
+                                        Text("busy")
                                             .font(.caption)
-                                            .foregroundStyle(.green)
+                                            .foregroundStyle(.secondary)
                                     }
                                 }
                             }
+                            // A machine already showing somebody else six
+                            // digits will refuse this one, so offering the tap
+                            // would only produce a failure to explain.
+                            .disabled(pc.pairing)
                         }
                     } header: {
                         Text("On this network")
                     } footer: {
-                        Text("“Waiting” means that computer has a pairing window open.")
+                        Text(
+                            "Tap a computer to pair with it. Both screens will show the same six digits."
+                        )
                     }
                 }
 
-                Section("Pairing code") {
-                    TextField("ABCD1234", text: $code)
-                        .textInputAutocapitalization(.characters)
-                        .autocorrectionDisabled()
-                        .font(.body.monospaced())
-                }
-                Section {
+                Section(isExpanded: $manual) {
                     TextField("192.168.1.10:1971", text: $addr)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .keyboardType(.URL)
+                    Button("Pair with this address") {
+                        Task { await model.pair(at: addr) }
+                    }
+                    .disabled(addr.isEmpty)
                 } header: {
-                    Text("IP address")
+                    Text("Enter an address")
                 } footer: {
+                    // An address is a route, not a secret. Typing one still
+                    // ends at the same six digits, so this is a convenience for
+                    // a network mDNS cannot cross rather than a way around the
+                    // comparison.
                     Text("Only needed if this \(deviceKind()) cannot find the computer by itself.")
                 }
             }
+            .formStyle(.grouped)
             .navigationTitle("Pair another device")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
                 }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Pair") {
-                        Task { await model.pair(withCode: code, at: addr); dismiss() }
-                    }
-                    .disabled(code.isEmpty || addr.isEmpty)
-                }
             }
-            .sheet(isPresented: $scanning) {
-                QrScannerView { text in
-                    scanning = false
-                    apply(scanned: text)
-                }
+            // The sheet closes itself when the digits arrive: `RootView` puts
+            // `ConfirmPairingView` up on `pairingSas`, and two sheets at once
+            // would leave the confirmation behind this one.
+            .onChange(of: model.pairingSas) {
+                if model.pairingSas != nil { dismiss() }
             }
-        }
-    }
-
-    /// Take what the camera read, if it is one of ours.
-    ///
-    /// Decoded by the same Rust that built it, so a payload this cannot read is
-    /// genuinely not an acrylius code rather than a disagreement between two
-    /// implementations of the format.
-    private func apply(scanned text: String) {
-        do {
-            let q = try decodePairingQr(text: text)
-            code = q.code
-            addr = q.addr
-            scanTrouble = nil
-            // Straight through. Everything a pairing needs was in the picture,
-            // and the SAS on both screens is still the thing a person checks.
-            Task { await model.pair(withCode: q.code, at: q.addr); dismiss() }
-        } catch {
-            scanTrouble = "That is not an Acrylius pairing code."
         }
     }
 
@@ -147,9 +126,15 @@ struct PairView: View {
 
 /// Both ends show the same six digits. The user compares them.
 ///
-/// The code is a cross-check, not the security mechanism: `XXpsk0` already
-/// makes a wrong pairing code fail to decrypt. Showing it costs nothing and
-/// catches the class of bug a PSK check would mask.
+/// **This is the security boundary.** Pairing runs plain `XX` with no shared
+/// secret, so anybody who can reach a device can complete a handshake with it —
+/// and an attacker who can relay traffic completes two, one with each side.
+/// What gives that away is that the two handshake hashes differ, so the digits
+/// differ, and a person notices. Nothing else is checking.
+///
+/// So: never auto-confirm, never make "they match" the easier press by accident,
+/// and never let this be dismissed by a swipe. A person who did not look has not
+/// authenticated anything.
 struct ConfirmPairingView: View {
     @Environment(AppModel.self) private var model
 

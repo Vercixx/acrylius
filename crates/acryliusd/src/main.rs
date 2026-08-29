@@ -407,6 +407,7 @@ async fn main() -> anyhow::Result<()> {
         CoreConfig {
             name: name.clone(),
             platform: "linux".to_string(),
+            accept_pair_requests: cfg.pair.enabled,
             ..Default::default()
         },
     )
@@ -492,13 +493,68 @@ async fn main() -> anyhow::Result<()> {
     // A question for the person at this desktop belongs on their screen. Absent
     // on a machine with no notification daemon, and everything still works
     // through `acryliusctl` — which is why nothing below requires one.
-    let prompter = match bulk.clone() {
-        Some(bulk) => prompt::Prompter::start(rt.events(), bulk).await,
-        None => None,
-    };
+    //
+    // Not conditional on file sharing: pairing has nothing to do with sharing,
+    // and building this only when `bulk` was present meant
+    // `[share] enabled = false` silently cost every desktop question.
+    //
+    // Connected off the startup path, though, and that is not tidiness. The
+    // notification service is often D-Bus activated, so `GetCapabilities` can
+    // take seconds the first time — 4.6 of them on the machine this was written
+    // on. Awaiting it here held up the control socket for that long, which made
+    // every acceptance script that waits for a daemon flaky, and it would have
+    // been worse once `[share] enabled = false` machines started paying it too.
+    let prompter: Arc<tokio::sync::OnceCell<Option<Arc<prompt::Prompter>>>> =
+        Arc::new(tokio::sync::OnceCell::new());
+    {
+        let cell = prompter.clone();
+        let events = rt.events();
+        let bulk = bulk.clone();
+        tokio::spawn(async move {
+            let _ = cell.set(prompt::Prompter::start(events, bulk).await);
+        });
+    }
     let names = devices.clone();
     tokio::spawn(async move {
         while let Some(e) = ui_mpsc_rx.recv().await {
+            // `None` until the connection lands. A question in the first few
+            // seconds after start goes unprompted rather than delaying every
+            // one after it; `acryliusctl` answers it either way.
+            let prompter = prompter.get().and_then(Option::as_ref);
+            // Pairing, on the screen of the person who has to answer it. Six
+            // digits and two buttons is the whole ceremony, and it is the only
+            // thing authenticating the pairing — see `prompt.rs`.
+            // The daemon has no screen, so an error aimed at one was going
+            // nowhere at all. This is the only place every core error passes
+            // through.
+            if let acrylius_core::vocab::UiEvent::Error { peer, code, detail } = &e {
+                tracing::warn!(
+                    peer = peer.as_ref().map(ToString::to_string),
+                    code = code.as_str(),
+                    detail,
+                    "core reported an error"
+                );
+            }
+            if let Some(prompter) = &prompter {
+                match &e {
+                    acrylius_core::vocab::UiEvent::PairingSas {
+                        name,
+                        fingerprint,
+                        sas,
+                    } => {
+                        tracing::info!(%name, %fingerprint, "a device asked to pair");
+                        prompter.ask_pair(name, &fingerprint.to_string(), sas).await;
+                    }
+                    // Settled, one way or another — including by somebody using
+                    // the CLI, or by it lapsing. An answered question left on
+                    // screen is one that gets answered twice.
+                    acrylius_core::vocab::UiEvent::PairingComplete { .. }
+                    | acrylius_core::vocab::UiEvent::PairingFailed { .. } => {
+                        prompter.close_pair().await;
+                    }
+                    _ => {}
+                }
+            }
             if let acrylius_core::vocab::UiEvent::Plugin {
                 peer,
                 cap,

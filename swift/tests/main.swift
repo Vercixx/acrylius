@@ -171,10 +171,10 @@ for cap in [
 }
 
 // --- pairing -------------------------------------------------------------
-await bravo.submit(.openPairingWindow(code: "ABCD1234"))
-_ = await until("bravo's window") { bRec.has { if case .pairingWindowOpen = $0 { return true }; return false } }
-
-await alpha.submit(.requestPairing(transport: 1, addr: "bravo", code: "ABCD1234"))
+// Nobody opens anything and nobody types anything: alpha asks, and six digits
+// appear on both ends. That comparison is the whole authentication, so "the
+// codes match" is the assertion that matters most in this file.
+await alpha.submit(.requestPairing(transport: 1, addr: "bravo"))
 let sawSas = await until("a code on both screens") { aRec.sas() != nil && bRec.sas() != nil }
 check(sawSas, "both ends showed a code")
 check(sawSas && aRec.sas() == bRec.sas(), "the codes match: \(aRec.sas() ?? "-")")

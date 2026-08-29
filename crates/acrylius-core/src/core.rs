@@ -155,19 +155,22 @@ struct AwaitingConfirm {
     via: Option<(TransportId, String)>,
 }
 
+/// A pairing in flight, from the first frame until a person answers.
+///
+/// Not a window anybody opens: under plain `XX` there is no code and no key, so
+/// any device that can reach this one may start a handshake. What bounds that is
+/// [`Core::why_not_pair`], and the rule it exists to enforce is that **a pending
+/// confirmation is never replaced**.
+///
+/// That rule is load-bearing rather than defensive. An earlier `XXpsk0` build
+/// held the initiator's side in a window with an all-zero psk, which is a
+/// constant anybody can type: for as long as a human was looking at the SAS
+/// dialog, any device that could reach this one completed a handshake against a
+/// known key and *replaced* the pending confirmation. The human then compared
+/// six digits and approved a stranger. Every `XX` handshake is now that
+/// handshake, so the only defence is refusing the second one.
 struct PairingWindow {
-    /// The code's key, or `None` for a window that answers no one.
-    ///
-    /// `None` is the side that *initiated*. It has no code to answer with — it
-    /// already sent one — and only needs somewhere to keep the confirmation it
-    /// is waiting on. It used to keep it in a window with an all-zero psk, which
-    /// is a constant anybody can type: for as long as a human was looking at the
-    /// SAS dialog, any device that could reach this one completed `XXpsk0`
-    /// against a known key, and the handshake it finished *replaced* the pending
-    /// confirmation. The human then compared a code and approved a stranger.
-    psk: Option<[u8; 32]>,
     deadline: u64,
-    attempts: u8,
     awaiting: Option<AwaitingConfirm>,
 }
 
@@ -188,8 +191,14 @@ pub struct Core {
     /// peer meant the address was gone for good.
     seen: BTreeMap<Fingerprint, Routes>,
     pairing: Option<PairingWindow>,
-    /// Dials we started for pairing, and the PSK to use when they land.
-    pending_pair_dials: BTreeMap<DialToken, ([u8; 32], (TransportId, String))>,
+    /// Monotonic time before which no pairing handshake is answered.
+    ///
+    /// Set when a pairing ends without success. Anybody may start a handshake,
+    /// so this is what keeps a hostile device on the network to one dialog
+    /// rather than a dialog every two minutes.
+    pair_quiet_until: u64,
+    /// Dials we started for pairing, and where each was aimed.
+    pending_pair_dials: BTreeMap<DialToken, (TransportId, String)>,
     /// Dials we started to reach a known peer, each with the routes not yet
     /// tried. A dial that fails falls through to the next rather than reporting
     /// the peer unreachable while a working route sits untried.
@@ -297,21 +306,80 @@ impl Core {
             .map(|a| a.sas.as_str())
     }
 
-    /// Whether a pairing window is open right now.
+    /// Whether a pairing is in flight on this machine right now.
     ///
     /// `docs/PROTOCOL.md` § 4 specifies a `pair=0|1` key in the discovery
     /// advertisement, "a convenience for a user interface". Both ends have read
     /// it since M1 — `tcp.rs` and `NWTransport.swift` both decode it — and
-    /// nothing has ever written it, so `DiscoveredPeer::pairing` has been
-    /// `false` in production for its whole life.
+    /// nothing wrote it until M3.
     ///
-    /// Read rather than announced because the window closes four ways: paired,
-    /// refused, given up on, and expired. Only the first two have an event, and
+    /// It means *busy*, not *ready*. Since anybody may start a pairing, `pair=1`
+    /// is the one thing worth telling a phone in advance: a machine already
+    /// showing somebody six digits will refuse the next handshake, so a screen
+    /// can grey that row out instead of offering a tap that cannot work.
+    ///
+    /// Read rather than announced because a pairing ends four ways: paired,
+    /// refused, given up on, and lapsed. Only the first two have an event, and
     /// an advertisement that lied because the fourth had no event would be
     /// worse than none.
     #[must_use]
     pub fn pairing_open(&self) -> bool {
         self.pairing.is_some()
+    }
+
+    /// Why an inbound pairing handshake will not be answered, or `None` to
+    /// answer it.
+    ///
+    /// The whole admission policy, in one place. Under `XXpsk0` this was a
+    /// single question — is a window open with a key in it — and the key did the
+    /// work. Under plain `XX` there is no key, so what is left is: are we
+    /// willing, are we busy, and have we been bothered too recently.
+    fn why_not_pair(&self, now_ms: u64) -> Option<&'static str> {
+        if !self.config.accept_pair_requests {
+            return Some("this device is not accepting pairing requests");
+        }
+        // The rule the design rests on. See `PairingWindow`: a second handshake
+        // must never replace a confirmation a person is already looking at.
+        if let Some(w) = &self.pairing
+            && w.awaiting.is_some()
+        {
+            return Some("already confirming a pairing with somebody else");
+        }
+        if self.pairing.is_some() {
+            return Some("a pairing is already in progress");
+        }
+        if now_ms < self.pair_quiet_until {
+            return Some("too soon after the last pairing attempt");
+        }
+        None
+    }
+
+    /// Claim the pairing slot, from either direction.
+    ///
+    /// Called before the first frame rather than after the handshake completes,
+    /// which is what makes [`Self::why_not_pair`] able to refuse the second one:
+    /// two handshakes that both ran to completion would both want to be the
+    /// thing a person confirms, and only the check above stops that.
+    fn begin_pairing(&mut self, now_ms: u64) {
+        self.pairing = Some(PairingWindow {
+            deadline: now_ms + self.config.pairing_window_ms,
+            awaiting: None,
+        });
+    }
+
+    /// Drop the pairing and stay quiet for a while.
+    ///
+    /// `denied` separates a person saying the digits differ — the only signal
+    /// there is that something is relaying between two handshakes — from a
+    /// pairing that merely lapsed.
+    fn end_pairing(&mut self, now_ms: u64, denied: bool) {
+        self.pairing = None;
+        let cooldown = if denied {
+            self.config.pair_denied_cooldown_ms
+        } else {
+            self.config.pair_cooldown_ms
+        };
+        self.pair_quiet_until = now_ms + cooldown;
     }
 
     /// Why the last attempt to reach this peer ended without a session, if it
@@ -374,6 +442,12 @@ impl Core {
                 // up — would announce a pairing failure to someone who had not
                 // been pairing.
                 if self.pending_pair_dials.remove(&dial).is_some() {
+                    // `RequestPairing` claimed the slot before dialling, so a
+                    // dial that never came up has to give it back — otherwise
+                    // one unreachable address locks pairing out for two minutes.
+                    // No cooldown: nobody was bothered, and the person who
+                    // tapped is entitled to try the machine next to it.
+                    self.pairing = None;
                     out.ui(UiEvent::PairingFailed { reason });
                 } else if let Some((_, pending)) = self.pending_peer_dials.remove(&dial) {
                     self.try_next_route(now_ms, pending, &reason, &mut out);
@@ -566,11 +640,11 @@ impl Core {
     ) {
         let deadline = now_ms + self.config.handshake_timeout_ms;
 
-        // A link we dialled to pair: we speak first, with XXpsk3.
+        // A link we dialled to pair: we speak first, with XX.
         if let Some(d) = dial
-            && let Some((psk, via)) = self.pending_pair_dials.remove(&d)
+            && let Some(via) = self.pending_pair_dials.remove(&d)
         {
-            match Handshake::pair_initiator(&self.identity, &psk) {
+            match Handshake::pair_initiator(&self.identity) {
                 Ok(mut hs) => {
                     // XX message 1 is unencrypted, so it carries nothing.
                     match hs.write(b"") {
@@ -589,7 +663,7 @@ impl Core {
                                     pairing_flow: true,
                                     via: Some(via),
                                     // Pairing walks no route list: a person
-                                    // typed one address and a code for it.
+                                    // tapped one machine.
                                     fallback: None,
                                 })),
                             );
@@ -709,29 +783,26 @@ impl Core {
     ) {
         match kind {
             FrameKind::PairHandshake => {
-                let Some(window) = &mut self.pairing else {
-                    // No window open. Refusing here is what makes a pairing
-                    // window a *window* rather than a permanently reachable
-                    // endpoint that merely usually rejects you.
-                    self.fail_link(link, "no pairing window is open", out);
+                if let Some(why) = self.why_not_pair(now_ms) {
+                    self.fail_link(link, why, out);
                     return;
-                };
-                let Some(psk) = window.psk else {
-                    // A window belonging to a pairing we started. It answers
-                    // nobody: we are the one waiting to be confirmed, and there
-                    // is no code here for anyone to have matched.
-                    self.fail_link(link, "no pairing window is open", out);
-                    return;
-                };
-                match Handshake::pair_responder(&self.identity, &psk) {
+                }
+                match Handshake::pair_responder(&self.identity) {
                     Ok(mut hs) => {
                         if hs.read(body).is_err() {
-                            self.pairing_attempt_failed(link, out);
+                            // Nothing claimed yet, so nothing to give back —
+                            // but a peer that cannot write message 1 should
+                            // still not be able to retry immediately.
+                            self.pair_quiet_until = now_ms + self.config.pair_cooldown_ms;
+                            self.fail_link(link, "malformed pairing handshake", out);
                             return;
                         }
                         let hello = minicbor::to_vec(self.hello(now_ms)).expect("hello encodes");
                         match hs.write(&hello) {
                             Ok(m) => {
+                                // Claim the slot now that this is a real
+                                // handshake and not a stray connection.
+                                self.begin_pairing(now_ms);
                                 out.push(Action::LinkSend {
                                     link,
                                     msg: frame::join(FrameKind::PairHandshake, &m),
@@ -829,7 +900,7 @@ impl Core {
             Ok(p) => p,
             Err(e) => {
                 if h.pairing_flow {
-                    self.pairing_attempt_failed(link, out);
+                    self.pairing_attempt_failed(now_ms, link, out);
                 } else {
                     self.fail_link(link, &e.to_string(), out);
                 }
@@ -1007,7 +1078,7 @@ impl Core {
             return;
         };
         let Ok(hello) = minicbor::decode::<Hello>(payload) else {
-            self.pairing_attempt_failed(link, out);
+            self.pairing_attempt_failed(now_ms, link, out);
             return;
         };
 
@@ -1035,53 +1106,52 @@ impl Core {
             }),
         );
 
-        out.ui(UiEvent::PairingSas {
-            name: record.name.clone(),
-            fingerprint: Fingerprint::of(&pk),
-            sas: sas.clone(),
-        });
-        if let Some(w) = &mut self.pairing {
-            w.awaiting = Some(AwaitingConfirm {
-                link,
-                record,
-                sas,
-                via: h.via,
-            });
-        } else {
-            // We initiated; there is no window, so keep the same state inline.
-            // `None`, not a zero key: this holds a confirmation, it does not
-            // open a door. See `PairingWindow::psk`.
-            self.pairing = Some(PairingWindow {
-                psk: None,
-                // The window a *person* now has to compare six digits in, not
-                // the handshake timeout that got us here. `h.deadline` is
-                // fifteen seconds measured from before the connection was made;
-                // the responder has always given this two minutes, and the side
-                // that typed the code deserves the same.
-                deadline: now_ms + self.config.pairing_window_ms,
-                attempts: 0,
-                awaiting: Some(AwaitingConfirm {
-                    link,
-                    record,
-                    sas,
-                    via: h.via,
-                }),
-            });
+        // Both directions claimed the slot before the first frame, so it is
+        // here. A handshake that completed without one is a handshake that
+        // should never have been answered.
+        let Some(w) = &mut self.pairing else {
+            self.fail_link(link, "no pairing is in progress", out);
+            return;
+        };
+        // The rule the whole design rests on, enforced where it would actually
+        // be broken. `why_not_pair` refuses a second handshake, so reaching this
+        // with a confirmation already up means that refusal has a hole in it —
+        // and the cost of the hole is a person approving a stranger.
+        if w.awaiting.is_some() {
+            self.fail_link(link, "a confirmation is already waiting", out);
+            return;
         }
+        // The clock a *person* now has to compare six digits by, not the
+        // handshake timeout that got us here: `h.deadline` is fifteen seconds
+        // measured from before the connection was made.
+        w.deadline = now_ms + self.config.pairing_window_ms;
+        w.awaiting = Some(AwaitingConfirm {
+            link,
+            record: record.clone(),
+            sas: sas.clone(),
+            via: h.via,
+        });
+
+        out.ui(UiEvent::PairingSas {
+            name: record.name,
+            fingerprint: Fingerprint::of(&pk),
+            sas,
+        });
     }
 
-    fn confirm_pairing(&mut self, accept: bool, out: &mut Outcome) {
+    fn confirm_pairing(&mut self, now_ms: u64, accept: bool, out: &mut Outcome) {
         let Some(w) = &mut self.pairing else { return };
         let Some(a) = w.awaiting.take() else { return };
         if !accept {
-            // A refused SAS is a hostile handshake, not a typo: close the link
-            // and burn the window rather than inviting another attempt.
+            // Digits that do not match are the one signal there is that
+            // something is relaying between two handshakes. Close the link and
+            // go quiet for a long time rather than inviting the next attempt.
             out.push(Action::Close {
                 link: a.link,
                 reason: LinkDownReason::Protocol(ErrorCode::NotAllowed),
             });
             self.links.remove(&a.link);
-            self.pairing = None;
+            self.end_pairing(now_ms, true);
             out.ui(UiEvent::PairingFailed {
                 reason: "the codes did not match".to_string(),
             });
@@ -1143,20 +1213,20 @@ impl Core {
         self.reconnect_at = Some(0);
     }
 
-    fn pairing_attempt_failed(&mut self, link: LinkId, out: &mut Outcome) {
-        let burned = if let Some(w) = &mut self.pairing {
-            w.attempts += 1;
-            w.attempts >= self.config.max_pairing_attempts
-        } else {
-            false
-        };
+    /// A pairing handshake that could not be completed.
+    ///
+    /// One strike, not three. There used to be a budget of three, and it made
+    /// sense when the thing that failed was a *typed code* — two people reading
+    /// eight characters aloud deserve another go. Nothing is typed now, so a
+    /// handshake that does not complete is a peer that cannot speak this
+    /// protocol, and repeating it will not help. The cooldown is what bounds
+    /// how often it may try again.
+    fn pairing_attempt_failed(&mut self, now_ms: u64, link: LinkId, out: &mut Outcome) {
         self.fail_link(link, "pairing handshake failed", out);
-        if burned {
-            self.pairing = None;
-            out.ui(UiEvent::PairingFailed {
-                reason: "too many failed attempts; the window is closed".to_string(),
-            });
-        }
+        self.end_pairing(now_ms, false);
+        out.ui(UiEvent::PairingFailed {
+            reason: "the pairing handshake failed".to_string(),
+        });
     }
 
     fn peer_blob(rec: &PeerRecord) -> (String, Option<Vec<u8>>) {
@@ -1789,56 +1859,27 @@ impl Core {
 impl Core {
     fn on_local(&mut self, now_ms: u64, cmd: LocalCommand, out: &mut Outcome) {
         match cmd {
-            LocalCommand::OpenPairingWindow { code } => match pairing::normalize(&code) {
-                Ok(norm) => {
-                    let deadline = now_ms + self.config.pairing_window_ms;
-                    self.pairing = Some(PairingWindow {
-                        psk: Some(pairing::psk(&norm)),
-                        deadline,
-                        attempts: 0,
-                        awaiting: None,
+            LocalCommand::RequestPairing { transport, addr } => {
+                // Claim the slot before dialling. A pairing we started must
+                // block one somebody else starts, or a stranger's handshake
+                // could land while a person here is waiting on their own.
+                if let Some(why) = self.why_not_pair(now_ms) {
+                    out.ui(UiEvent::PairingFailed {
+                        reason: why.to_string(),
                     });
-                    out.ui(UiEvent::PairingWindowOpen {
-                        code: norm,
-                        expires_in_ms: self.config.pairing_window_ms,
-                    });
+                    return;
                 }
-                Err(e) => out.ui(UiEvent::PairingFailed {
-                    reason: e.to_string(),
-                }),
-            },
-            LocalCommand::RequestPairing {
-                transport,
-                addr,
-                code,
-            } => match pairing::normalize(&code) {
-                Ok(norm) => {
-                    self.next_dial += 1;
-                    let d = DialToken(self.next_dial);
-                    self.pending_pair_dials
-                        .insert(d, (pairing::psk(&norm), (transport, addr.clone())));
-                    out.push(Action::Dial {
-                        transport,
-                        addr,
-                        dial: d,
-                    });
-                }
-                Err(e) => out.ui(UiEvent::PairingFailed {
-                    reason: e.to_string(),
-                }),
-            },
-            LocalCommand::ConfirmPairing { accept } => self.confirm_pairing(accept, out),
-            LocalCommand::ClosePairingWindow => {
-                if let Some(w) = self.pairing.take()
-                    && let Some(a) = w.awaiting
-                {
-                    out.push(Action::Close {
-                        link: a.link,
-                        reason: LinkDownReason::Closed,
-                    });
-                    self.links.remove(&a.link);
-                }
+                self.begin_pairing(now_ms);
+                self.next_dial += 1;
+                let d = DialToken(self.next_dial);
+                self.pending_pair_dials.insert(d, (transport, addr.clone()));
+                out.push(Action::Dial {
+                    transport,
+                    addr,
+                    dial: d,
+                });
             }
+            LocalCommand::ConfirmPairing { accept } => self.confirm_pairing(now_ms, accept, out),
             LocalCommand::SetPeerAddress {
                 peer,
                 transport,
@@ -1987,8 +2028,8 @@ impl Core {
     }
 
     fn on_tick(&mut self, now_ms: u64, out: &mut Outcome) {
-        // Pairing window expiry. Measured against the host's monotonic clock,
-        // so moving the wall clock cannot extend it.
+        // A pairing nobody answered. Measured against the host's monotonic
+        // clock, so moving the wall clock cannot extend it.
         if let Some(w) = &self.pairing
             && now_ms >= w.deadline
         {
@@ -2000,8 +2041,12 @@ impl Core {
                 });
                 self.links.remove(&a.link);
             }
+            // Quiet afterwards. Six digits nobody answered is the shape a
+            // device gets if it asks a machine with nobody sitting at it, and
+            // without a cooldown it would simply ask again.
+            self.end_pairing(now_ms, false);
             out.ui(UiEvent::PairingFailed {
-                reason: "the pairing window expired".to_string(),
+                reason: "nobody confirmed the pairing in time".to_string(),
             });
         }
 
@@ -2130,6 +2175,24 @@ impl Core {
             // down the list this dial was walking rather than stopping here
             // with the alternatives still untried and nobody told.
             Some(LinkState::Handshaking(h)) => {
+                // A pairing that died before anyone saw a digit has to give the
+                // slot back. `RequestPairing` claims it before dialling, so
+                // without this one refusal — the far end busy, or not listening
+                // — locked pairing out for the full two minutes, and the person
+                // who tapped got nothing and no way to try again.
+                //
+                // Unconditional, and safe: a link *still handshaking* can never
+                // be the one a confirmation is waiting on, because completing
+                // the handshake is what parks the link in `Pending` and sets
+                // `awaiting` in the same step. Guarding this on "no confirmation
+                // pending" reads as prudent and is provably always true.
+                //
+                // No cooldown. That exists to stop a stranger raising dialogs
+                // here; being told no is not being bothered, and somebody who
+                // tapped the wrong machine may tap the one beside it at once.
+                if h.pairing_flow {
+                    self.pairing = None;
+                }
                 if let Some(pending) = h.fallback {
                     self.try_next_route(
                         now_ms,
@@ -2140,6 +2203,13 @@ impl Core {
                 }
                 return;
             }
+            // A link parked waiting on a person is deliberately *not* torn down
+            // here, tempting as it looks. `confirm_pairing` closes the link as
+            // soon as its own side approves, so this fires on the ordinary path
+            // — and the two ends approve at different moments. Acting on it
+            // would cancel the second person's confirmation the instant the
+            // first one pressed a button. The deadline is what cleans up a peer
+            // that really did go away.
             _ => return,
         };
 
@@ -2254,6 +2324,16 @@ impl Core {
             Some(LinkState::Up(u)) => Some(u.peer.clone()),
             _ => None,
         };
+        // Said out loud, because this is where a wire disagreement lands and
+        // until now it landed in silence: the `UiEvent::Error` below reaches a
+        // screen, and a daemon has no screen. A phone speaking a version this
+        // build does not know produced nothing, anywhere, in any log.
+        tracing::warn!(
+            link = link.0,
+            peer = peer.as_ref().map(ToString::to_string),
+            detail,
+            "closing a link"
+        );
         out.push(Action::Close {
             link,
             reason: LinkDownReason::Protocol(ErrorCode::NotAllowed),
@@ -2369,6 +2449,7 @@ impl CoreBuilder {
             addrs: BTreeMap::new(),
             seen: BTreeMap::new(),
             pairing: None,
+            pair_quiet_until: 0,
             pending_pair_dials: BTreeMap::new(),
             pending_peer_dials: BTreeMap::new(),
             dial_trouble: BTreeMap::new(),

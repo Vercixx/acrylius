@@ -14,10 +14,13 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "cmd", rename_all = "kebab-case")]
 pub enum Request {
     Status,
-    /// Open a pairing window. Reachable only here.
-    Pair {
-        code: Option<String>,
-    },
+    /// Wait for a device to ask to pair, and answer it from here.
+    ///
+    /// Arms nothing: any device may start a pairing handshake. This is the
+    /// terminal's way of seeing the six digits and pressing a button, for a
+    /// machine with no notification daemon or somebody on the end of an SSH
+    /// connection.
+    Pair,
     Approve,
     Deny,
     Devices,
@@ -31,10 +34,9 @@ pub enum Request {
     Ping {
         device: String,
     },
-    /// Dial someone else's open pairing window.
+    /// Dial a machine and try to pair with it.
     PairWith {
         addr: String,
-        code: String,
     },
     /// Ask a peer to lock, unlock, or describe its session.
     Session {
@@ -117,20 +119,6 @@ pub enum Response {
     /// Anything the core wanted a human to see, forwarded verbatim.
     Event {
         text: String,
-    },
-    /// A pairing window is open, and everything needed to join it.
-    ///
-    /// Sent instead of an `Event` line so the client can draw a QR rather than
-    /// print prose about one. The daemon builds the payload because only it
-    /// knows all six fields — the CLI would otherwise have to ask for its own
-    /// status first and assemble a second copy of the format.
-    Pairing {
-        code: String,
-        expires_in_ms: u64,
-        /// `docs/PROTOCOL.md` § 8. `None` when this machine could not work out
-        /// a routable address to put in one, which is not fatal: the code
-        /// still works typed.
-        qr: Option<String>,
     },
     /// A peer's answer, decoded but not yet worded.
     Report {

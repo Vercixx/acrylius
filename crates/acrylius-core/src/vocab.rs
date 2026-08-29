@@ -176,27 +176,23 @@ pub enum Event {
 /// Something a human asked for, locally.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum LocalCommand {
-    /// Open a pairing window and wait for someone to use `code`.
+    /// Dial `addr` and try to pair with whatever answers.
     ///
-    /// On the desktop this is reachable only over the `SO_PEERCRED`-guarded
-    /// control socket. There is deliberately no network route to it, so "you
-    /// must be at the machine" is a property of the transport rather than a rule
-    /// a handler could forget to enforce.
-    OpenPairingWindow {
-        code: String,
-    },
-    /// Dial `addr` and try to pair using `code`.
+    /// Nothing is trusted about the address: it decides where to knock and
+    /// nothing else. Who answered is settled by the six digits both ends derive
+    /// from the handshake, and a person comparing them.
     RequestPairing {
         transport: TransportId,
         addr: String,
-        code: String,
     },
-    /// Answer the SAS prompt. `false` means the codes did not match, which is
-    /// treated as a hostile handshake, not a typo.
+    /// Answer the SAS prompt.
+    ///
+    /// `false` means the digits did not match. Since the SAS is what
+    /// authenticates a pairing, that is the one observable sign of a handshake
+    /// being relayed — not a typo, and not worth retrying straight away.
     ConfirmPairing {
         accept: bool,
     },
-    ClosePairingWindow,
     /// Tell the core where a peer can be reached, bypassing discovery.
     ///
     /// Discovery is only ever a hint, so a hint supplied by a human who knows
@@ -406,12 +402,13 @@ pub enum EffectResult {
 /// Anything a UI or CLI should show.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum UiEvent {
-    PairingWindowOpen {
-        code: String,
-        expires_in_ms: u64,
-    },
     /// Both ends show this. The user compares, then answers with
     /// [`LocalCommand::ConfirmPairing`].
+    ///
+    /// This is the security boundary, not a courtesy: it is the only step that
+    /// distinguishes the machine somebody tapped from something relaying between
+    /// two handshakes. A UI that shows these digits without asking a person to
+    /// compare them has removed the authentication.
     PairingSas {
         name: String,
         fingerprint: Fingerprint,
@@ -439,7 +436,10 @@ pub enum UiEvent {
         /// Transport-defined and opaque: a `host:port`, a BLE address.
         addr: String,
         transport: TransportId,
-        /// Whether it says it has a pairing window open right now.
+        /// Whether it says it is already busy pairing with somebody.
+        ///
+        /// Advisory, and a courtesy to the screen: a machine that says so will
+        /// refuse a handshake, so offering the tap would only fail.
         pairing: bool,
     },
     /// A machine that was on the network is not any more, and should stop being

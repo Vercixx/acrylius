@@ -219,18 +219,17 @@ pub enum FfiEvent {
         addr: String,
     },
     Tick,
-    OpenPairingWindow {
-        code: String,
-    },
+    /// Dial `addr` and try to pair with whatever answers.
+    ///
+    /// What a person tapping a machine in the list turns into. There is nothing
+    /// to type: the six digits that come back are what settles who answered.
     RequestPairing {
         transport: u16,
         addr: String,
-        code: String,
     },
     ConfirmPairing {
         accept: bool,
     },
-    ClosePairingWindow,
     SetPeerAddress {
         peer: String,
         transport: u16,
@@ -355,18 +354,11 @@ impl TryFrom<FfiEvent> for cv::Event {
                 addr,
             },
             FfiEvent::Tick => Self::Tick,
-            FfiEvent::OpenPairingWindow { code } => Self::Local(L::OpenPairingWindow { code }),
-            FfiEvent::RequestPairing {
-                transport,
-                addr,
-                code,
-            } => Self::Local(L::RequestPairing {
+            FfiEvent::RequestPairing { transport, addr } => Self::Local(L::RequestPairing {
                 transport: cl::TransportId(transport),
                 addr,
-                code,
             }),
             FfiEvent::ConfirmPairing { accept } => Self::Local(L::ConfirmPairing { accept }),
-            FfiEvent::ClosePairingWindow => Self::Local(L::ClosePairingWindow),
             FfiEvent::SetPeerAddress {
                 peer: p,
                 transport,
@@ -523,10 +515,6 @@ impl From<cv::Effect> for FfiEffect {
 
 #[derive(uniffi::Enum, Clone, Debug)]
 pub enum FfiUiEvent {
-    PairingWindowOpen {
-        code: String,
-        expires_in_ms: u64,
-    },
     PairingSas {
         name: String,
         fingerprint: String,
@@ -578,13 +566,6 @@ pub enum FfiUiEvent {
 impl From<cv::UiEvent> for FfiUiEvent {
     fn from(e: cv::UiEvent) -> Self {
         match e {
-            cv::UiEvent::PairingWindowOpen {
-                code,
-                expires_in_ms,
-            } => Self::PairingWindowOpen {
-                code,
-                expires_in_ms,
-            },
             cv::UiEvent::Discovered {
                 fingerprint,
                 name,
