@@ -21,7 +21,7 @@ none of it was caught by any gate.
       cancelling the drag before it ended; and its binding read a value
       captured once per rebuild, so it answered the same number however far the
       knob went.)*
-- [ ] **The clock is not behind** the desktop's own player. Worth checking over
+- [V] **The clock is not behind** the desktop's own player. Worth checking over
       **Bluetooth** especially, which is where it was reported: a reading was
       stamped when it *arrived* rather than when the desktop took it, so the
       clock sat one network leg behind for as long as a track played and was
@@ -54,15 +54,17 @@ none of it was caught by any gate.
       a radio that cannot carry a file. And the Bonjour browse was created once
       and never replaced, so a browse that failed during the outage reported
       nothing ever again.)*
-- [V] (no, BLE entry is still in the list after suspending PC + bonjour entry also doesn't disappear even after force-quit) **A computer switched off leaves "On this network"** within a few
+- [V] **A computer switched off leaves "On this network"** within a few
       seconds, rather than staying on offer until the app is restarted.
-      *(Sightings were one-way: nothing was ever un-discovered.)*
+      *(Sightings were one-way: nothing was ever un-discovered. Reported still
+      broken after this pass — a Bluetooth sighting was pinning the entry — and
+      finished in the second pass below.)*
 - [V] **Actions can be felt.** A control that lands and one that is refused
       buzz differently; a seek buzzes when the finger lifts. Nothing buzzes on
       the press itself.
 
-Still open, and not fixed in this build — see the end of this file: the widget
-extension, and BLE.
+Still open, and not ours — see the end of this file: the widget extension,
+which is in the IPA and is not being installed by SideStore.
 
 ## Re-test after the second pass
 
@@ -222,7 +224,7 @@ typed and nothing is scanned. The code, the QR and the scanner are all gone.
 Most of this is automated by `./scripts/m3-acceptance.sh`; run that first, and
 run it with `ACRYLIUS_M3_PHONE=1` to print the phone half as a checklist.
 
-- [ ] On the phone: Pair shows an **On this network** section listing the
+- [V] On the phone: Pair shows an **On this network** section listing the
       desktop, with its name and address. There is **no** code field and **no**
       scan button anywhere on the screen. *(The "fails to discover after
       forgetting, force-quit required" note on this line was the second-pass
@@ -242,13 +244,13 @@ run it with `ACRYLIUS_M3_PHONE=1` to print the phone half as a checklist.
 - [V] With `[share] enabled = false` in the desktop config, the pairing
       notification still appears. *It used to be built only alongside file
       sharing, so turning sharing off silently cost every desktop prompt.*
-- [ ] Kill the notification daemon, then pair from the phone **without**
+- [V] Kill the notification daemon, then pair from the phone **without**
       starting anything on the desktop first. Then run `acryliusctl pair`: it
       shows the digits that are already waiting, and `pair approve` completes
       the pairing. *(It used to show only what happened next, so a pairing that
       completed before you ran it was invisible and lapsed in silence two
       minutes later — you had to know to start it beforehand.)*
-- [ ] The same pairing appears in `journalctl --user -u acryliusd -f`, digits
+- [V] The same pairing appears in `journalctl --user -u acryliusd -f`, digits
       included. *That is the only surface left when there is no notification
       daemon at all.*
 - [V] Over SSH with no desktop at all, `acryliusctl pair` waits, prints the
