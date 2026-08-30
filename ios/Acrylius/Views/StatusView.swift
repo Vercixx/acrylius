@@ -41,6 +41,30 @@ struct StatusView: View {
                 }
 
                 Section {
+                    LabeledContent("Build") {
+                        Text(BuildInfo.current.summary)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+                    if let version = BuildInfo.current.version {
+                        LabeledContent("Version", value: version)
+                    }
+                } header: {
+                    Text("This build")
+                } footer: {
+                    // On the front of Status rather than behind Debug, because
+                    // the question it answers is asked *before* deciding
+                    // whether something is broken, and an answer two taps away
+                    // is one people reinstall instead of going to find.
+                    Text(
+                        BuildInfo.current.commit == nil
+                            ? "Built outside CI, so there is no commit to name."
+                            : "Compare this with the commit you expected before reinstalling."
+                    )
+                }
+
+                Section {
                     NavigationLink("Debug") { DebugView() }
                 } footer: {
                     // Named plainly, because the one thing here a person may

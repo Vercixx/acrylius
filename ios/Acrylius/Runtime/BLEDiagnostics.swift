@@ -172,7 +172,10 @@ public final class BLEDiagnostics {
     /// Everything, as text to copy out of the app. A screenshot of a scrolling
     /// list is a poor bug report; this is the thing worth pasting.
     public func transcript() -> String {
-        var out = "state: \(managerState)\nauth: \(authorization)\n"
+        // First line, because a transcript that does not say which build
+        // produced it is a report nobody can act on.
+        var out = "build: \(BuildInfo.current.summary)\n"
+        out += "state: \(managerState)\nauth: \(authorization)\n"
         out += "scanning: \(scanning)\nlink: \(link)\n"
         if let f = fragmentBytes { out += "fragment: \(f) bytes\n" }
         if let t = trouble { out += "trouble: \(t)\n" }

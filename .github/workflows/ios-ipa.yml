@@ -132,6 +132,15 @@ jobs:
       - name: Build
         run: |
           set -o pipefail
+          # Stamped into the app so a screen can say which build it is. The
+          # question this answers — "is the fix I am looking for actually in
+          # the thing on my phone?" — otherwise costs a reinstall, and a
+          # reinstall does not answer it either: installing the same IPA twice
+          # looks exactly like installing a new one.
+          export ACR_BUILD_COMMIT="${{ github.sha }}"
+          ACR_BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          export ACR_BUILD_DATE
+          echo "commit $ACR_BUILD_COMMIT built at $ACR_BUILD_DATE"
           # xcbeautify only prettifies. Piping through it unconditionally means
           # that if it is ever missing from the image, `command not found`
           # becomes the failure and the real compiler output is never shown.
@@ -145,6 +154,8 @@ jobs:
             ONLY_ACTIVE_ARCH=NO \
             COMPILATION_CACHE_ENABLE_CACHING=YES \
             COMPILATION_CACHE_CAS_PATH="$XCODE_CAS" \
+            ACR_BUILD_COMMIT="$ACR_BUILD_COMMIT" \
+            ACR_BUILD_DATE="$ACR_BUILD_DATE" \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
             build 2>&1 | tee raw.log | "${pretty[@]}" || {
               echo "--- errors ---"
@@ -153,6 +164,28 @@ jobs:
               tail -200 raw.log
               exit 1
             }
+
+      - name: Check the build stamp landed
+        run: |
+          set -euo pipefail
+          app="$(ls -d build/Build/Products/Release-iphoneos/*.app | head -n1)"
+          plist="$app/Info.plist"
+          got_commit="$(/usr/libexec/PlistBuddy -c 'Print :ACRBuildCommit' "$plist" 2>/dev/null || true)"
+          got_date="$(/usr/libexec/PlistBuddy -c 'Print :ACRBuildDate' "$plist" 2>/dev/null || true)"
+          echo "commit: ${got_commit:-<empty>}"
+          echo "date:   ${got_date:-<empty>}"
+          # Checked rather than assumed. Xcode carries an unrecognised build
+          # setting along and ignores it — the same trap the compilation-cache
+          # step above is written around — so a typo here would ship an app
+          # whose only job was to say which build it is, saying nothing.
+          if [ "$got_commit" != "${{ github.sha }}" ]; then
+            echo "::error::ACRBuildCommit is '${got_commit}', expected ${{ github.sha }}"
+            exit 1
+          fi
+          case "$got_date" in
+            ????-??-??T??:??:??Z) ;;
+            *) echo "::error::ACRBuildDate is not an ISO 8601 instant: '${got_date}'"; exit 1 ;;
+          esac
 
       - name: Say whether the cache filled
         if: always()
