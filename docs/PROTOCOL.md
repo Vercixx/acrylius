@@ -84,8 +84,12 @@ The raw static key is deliberately absent from the TXT record. Keeping it
 unpublished is what lets a session opener (section 6.2) stay opaque to an
 observer.
 
-`pair=1` advertises that a pairing window is currently open. It is a convenience
-for a user interface. A device must not treat it as permission for anything.
+`pair=1` advertises that a pairing is already in progress on that device — it
+means *busy*, not *ready*. Since anyone may start a pairing, this is the useful
+thing to say in advance: a device already showing somebody six digits will refuse
+the next handshake (section 8), so a user interface can grey that entry out
+rather than offer a tap that cannot work. A device must not treat it as
+permission for anything.
 
 A device that cannot advertise, which includes iOS, is still fully functional:
 it dials and is never dialled.
@@ -98,10 +102,15 @@ business and is invisible above this line.
 Every message carries one leading byte naming its kind:
 
 ```
-1   pairing handshake message   (Noise XXpsk0)
+1   pairing handshake message   (Noise XX)
 2   session handshake message   (Noise IKpsk2)
 3   transport message           (an encrypted envelope)
 ```
+
+Kind 1 needs no prior relationship and no shared secret, so it is also the
+request to pair: a device that wants to pair simply starts one. What bounds who
+may do that is the receiver's admission policy in section 8, not anything on the
+wire.
 
 The tag is outside the encryption and is therefore forgeable. That is
 acceptable, and it is why the Noise prologue in section 6 also carries the mode:
@@ -155,23 +164,22 @@ mode     = 1 for pairing, 2 for session
 suite    = the full Noise pattern name below
 ```
 
-### 6.1 Pairing: `Noise_XXpsk0_25519_ChaChaPoly_SHA256`
+### 6.1 Pairing: `Noise_XX_25519_ChaChaPoly_SHA256`
 
-The pre-shared key comes from the pairing code:
+No pre-shared key. Neither side knows the other's static key in advance, which
+is the situation on first contact, and there is nothing for a person to type
+because pairing begins by tapping a machine in a list.
 
-```
-psk = HKDF(salt = "acrylius/pair/v1/psk", ikm = normalized_code, info = "", 32)
-```
+Anyone can therefore complete a pairing handshake with anyone. The `sas` below
+is what authenticates it, and section 8 is what bounds how often a handshake may
+be answered.
 
-The PSK is at position 0, not 3, and the difference matters. `psk3` mixes
-the key into message 3, which the initiator writes. It therefore proves to the
-responder that the initiator knew the code and proves nothing in the other
-direction: an initiator talking to the wrong machine completes its side,
-displays a code, and waits for a human to approve a peer that never
-demonstrated knowing anything. `psk0` mixes the code into the chaining key
-before the first message, so every encrypted payload in either direction
-depends on it. A wrong code means message 1 does not decrypt, no reply is sent,
-and no code appears on either screen.
+This was `XXpsk0` through M2, keyed by an eight-character code read off the
+other machine's screen. That made a wrong code fail at message 1 — no reply, no
+digits anywhere — which is strictly stronger than what replaces it. It was given
+up deliberately: a code can only be read by somebody already looking at that
+screen, and pairing a phone to a computer across the room is the case that
+matters.
 
 ```
 initiator                                responder
@@ -192,6 +200,13 @@ session_psk = HKDF("", handshake_hash, "acrylius/pair/v1/session-psk", 32)
 ```
 
 `session_psk` is stored by both sides and never transmitted.
+
+`sas` is the security mechanism, not a checksum. Both ends derive it
+independently from a hash neither side controls alone, and it is never sent. An
+attacker who can relay traffic runs two handshakes — one with each side — and so
+holds two different handshake hashes; the digits differ, and the people comparing
+them see that. Its only win is the two values coinciding, which is one chance in
+10⁶ per attempt. That bound is why section 8 rate-limits attempts.
 
 ### 6.2 Sessions: `Noise_IKpsk2_25519_ChaChaPoly_SHA256`
 
@@ -266,54 +281,62 @@ This is the whole of the protocol's replay machinery: one `u64` per peer.
 
 ## 8. Pairing
 
-Either side may ask to pair. The other must approve.
+Either side may start a pairing. Both must approve, by comparing six digits.
+Nothing is typed and nothing is scanned.
 
 ```
-idle ──open window──▶ open ──handshake completes──▶ awaiting approval ──approve──▶ paired
-  ▲                     │                                   │
-  │                     ├── window expires ─────────────────┼──▶ idle
-  │                     └── N failed handshakes ────────────┘
-  └───────────────────────────────────── deny ──────────────┘
+idle ──kind 1 arrives──▶ pairing ──handshake completes──▶ awaiting approval ──both approve──▶ paired
+  ▲                        │                                     │
+  │                        ├── lapses ───────────────────────────┼──▶ cooling ──▶ idle
+  │                        └── N failed handshakes ──────────────┘        ▲
+  └──────────────────────────────── digits differ ────────────────────────┘
 ```
 
 ### Rules
 
-A pairing code is 8 characters from Crockford base32 with `I`, `L`, `O` and `U`
-removed, giving 40 bits. Input is normalized before use: separators are
-stripped, letters are upper-cased, and `I` and `L` fold onto `1`, `O` onto `0`,
-`U` onto `V`. Normalization happens before key derivation, so a user who types
-`l` for `1` reaches the same key rather than merely passing the same string
-comparison.
+**Admission.** A device answers a pairing handshake only when all of the
+following hold. A refusal closes the link and says nothing else.
 
-The window expiry is measured on a monotonic clock. Changing the system clock
-must not extend it.
+- It is willing to pair at all. An implementation should make this configurable;
+  a machine that is done pairing has no reason to answer another.
+- No pairing is already in progress, and in particular **no confirmation is
+  already waiting**. This is the rule the design rests on: an implementation
+  that lets a second handshake replace the confirmation on screen will have a
+  person compare digits for one device and approve another.
+- It is not inside a cooldown from a previous attempt.
 
-Three failed handshakes close the window. A correct code that fails to complete
-is not a typo, it means the code reached someone who could not complete with it.
+**The pairing is claimed before the first frame is answered**, not when the
+handshake completes. Two handshakes that both ran to completion would both want
+to be the thing a person confirms, and only the check above stops that.
 
-Opening a window has no network route. On a desktop it is reachable only over a
+**Cooldowns.** After a pairing lapses or is abandoned, further handshakes are
+ignored for a period. After a person says the digits *differ*, they are ignored
+for a longer one. The asymmetry is deliberate: the SAS is the security mechanism,
+so a mismatch is the one observable sign that something is relaying between two
+handshakes, and the next attempt is another one-in-10⁶ try at the same trick.
+Rate limiting is what makes the 10⁶ bound in section 6.1 mean anything.
+
+Expiry is measured on a monotonic clock. Changing the system clock must not
+extend it.
+
+N failed handshakes give up on the pairing. There is no code to get wrong, so a
+handshake that does not complete is a peer that cannot speak this protocol.
+
+**Approving has no network route.** On a desktop it is reachable only over a
 `0600` Unix socket whose peer credentials are checked against the daemon's own
-uid. "You must be at the machine" is therefore a property of the transport
-rather than a rule a handler could forget to apply.
+uid. Starting a pairing is now something a phone can do over the network, but
+approving one is not: an unsolicited handshake costs a notification and nothing
+else, and only a person at the machine writes a peer to the trust store.
 
-Both sides display the SAS. It is a cross-check, not the security mechanism:
-`XXpsk0` already makes a wrong code fail. Showing it costs nothing and catches
-implementation errors that a PSK check would mask.
+Both sides display the SAS and each must confirm it. See section 6.1 for what it
+does and does not defend against. An implementation that shows the digits without
+asking somebody to compare them, or that answers on their behalf, has removed the
+authentication rather than streamlined it.
 
-Refusing the SAS closes the link and burns the window. A code that does not
-match is a hostile handshake, not a mistake worth retrying.
+Refusing the SAS closes the link and starts the long cooldown.
 
 On approval each side stores the peer's static key, `device_id`, name, platform,
 `session_psk`, and `greatest_seen = 0`.
-
-### QR payload
-
-```
-acrylius:1?n=<name>&h=<host>&p=<port>&id=<device id>&fp=<fingerprint>&c=<code>
-```
-
-The fingerprint in a QR payload is checked against the one the handshake
-produces. A mismatch aborts.
 
 ## 9. Envelope
 
@@ -734,19 +757,6 @@ reassemble(03000102, 01030405, 00060708) -> 000102030405060708
 
 A message that divides evenly across fragments emits no trailing empty fragment:
 the last one carries payload and clears `MORE`.
-
-### Pairing
-
-```
-normalize("abcd1234")  -> ABCD1234
-normalize("IOIO-UUUU") -> 1010VVVV
-normalize("l0l0 uuuu") -> 1010VVVV
-
-psk("ABCD1234") = b64u dyRc5CXtth81rAlg0fgf1GXo8Nx8JDlXuuHcLNJnWv8
-
-encode(0)             -> 00000000
-encode(0xFFFFFFFFFF)  -> ZZZZZZZZ
-```
 
 ### Derivations
 

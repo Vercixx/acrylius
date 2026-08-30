@@ -103,6 +103,24 @@ fn as_text(value: Option<&OwnedValue>) -> String {
     String::new()
 }
 
+/// Read `mpris:trackid`, whichever of its two types it arrived as.
+///
+/// The specification says this field is an object path, and a good many
+/// players send one — but a good many others send the same text typed as a
+/// string, and the two are different D-Bus types that do not convert to each
+/// other. Reading only the string form is why seeking never worked: the path
+/// was right there, `<&str>::try_from` refused it, and `SetPosition` was
+/// answered with "reports no track id" for players that were perfectly capable
+/// of it. Read defensively, like every other MPRIS field here.
+fn as_track_id(value: Option<&OwnedValue>) -> Option<ObjectPath<'static>> {
+    let value = value?;
+    if let Ok(path) = ObjectPath::try_from(value.clone()) {
+        return Some(path.into_owned());
+    }
+    let text = <&str>::try_from(value).ok()?;
+    ObjectPath::try_from(text.to_string()).ok()
+}
+
 /// Read a length, in microseconds, whatever integer width it arrived as.
 fn as_micros(value: Option<&OwnedValue>) -> u64 {
     let Some(value) = value else { return 0 };
@@ -261,13 +279,29 @@ impl MediaEffector {
                 // land on whatever started playing in the meantime. A player
                 // that does not report a track id cannot be positioned at all.
                 let metadata = proxy.metadata().await.unwrap_or_default();
-                let track = metadata
-                    .get("mpris:trackid")
-                    .and_then(|v| <&str>::try_from(v).ok())
-                    .and_then(|s| ObjectPath::try_from(s.to_string()).ok())
+                let track = as_track_id(metadata.get("mpris:trackid"))
                     .ok_or_else(|| anyhow::anyhow!("{} reports no track id", found.name))?;
                 let us = i64::try_from(ms.saturating_mul(1000)).unwrap_or(i64::MAX);
-                proxy.set_position(&track, us).await?;
+                if us == 0 {
+                    // Back to the start, the other way round.
+                    //
+                    // `SetPosition(track, 0)` is ignored by Chromium, verified
+                    // over the bus: `SetPosition(track, 1000)` moves the track
+                    // and `SetPosition(track, 0)` does nothing at all. So the
+                    // most ordinary request a person makes of a timeline — drag
+                    // it to the left edge — was the one position that silently
+                    // did not work.
+                    //
+                    // `Seek` is better specified for exactly this: MPRIS says a
+                    // relative seek landing before the beginning sets the
+                    // position to zero. Asking to go back further than the
+                    // track is long is therefore a defined way to say "the
+                    // start", and it needs no agreement about where zero is.
+                    let here = proxy.position().await.unwrap_or(0);
+                    proxy.seek(-(here.saturating_add(1_000_000))).await?;
+                } else {
+                    proxy.set_position(&track, us).await?;
+                }
             }
             MediaAction::SetVolume { percent } => {
                 proxy.set_volume(f64::from(percent) / 100.0).await?;

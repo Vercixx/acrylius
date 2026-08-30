@@ -204,6 +204,56 @@ fn snapshot_devices(core: &acrylius_core::core::Core) -> Vec<control::Device> {
         .collect()
 }
 
+/// What to call this machine when nobody has said.
+///
+/// The pretty hostname first. It is the one a person chose — `hostnamectl
+/// set-hostname --pretty "Кухня"` — and the only one that may contain spaces,
+/// punctuation or non-Latin characters. The static hostname is a DNS label and
+/// is conventionally restricted to letters, digits and hyphens, so reading only
+/// that made a phone show `vercixx-pc` however the machine had been named.
+///
+/// Read out of `/etc/machine-info` rather than asked of `hostnamed` over D-Bus:
+/// it is a plain `KEY=value` file, it is where `hostnamectl` writes, and the
+/// daemon starts before there is any reason to assume a system bus.
+fn machine_name() -> String {
+    if let Ok(info) = std::fs::read_to_string("/etc/machine-info") {
+        for line in info.lines() {
+            let Some(value) = line.trim().strip_prefix("PRETTY_HOSTNAME=") else {
+                continue;
+            };
+            // Quoted or not, both of which `hostnamectl` writes depending on
+            // what is in the value.
+            let value = value.trim().trim_matches(['"', '\'']).trim();
+            if !value.is_empty() {
+                return value.to_string();
+            }
+        }
+    }
+    std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .map(|s| s.trim().to_string())
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "acrylius".to_string())
+}
+
+/// What is on this network that this machine is not paired with.
+///
+/// `acryliusctl pair with` has always taken an address, and until now nothing
+/// would tell you one — the core knew every acrylius machine on the network and
+/// had no way to say so. This is that gap closed on the desktop side; the phone
+/// gets the same facts as `UiEvent::Discovered`.
+fn snapshot_nearby(core: &acrylius_core::core::Core) -> Vec<control::Nearby> {
+    core.nearby()
+        .map(|n| control::Nearby {
+            fingerprint: n.fingerprint.to_string(),
+            name: n.name.to_string(),
+            addr: n.addr,
+            transport: n.transport.0,
+            pairing: n.pairing,
+        })
+        .collect()
+}
+
 /// Config maintenance, and then exit. Nothing here starts a daemon or touches
 /// the network.
 fn run_config_action(action: &ConfigAction, path: &std::path::Path) -> anyhow::Result<()> {
@@ -342,11 +392,10 @@ async fn main() -> anyhow::Result<()> {
     let identity = load_identity(&state)?;
     let store = FileStore::open(&state)?;
     let peers = store.load_peers()?;
-    let name = args.name.or_else(|| cfg.name.clone()).unwrap_or_else(|| {
-        std::fs::read_to_string("/proc/sys/kernel/hostname")
-            .map(|s| s.trim().to_string())
-            .unwrap_or_else(|_| "acrylius".to_string())
-    });
+    let name = args
+        .name
+        .or_else(|| cfg.name.clone())
+        .unwrap_or_else(machine_name);
 
     tracing::info!(
         %name,
@@ -407,6 +456,7 @@ async fn main() -> anyhow::Result<()> {
         CoreConfig {
             name: name.clone(),
             platform: "linux".to_string(),
+            accept_pair_requests: cfg.pair.enabled,
             ..Default::default()
         },
     )
@@ -442,6 +492,8 @@ async fn main() -> anyhow::Result<()> {
     let fingerprint = core.fingerprint();
     let status = Arc::new(Mutex::new(Some(status)));
     let devices = Arc::new(Mutex::new(snapshot_devices(&core)));
+    let nearby = Arc::new(Mutex::new(snapshot_nearby(&core)));
+    let pending_pair: Arc<Mutex<Option<control::Confirmation>>> = Arc::new(Mutex::new(None));
 
     let mut rt = Runtime::new(core, effector, Box::new(store));
 
@@ -450,10 +502,22 @@ async fn main() -> anyhow::Result<()> {
     // here, which is what keeps the single-serial-executor rule intact.
     {
         let devices = devices.clone();
+        let nearby = nearby.clone();
+        let pending_pair = pending_pair.clone();
         let status = status.clone();
         rt.observe(move |core| {
             if let Ok(mut d) = devices.try_lock() {
                 *d = snapshot_devices(core);
+            }
+            if let Ok(mut n) = nearby.try_lock() {
+                *n = snapshot_nearby(core);
+            }
+            if let Ok(mut p) = pending_pair.try_lock() {
+                *p = core.pending_pairing().map(|q| control::Confirmation {
+                    name: q.name.to_string(),
+                    fingerprint: q.fingerprint.to_string(),
+                    sas: q.sas.to_string(),
+                });
             }
             if let Ok(mut s) = status.try_lock()
                 && let Some(s) = s.as_mut()
@@ -492,13 +556,78 @@ async fn main() -> anyhow::Result<()> {
     // A question for the person at this desktop belongs on their screen. Absent
     // on a machine with no notification daemon, and everything still works
     // through `acryliusctl` — which is why nothing below requires one.
-    let prompter = match bulk.clone() {
-        Some(bulk) => prompt::Prompter::start(rt.events(), bulk).await,
-        None => None,
-    };
+    //
+    // Not conditional on file sharing: pairing has nothing to do with sharing,
+    // and building this only when `bulk` was present meant
+    // `[share] enabled = false` silently cost every desktop question.
+    //
+    // Connected off the startup path, though, and that is not tidiness. The
+    // notification service is often D-Bus activated, so `GetCapabilities` can
+    // take seconds the first time — 4.6 of them on the machine this was written
+    // on. Awaiting it here held up the control socket for that long, which made
+    // every acceptance script that waits for a daemon flaky, and it would have
+    // been worse once `[share] enabled = false` machines started paying it too.
+    let prompter: Arc<tokio::sync::OnceCell<Option<Arc<prompt::Prompter>>>> =
+        Arc::new(tokio::sync::OnceCell::new());
+    {
+        let cell = prompter.clone();
+        let events = rt.events();
+        let bulk = bulk.clone();
+        tokio::spawn(async move {
+            let _ = cell.set(prompt::Prompter::start(events, bulk).await);
+        });
+    }
     let names = devices.clone();
     tokio::spawn(async move {
         while let Some(e) = ui_mpsc_rx.recv().await {
+            // `None` until the connection lands. A question in the first few
+            // seconds after start goes unprompted rather than delaying every
+            // one after it; `acryliusctl` answers it either way.
+            let prompter = prompter.get().and_then(Option::as_ref);
+            // Pairing, on the screen of the person who has to answer it. Six
+            // digits and two buttons is the whole ceremony, and it is the only
+            // thing authenticating the pairing — see `prompt.rs`.
+            // The daemon has no screen, so an error aimed at one was going
+            // nowhere at all. This is the only place every core error passes
+            // through.
+            if let acrylius_core::vocab::UiEvent::Error { peer, code, detail } = &e {
+                tracing::warn!(
+                    peer = peer.as_ref().map(ToString::to_string),
+                    code = code.as_str(),
+                    detail,
+                    "core reported an error"
+                );
+            }
+            if let Some(prompter) = &prompter {
+                match &e {
+                    acrylius_core::vocab::UiEvent::PairingSas {
+                        name,
+                        fingerprint,
+                        sas,
+                    } => {
+                        // The digits, not just the fact. This is the last
+                        // resort on a machine with no notification daemon at
+                        // all, where the journal is the only surface left — and
+                        // `docs/M3-DEVICE-TESTS.md` already tells anyone
+                        // testing to keep `journalctl -f` open. They are not a
+                        // secret: both screens show them, and they authenticate
+                        // by being compared rather than by being known.
+                        tracing::info!(
+                            %name, %fingerprint, %sas,
+                            "a device asked to pair; run `acryliusctl pair` to answer"
+                        );
+                        prompter.ask_pair(name, &fingerprint.to_string(), sas).await;
+                    }
+                    // Settled, one way or another — including by somebody using
+                    // the CLI, or by it lapsing. An answered question left on
+                    // screen is one that gets answered twice.
+                    acrylius_core::vocab::UiEvent::PairingComplete { .. }
+                    | acrylius_core::vocab::UiEvent::PairingFailed { .. } => {
+                        prompter.close_pair().await;
+                    }
+                    _ => {}
+                }
+            }
             if let acrylius_core::vocab::UiEvent::Plugin {
                 peer,
                 cap,
@@ -568,6 +697,8 @@ async fn main() -> anyhow::Result<()> {
             ui: ui_tx,
             status,
             devices,
+            nearby,
+            pending_pair,
         },
     )
     .await?;

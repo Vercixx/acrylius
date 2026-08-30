@@ -5,61 +5,79 @@ import SwiftUI
 import UIKit
 #endif
 
+/// The computers this phone is paired with.
+///
+/// It owns nothing but the list now. Offers moved to Files and this phone's own
+/// details moved to Status, which leaves one screen answering one question.
 struct DeviceListView: View {
     @Environment(AppModel.self) private var model
-    @State private var showPair = false
-    /// Device ids. A path rather than plain links so a widget tap can push a
-    /// computer's screen without the user finding it in the list.
-    @State private var path: [String] = []
+    @Binding var path: [String]
+    @Binding var showPair: Bool
+
+    /// The device a confirmation is currently about.
+    ///
+    /// Held here rather than in the row, which is the whole of a bug that has
+    /// been in the app since M1: swiping a row and tapping Forget opened a
+    /// `confirmationDialog` *attached to that row*, and the swipe had already
+    /// begun removing the row. The dialog went with it about half a second
+    /// later, before anyone could answer, and the device stayed paired while
+    /// the list no longer listed it — which is why it came back on relaunch.
+    /// A dialog has to outlive the thing it is asking about.
+    @State private var forgetting: FfiPeer?
 
     var body: some View {
         NavigationStack(path: $path) {
             List {
-                // First, because it is the only thing here waiting on you. A
-                // transfer holds the sending computer open until it is answered.
-                if !model.incoming.isEmpty {
+                if model.peers.isEmpty {
                     Section {
-                        ForEach(model.incoming) { offer in
-                            IncomingOfferRow(offer: offer)
-                        }
-                    } header: {
-                        Text("Offered to this \(UIDevice.current.model)")
-                    } footer: {
-                        Text("Accepted files go to Acrylius in the Files app.")
-                    }
-                }
-
-                Section {
-                    if model.peers.isEmpty {
                         ContentUnavailableView(
                             "No devices",
                             systemImage: "desktopcomputer",
                             description: Text("Tap ＋ to get started.")
                         )
-                    } else {
+                    }
+                } else {
+                    Section {
                         ForEach(model.peers, id: \.deviceId) { peer in
                             NavigationLink(value: peer.deviceId) {
                                 PeerRow(peer: peer)
+                            }
+                            .swipeActions {
+                                Button("Forget", role: .destructive) {
+                                    // Next runloop, not this one. Presenting a
+                                    // modal in the same frame as the swipe
+                                    // action makes the row snap shut instead
+                                    // of sliding — the swipe's own close
+                                    // animation is cut off by the
+                                    // presentation. Letting the row finish
+                                    // first costs nothing anybody can measure.
+                                    Task { @MainActor in forgetting = peer }
+                                }
                             }
                         }
                     }
                 }
 
-                Section("This \(UIDevice.current.model)") {
-                    NavigationLink {
-                        DeviceInfoView()
-                    } label: {
-                        LabeledContent("Status", value: model.status)
-                    }
-                }
-
-                if let error = model.lastError {
+                // Bluetooth is asked for here rather than on a debug screen.
+                //
+                // `CBCentralManager` prompts the moment it is built, so the
+                // prompt has always been behind a tap. It used to be behind the
+                // Bluetooth diagnostics screen — which was fine while that
+                // screen was one tap from the root, and is not now that it is
+                // three taps into Status › Debug. A phone that is never granted
+                // Bluetooth simply stops working when Wi-Fi goes away, with
+                // nothing anywhere saying why.
+                if model.ble.awaitingPermission {
                     Section {
-                        Text(error).foregroundStyle(.secondary).font(.footnote)
+                        Button("Turn on Bluetooth", systemImage: "dot.radiowaves.left.and.right") {
+                            model.startBluetooth()
+                        }
+                    } footer: {
+                        Text("Lets this \(UIDevice.current.model) reach a computer when Wi-Fi is not available.")
                     }
                 }
             }
-            .navigationTitle("Acrylius")
+            .navigationTitle("Devices")
             .navigationDestination(for: String.self) { deviceId in
                 if let peer = model.peers.first(where: { $0.deviceId == deviceId }) {
                     DeviceView(peer: peer)
@@ -75,38 +93,31 @@ struct DeviceListView: View {
             .toolbar {
                 Button("Pair", systemImage: "plus") { showPair = true }
             }
-            .sheet(isPresented: $showPair) { PairView() }
-            .sheet(isPresented: .constant(model.pairingSas != nil)) { ConfirmPairingView() }
-        }
-        .onOpenURL { url in
-            // acrylius://peer/<device-id>, which is what a widget carries.
-            guard url.scheme == "acrylius", url.host == "peer" else { return }
-            let deviceId = url.lastPathComponent
-            guard !deviceId.isEmpty else { return }
-            path = [deviceId]
-        }
-    }
-}
-
-/// One file a computer wants to send, and the two answers to it.
-private struct IncomingOfferRow: View {
-    @Environment(AppModel.self) private var model
-    let offer: AppModel.IncomingOffer
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(offer.name).font(.body)
-            Text(ByteCountFormatter.string(fromByteCount: Int64(offer.size), countStyle: .file))
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            HStack {
-                TaskButton("Accept") { await model.accept(offer); return true }
-                    .buttonStyle(.borderedProminent)
-                TaskButton("Decline") { await model.decline(offer); return true }
-                    .buttonStyle(.bordered)
+            // An alert, and on the List rather than the row.
+            //
+            // A `confirmationDialog` is anchored: an action sheet on a phone, a
+            // popover on an iPad, and it wants something to point at. Asked
+            // from a swipe — where the thing it would point at is sliding
+            // away — it has nothing, and it read as a panel floating in the
+            // middle of the screen for no reason. A destructive confirmation
+            // is what `alert` is for, and an alert is meant to be centred.
+            .alert(
+                forgetting.map { "Forget \($0.name)?" } ?? "",
+                isPresented: Binding(
+                    get: { forgetting != nil },
+                    set: { if !$0 { forgetting = nil } }
+                ),
+                presenting: forgetting
+            ) { peer in
+                Button("Forget", role: .destructive) {
+                    Task { await model.forget(peer) }
+                    forgetting = nil
+                }
+                Button("Cancel", role: .cancel) { forgetting = nil }
+            } message: { peer in
+                Text("You'll need to pair \(peer.name) with this \(UIDevice.current.model) again.")
             }
         }
-        .padding(.vertical, 4)
     }
 }
 
@@ -114,44 +125,42 @@ private struct PeerRow: View {
     @Environment(AppModel.self) private var model
     let peer: FfiPeer
 
-    @State private var confirmingForget = false
-
     var body: some View {
         HStack {
-            VStack(alignment: .leading) {
+            VStack(alignment: .leading, spacing: 2) {
                 Text(peer.name)
                 Text(summary).font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
-            Circle()
-                .fill(peer.reachable ? .green : .secondary)
-                .frame(width: 8, height: 8)
-        }
-        .swipeActions {
-            Button("Forget", role: .destructive) { confirmingForget = true }
-        }
-        .confirmationDialog(
-            "Forget \(peer.name)?",
-            isPresented: $confirmingForget,
-            titleVisibility: .visible
-        ) {
-            Button("Forget", role: .destructive) { Task { await model.forget(peer) } }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("You'll need to pair \(peer.name) with this \(UIDevice.current.model) again.")
+            // Three states, not two. A peer part way through a handshake used
+            // to show the same grey dot as one that had given up, which is how
+            // a connection that was working perfectly well read as broken.
+            switch peer.state {
+            case .reachable:
+                Circle().fill(.green).frame(width: 8, height: 8)
+            case .connecting:
+                ProgressView().controlSize(.small)
+            case .unreachable:
+                Circle().fill(.secondary).frame(width: 8, height: 8)
+            }
         }
     }
 
     /// What this peer can do, from what it announced.
     private var summary: String {
         let features = model.catalog[peer.deviceId]
-        if !peer.reachable {
-            return features.canWake ? "Asleep or away, can be woken" : "Not connected"
+        switch peer.state {
+        case .connecting:
+            return "Connecting…"
+        case .unreachable:
+            if features.canWake { return "Asleep or away, can be woken" }
+            return "Not connected"
+        case .reachable:
+            var parts: [String] = []
+            if let session = features.session { parts.append(session.locked ? "Locked" : "Unlocked") }
+            if features.canRunCommands { parts.append("\(features.commands.count) commands") }
+            return parts.isEmpty ? peer.platform : parts.joined(separator: " · ")
         }
-        var parts: [String] = []
-        if let session = features.session { parts.append(session.locked ? "Locked" : "Unlocked") }
-        if features.canRunCommands { parts.append("\(features.commands.count) commands") }
-        return parts.isEmpty ? peer.platform : parts.joined(separator: " · ")
     }
 }
 

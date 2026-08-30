@@ -28,6 +28,15 @@ public final class NWTransport: Transport, @unchecked Sendable {
     private var dialled: [UInt64: UInt64] = [:]
     private var nextLink: UInt64 = 1
     private var browser: NWBrowser?
+    /// Watches for this phone being on a local network again. See `watchPath`.
+    private var pathWatch: NWPathMonitor?
+    /// Whether the last path we were told about was a local network, so that
+    /// only changes are acted on rather than every interface update.
+    private var onLan = false
+    /// Addresses this transport has told the core about, so that it can take
+    /// them back. Only what we actually announced: withdrawing something never
+    /// mentioned would be noise, and the core would have nothing to remove.
+    private var announced: Set<String> = []
     private let queue = DispatchQueue(label: "org.acrylius.transport")
 
     public static let maxFrame: UInt32 = 1 << 20
@@ -136,7 +145,61 @@ public final class NWTransport: Transport, @unchecked Sendable {
             }
             endpoint = .hostPort(host: .init(parts.dropLast().joined(separator: ":")), port: p)
         }
-        attach(NWConnection(to: endpoint, using: .tcp), dial: token)
+        attach(NWConnection(to: endpoint, using: Self.tcp), dial: token)
+    }
+
+    /// Give up on a dial that is going nowhere, and hang up behind it.
+    ///
+    /// Network.framework waits for connectivity rather than failing: a
+    /// connection with no viable path sits in `.waiting` for as long as it
+    /// takes, which with Wi-Fi switched off is forever. `stateUpdateHandler`
+    /// answers a dial on `.ready`, `.failed` and `.cancelled`, and none of
+    /// those arrive — so the core was left holding a route walk that could not
+    /// continue, and never tried the Bluetooth route behind it.
+    ///
+    /// The core bounds this too, but later and on purpose. Only this end holds
+    /// the connection, so only this end can stop it, and a backstop that fired
+    /// first would take the answer away from the half that can clean up.
+    private func boundDial(_ link: UInt64, _ c: NWConnection) {
+        queue.asyncAfter(deadline: .now() + .milliseconds(Int(dialTimeoutMs()))) {
+            [weak self] in
+            guard let self, let pending = self.answerDial(link) else { return }
+            _ = self.release(link)
+            c.cancel()
+            self.fire(.dialFailed(dial: pending, reason: "it never answered"))
+        }
+    }
+
+    /// TCP with the same dead-peer budget the desktop uses.
+    ///
+    /// `.tcp` on its own is the default, and the default never questions an
+    /// idle connection at all: a computer that goes to sleep closes nothing, so
+    /// the phone went on holding an ESTABLISHED socket and reporting the peer
+    /// as connected indefinitely. The Linux runtime has bounded this since M2;
+    /// this is the same number, read from the core so the two cannot drift.
+    ///
+    /// `connectionDropTime` is the half `TCP_USER_TIMEOUT` covers on Linux —
+    /// bytes already in the send queue to a peer that has stopped answering,
+    /// which keepalive alone does not notice because the connection is not
+    /// idle.
+    private static var tcp: NWParameters {
+        // `NWParameters.tcp` and then reach into its stack, rather than
+        // building parameters from scratch. Constructing them fresh means
+        // opting out of every default the convenience carries — interface
+        // selection, path policy, how a Bonjour endpoint is resolved — and
+        // those defaults are why dialling worked. Losing them stopped the app
+        // connecting over Wi-Fi at all.
+        let params = NWParameters.tcp
+        guard let options = params.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options
+        else {
+            return params
+        }
+        let budget = Int(deadPeerMs() / 1000)
+        options.enableKeepalive = true
+        options.keepaliveIdle = max(budget / 2, 1)
+        options.keepaliveInterval = max(budget / 4, 1)
+        options.keepaliveCount = 2
+        return params
     }
 
     public func send(link: UInt64, msg: Data) async {
@@ -149,6 +212,38 @@ public final class NWTransport: Transport, @unchecked Sendable {
 
     public func close(link: UInt64) async {
         release(link)?.cancel()
+    }
+
+    /// Report every connection that is no longer usable.
+    ///
+    /// `.ready` is the only state that can carry a frame. Anything else here is
+    /// a link the core still believes in and would go on choosing — and TCP
+    /// outranks Bluetooth, so a dead Wi-Fi socket does not merely fail, it
+    /// keeps a working Bluetooth link from ever being picked.
+    public func revalidate() async {
+        let held: [(UInt64, NWConnection)] = {
+            lock.lock(); defer { lock.unlock() }
+            return connections.map { ($0.key, $0.value) }
+        }()
+        for (link, c) in held {
+            // Only the states that are over.
+            //
+            // `!= .ready` was too much: `.preparing` is a dial in flight and
+            // `.waiting` is one the system intends to retry, and retiring
+            // those killed connections that were about to work — including,
+            // at launch, the very first one. A connection that is still trying
+            // is not a link that died while the app was away.
+            switch c.state {
+            case .failed, .cancelled:
+                // `retire` is the claim: only the caller who removes it
+                // reports, so this cannot race the state handler into
+                // reporting the same link twice.
+                retire(link, .transport(detail: "the connection did not survive the background"))?
+                    .cancel()
+            default:
+                break
+            }
+        }
     }
 
     public func advertise(enable: Bool, txt: [FfiTxt]) async {
@@ -164,47 +259,149 @@ public final class NWTransport: Transport, @unchecked Sendable {
 
     public func discover(enable: Bool) async {
         guard enable else {
-            browser?.cancel()
-            browser = nil
+            stopWatchingPath()
+            stopBrowse()
             return
         }
-        guard browser == nil else { return }
+        startBrowse()
+        watchPath()
+    }
+
+    public func rediscover() async {
+        stopBrowse()
+        startBrowse()
+    }
+
+    /// Notice when this phone is back on a network, and act on it.
+    ///
+    /// The moment Wi-Fi returns is knowable — iOS reports the path becoming
+    /// satisfied — and it is the only signal there is for going *back up* to
+    /// the better transport. Losing Wi-Fi announces itself: the socket dies and
+    /// the peer becomes unreachable, which every retry path already watches.
+    /// Regaining it announces nothing at all, because from the core's point of
+    /// view nothing broke — the peer is reachable, just over a radio that
+    /// cannot carry a file.
+    ///
+    /// So both halves happen here: the browse is replaced, because a browse
+    /// that lived through the outage may have failed and a failed one stays
+    /// failed; and the core is asked to look again, because the address it
+    /// needs is already on file and waiting for a sighting that mDNS has no
+    /// reason to send.
+    private func watchPath() {
+        lock.lock()
+        guard pathWatch == nil else { lock.unlock(); return }
+        let m = NWPathMonitor()
+        pathWatch = m
+        lock.unlock()
+
+        m.pathUpdateHandler = { [weak self] path in
+            guard let self else { return }
+            // A local network, not merely a route to the internet. Cellular
+            // satisfies a path and reaches nothing on this one.
+            let lan = path.status == .satisfied
+                && (path.usesInterfaceType(.wifi) || path.usesInterfaceType(.wiredEthernet))
+            // Edges only. This fires on every interface change, and dialling
+            // every peer each time would be a radio a phone in a pocket cannot
+            // afford. The first callback after launch counts as an edge, which
+            // costs one browse restart and buys a route check at start-up.
+            guard self.noteLan(lan), lan else { return }
+            self.stopBrowse()
+            self.startBrowse()
+            self.fire(.reconsiderRoutes)
+        }
+        m.start(queue: queue)
+    }
+
+    /// Record what is on the network now, and hand back what has gone.
+    private func withdraw(keeping present: Set<String>) -> [String] {
+        lock.lock(); defer { lock.unlock() }
+        let gone = announced.subtracting(present)
+        announced = present
+        return Array(gone)
+    }
+
+    /// Whether this is a change, rather than the same answer again.
+    private func noteLan(_ now: Bool) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if onLan == now { return false }
+        onLan = now
+        return true
+    }
+
+    private func stopWatchingPath() {
+        lock.lock(); let m = pathWatch; pathWatch = nil; lock.unlock()
+        m?.cancel()
+    }
+
+    private func stopBrowse() {
+        lock.lock(); let b = browser; browser = nil; lock.unlock()
+        b?.cancel()
+    }
+
+    private func startBrowse() {
+        lock.lock()
+        guard browser == nil else { lock.unlock(); return }
         let params = NWParameters()
         params.includePeerToPeer = false
         let b = NWBrowser(for: .bonjourWithTXTRecord(type: serviceType, domain: nil), using: params)
+        browser = b
+        lock.unlock()
 
         b.stateUpdateHandler = { [weak self] state in
+            switch state {
             // `.waiting` on a Bonjour browse almost always means Local Network
             // permission was declined. There is no API to query it, so this is
             // the signal we have. Say so plainly rather than reporting a
             // generic failure the user cannot act on.
-            if case let .waiting(error) = state {
+            case let .waiting(error):
                 self?.fire(.dialFailed(
                     dial: 0,
                     reason: "local network permission appears to be denied (\(error))"
                 ))
+            case .failed:
+                // Dropped, not restarted here. A browse that failed because
+                // there is no network will fail again immediately, and a
+                // handler that reacts to its own failure by trying again is a
+                // spin. Letting go is enough: the path watch above builds a new
+                // one when there is a network to build it on, and so does
+                // coming back to the foreground.
+                self?.stopBrowse()
+            default:
+                break
             }
         }
         b.browseResultsChangedHandler = { [weak self] results, _ in
             guard let self else { return }
+            var present: Set<String> = []
             for r in results {
                 guard case let .service(name, _, _, _) = r.endpoint else { continue }
                 var txt: NWTXTRecord?
                 if case let .bonjour(record) = r.metadata { txt = record }
+                // Hand the instance name back, not a resolved address. See
+                // `dial`.
+                let addr = "bonjour:\(name)"
+                present.insert(addr)
                 self.fire(.discovered(
                     transport: self.transportId,
                     peer: FfiDiscoveredPeer(
                         fingerprint: txt?["fp"],
                         name: txt?["n"] ?? name,
-                        // Hand the instance name back, not a resolved address.
-                        // See `dial`.
-                        addr: "bonjour:\(name)",
+                        addr: addr,
                         pairing: txt?["pair"] == "1"
                     )
                 ))
             }
+            // Whatever we used to say was there and is not in this set.
+            //
+            // From the difference rather than from the `changes` argument, and
+            // deliberately: `results` is the complete current set, so this is
+            // also right the first time a replacement browse reports — a browse
+            // that failed and was rebuilt never delivers removals for what the
+            // dead one had found, and those would otherwise be offered forever.
+            for addr in self.withdraw(keeping: present) {
+                self.fire(.undiscovered(transport: self.transportId, addr: addr))
+            }
         }
-        browser = b
         b.start(queue: queue)
     }
 
@@ -212,7 +409,10 @@ public final class NWTransport: Transport, @unchecked Sendable {
 
     private func attach(_ c: NWConnection, dial: UInt64?) {
         let link = claimLink(c)
-        if let dial { noteDial(link, dial) }
+        if let dial {
+            noteDial(link, dial)
+            boundDial(link, c)
+        }
         c.stateUpdateHandler = { [weak self] state in
             guard let self else { return }
             switch state {

@@ -171,10 +171,10 @@ for cap in [
 }
 
 // --- pairing -------------------------------------------------------------
-await bravo.submit(.openPairingWindow(code: "ABCD1234"))
-_ = await until("bravo's window") { bRec.has { if case .pairingWindowOpen = $0 { return true }; return false } }
-
-await alpha.submit(.requestPairing(transport: 1, addr: "bravo", code: "ABCD1234"))
+// Nobody opens anything and nobody types anything: alpha asks, and six digits
+// appear on both ends. That comparison is the whole authentication, so "the
+// codes match" is the assertion that matters most in this file.
+await alpha.submit(.requestPairing(transport: 1, addr: "bravo"))
 let sawSas = await until("a code on both screens") { aRec.sas() != nil && bRec.sas() != nil }
 check(sawSas, "both ends showed a code")
 check(sawSas && aRec.sas() == bRec.sas(), "the codes match: \(aRec.sas() ?? "-")")
@@ -248,6 +248,17 @@ check(catalog["p"].commands.first?.id == "screenshot", "and the ids come through
 _ = catalog.ingest(.plugin(peer: "p", cap: capClipboard(), ty: "set",
                            body: encodeClipboard(text: "hello from the pc")))
 check(catalog["p"].clipboard == "hello from the pc", "a clipboard value is kept")
+
+// The button that fetches a clipboard reports whether an answer came back, and
+// it cannot do that by watching the value: asking twice for the same text is a
+// success both times. So the arrival is what moves, even when nothing else does.
+let firstArrival = catalog["p"].clipboardAt
+check(firstArrival != nil, "an arriving clipboard value is timestamped")
+_ = catalog.ingest(.plugin(peer: "p", cap: capClipboard(), ty: "set",
+                           body: encodeClipboard(text: "hello from the pc")))
+check(
+    catalog["p"].clipboardAt != firstArrival,
+    "the same text arriving again is still an answer, and must not look like silence")
 
 check(!catalog["p"].canWake, "a peer that never offered wake targets cannot be woken")
 
@@ -362,6 +373,57 @@ check(await diag.trouble == nil,
       "and it clears, so an instruction does not outlive being carried out")
 check(await diag.notes.count == 1,
       "clearing leaves the record of what happened rather than a second entry")
+
+// --- when was that reading actually taken ----------------------------------
+// The desktop looks at the player when the query reaches it, so a reading is
+// already one leg of the round trip old when it lands. Stamping arrival put the
+// clock exactly that far behind for as long as a track played — invisible on
+// Wi-Fi, and "a second behind" over Bluetooth, where a round trip is several
+// fragments each way.
+let sent = Date(timeIntervalSince1970: 1_000)
+let arrived = sent.addingTimeInterval(0.8)
+check(PeerCatalog.measuredAt(sent: sent, arrived: arrived) == sent.addingTimeInterval(0.4),
+      "a reading is placed halfway back down its round trip")
+check(PeerCatalog.measuredAt(sent: nil, arrived: arrived) == arrived,
+      "with nothing to measure against, arrival is the best guess there is")
+check(PeerCatalog.measuredAt(sent: arrived, arrived: sent) == sent,
+      "a reply that predates its query is not a round trip")
+check(PeerCatalog.measuredAt(sent: sent, arrived: sent.addingTimeInterval(60)) ==
+        sent.addingTimeInterval(60),
+      "and neither is one a minute late, which halved would run the clock fast")
+
+// End to end: the estimate must not sit behind where the track really is.
+var timed = PeerCatalog()
+timed.noteMediaQuery(for: "pc", at: sent)
+check(timed["pc"].mediaQuerySentAt == sent, "the query's departure is noted")
+
+// --- which build is this ---------------------------------------------------
+// The whole point of the stamp is to be trustworthy: a build that misreports
+// its commit is worse than one that says nothing, because it ends the search
+// in the wrong place. Xcode leaves an unset build setting as an *empty string*
+// rather than an absent key, so that is the case worth pinning.
+let stamped = BuildInfo.from([
+    "ACRBuildCommit": "86f96f3a1b2c3d4e5f60718293a4b5c6d7e8f900",
+    "ACRBuildDate": "2026-08-29T18:20:49Z",
+    "CFBundleShortVersionString": "0.1.0",
+])
+check(stamped.commit == "86f96f3a1b2c", "a commit is abbreviated, not shown whole")
+check(stamped.version == "0.1.0", "the version comes through")
+check(stamped.builtAt != nil, "an ISO 8601 instant parses")
+check(stamped.summary.hasPrefix("86f96f3a1b2c ·"), "and the summary leads with it")
+
+let unstamped = BuildInfo.from(["ACRBuildCommit": "", "ACRBuildDate": ""])
+check(unstamped.commit == nil, "an unexpanded build setting is not a commit")
+check(unstamped.summary == "Development build",
+      "and it says so rather than showing an empty row")
+check(BuildInfo.from(nil).commit == nil, "no Info.plist at all is the same answer")
+
+check(BuildInfo.from(["ACRBuildCommit": "abc123", "ACRBuildDate": "not a date"]).builtAt == nil,
+      "a date that will not parse loses the date, not the commit")
+check(BuildInfo.from(["ACRBuildCommit": "abc123", "ACRBuildDate": "not a date"]).summary == "abc123",
+      "and the commit is still worth showing on its own")
+check(BuildInfo.from(["ACRBuildDate": "2026-08-29T18:20:49.123Z"]).builtAt != nil,
+      "fractional seconds parse too, since `date` can emit them")
 
 await alpha.stop(); await bravo.stop(); await mallory.stop()
 

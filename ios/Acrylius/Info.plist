@@ -24,6 +24,14 @@
     <string>0.1.0</string>
     <key>CFBundleVersion</key>
     <string>1</string>
+    <!-- Filled by the ios-ipa job, which passes these as build settings; Xcode
+         expands $(…) in this file. Both are empty in a build made anywhere
+         else, and `BuildInfo` reads empty as "not from CI" rather than as a
+         commit called nothing. -->
+    <key>ACRBuildCommit</key>
+    <string>$(ACR_BUILD_COMMIT)</string>
+    <key>ACRBuildDate</key>
+    <string>$(ACR_BUILD_DATE)</string>
 
     <key>LSRequiresIPhoneOS</key>
     <true/>

@@ -69,6 +69,12 @@ targets:
           - $(inherited)
           - -lacrylius_ffi
         TARGETED_DEVICE_FAMILY: "1,2"
+        # Acrylius/Assets.xcassets is already picked up as a resource by the
+        # source path above. Naming it here is what makes it *used*: a catalog
+        # nothing points at compiles cleanly and leaves the placeholder square
+        # on the home screen, which looks like a signing problem and is not one.
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
 
   AcryliusWidgets:
     type: app-extension

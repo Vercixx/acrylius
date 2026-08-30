@@ -35,17 +35,58 @@ struct DeviceView: View {
 
     var body: some View {
         List {
+            // There is no Connect button.
+            //
+            // There never really was one: the core dials the moment discovery
+            // names a paired device, so pressing it repeated what had already
+            // happened. Worse, its action returned `true` without looking, so
+            // it went green whether or not a session opened — and a failed dial
+            // emits nothing, so the honest report was a tick followed by
+            // silence. What replaces it is saying what is actually going on.
             Section {
-                LabeledContent("Status", value: peer.reachable ? "Connected" : "Not connected")
+                switch peer.state {
+                case .reachable:
+                    LabeledContent("Status", value: "Connected")
+                case .connecting:
+                    LabeledContent("Status") {
+                        HStack(spacing: 6) {
+                            ProgressView().controlSize(.small)
+                            Text("Connecting…").foregroundStyle(.secondary)
+                        }
+                    }
+                case .unreachable:
+                    LabeledContent("Status", value: "Not connected")
+                    // A button again, and for a reason the first one did not
+                    // have. Dialling is automatic, but "Not connected" sitting
+                    // next to a state called "Connecting" reads as *gave up* —
+                    // so either the screen says it is still trying, or it
+                    // offers to try now. This does both: the footer says the
+                    // retries continue, and this asks for one immediately and
+                    // reports what actually happened rather than that a
+                    // request was sent.
+                    TaskButton("Try again") { await model.retry(peer) }
+                }
                 // Which radio is carrying this. A second transport is only
                 // useful if it takes over quietly, and something that takes
                 // over quietly is indistinguishable from something broken
                 // unless it says so somewhere.
                 if let over = Self.carrying(peer.transport) {
-                    LabeledContent("Over", value: over)
+                    LabeledContent("Transport", value: over)
                 }
-                if !peer.reachable {
-                    TaskButton("Connect") { await model.connect(peer); return true }
+            } footer: {
+                // Only once every route has been spent. A peer still being
+                // dialled has nothing to explain yet, and saying so while it
+                // came up normally is the flicker this whole arrangement
+                // exists to avoid.
+                if peer.state == .unreachable {
+                    VStack(alignment: .leading, spacing: 4) {
+                        if let trouble = peer.trouble {
+                            Text(trouble)
+                        }
+                        // Said plainly, because the absence of a spinner is
+                        // otherwise indistinguishable from having stopped.
+                        Text("Still trying every few seconds.")
+                    }
                 }
             }
 
@@ -63,11 +104,10 @@ struct DeviceView: View {
 
             MediaSection(peer: peer)
 
-            // Only while there is a session. An offer travels over it, and a
-            // picker that leads to "unreachable" is worse than no picker.
-            if peer.reachable {
-                SendFileSection(peer: peer)
-            }
+            // Sending lives on the Files tab now, with the offers arriving the
+            // other way. Two halves of one thing, and only one of them could
+            // ever be here: an incoming offer is not about any particular
+            // computer's screen.
 
             // Whenever this phone is not talking to the computer, which is
             // exactly when waking it means something — and it must not depend
@@ -99,7 +139,7 @@ struct DeviceView: View {
             }
 
             Section {
-                TaskButton("Get remote clipboard") { await model.fetchClipboard(peer); return true }
+                TaskButton("Get remote clipboard") { await model.fetchClipboard(peer) }
                 if let value = features.clipboard {
                     Text(value)
                         .font(.callout)
@@ -143,11 +183,10 @@ struct DeviceView: View {
             await model.refreshSession(peer)
             await model.refreshMedia(peer)
         }
-        .confirmationDialog(
-            "Forget \(peer.name)?",
-            isPresented: $confirmingForget,
-            titleVisibility: .visible
-        ) {
+        // An alert, for the reason spelled out in `DeviceListView`: a
+        // confirmation dialog wants something to anchor to and this one had
+        // nothing to point at.
+        .alert("Forget \(peer.name)?", isPresented: $confirmingForget) {
             Button("Forget", role: .destructive) {
                 Task {
                     await model.forget(peer)

@@ -42,7 +42,6 @@ pub struct FfiConfig {
     pub name: String,
     pub platform: String,
     pub pairing_window_ms: u64,
-    pub max_pairing_attempts: u8,
     pub handshake_timeout_ms: u64,
 }
 
@@ -53,7 +52,6 @@ impl Default for FfiConfig {
             name: d.name,
             platform: "ios".to_string(),
             pairing_window_ms: d.pairing_window_ms,
-            max_pairing_attempts: d.max_pairing_attempts,
             handshake_timeout_ms: d.handshake_timeout_ms,
         }
     }
@@ -111,13 +109,25 @@ pub struct FfiPeer {
     pub name: String,
     pub platform: String,
     pub fingerprint: String,
-    pub reachable: bool,
+    /// Reachable, being reached, or not.
+    ///
+    /// Three states rather than a bool, because nothing presses Connect any
+    /// more: a peer that is mid-handshake and a peer that has given up look
+    /// identical through `reachable`, and only one of them is worth explaining
+    /// to the person holding the phone.
+    pub state: FfiPeerState,
     /// What is carrying the session, when one is up.
     ///
     /// `None` means unreachable, not unknown. Worth showing because the whole
     /// point of a second transport is that it takes over silently, and silence
     /// is indistinguishable from a thing not working.
     pub transport: Option<FfiTransportKind>,
+    /// Why the last attempt to reach it ended without a session.
+    ///
+    /// Only ever set alongside `Unreachable`; a peer still being dialled has
+    /// nothing to explain yet. Read at draw time rather than delivered as an
+    /// event, so a device coming up normally does not flicker an error.
+    pub trouble: Option<String>,
 }
 
 #[derive(uniffi::Object)]
@@ -158,8 +168,23 @@ impl AcryliusCore {
                 name: config.name,
                 platform: config.platform,
                 pairing_window_ms: config.pairing_window_ms,
-                max_pairing_attempts: config.max_pairing_attempts,
                 handshake_timeout_ms: config.handshake_timeout_ms,
+                // Not exposed through `FfiCoreConfig`. A phone is the device
+                // this matters most on and the one least able to choose a
+                // sensible number for itself, and nothing on that side has any
+                // reason to want a different one.
+                reconnect_every_ms: CoreConfig::default().reconnect_every_ms,
+                // Likewise, and more so: this one is a backstop for a transport
+                // that fails to bound its own dial, so it is the core's business
+                // and not the host's. See [`dial_timeout_ms`].
+                dial_timeout_ms: CoreConfig::default().dial_timeout_ms,
+                // A phone is never dialled — `NWTransport::advertise` is
+                // deliberately unimplemented — so nothing can raise a pairing
+                // prompt on it uninvited and there is no door here to shut.
+                // These bound the phone's own attempts instead.
+                accept_pair_requests: CoreConfig::default().accept_pair_requests,
+                pair_cooldown_ms: CoreConfig::default().pair_cooldown_ms,
+                pair_denied_cooldown_ms: CoreConfig::default().pair_denied_cooldown_ms,
             },
         )
         // The same plugin list every device registers, which is the point of
@@ -275,8 +300,13 @@ impl AcryliusCore {
                     name: p.name.clone(),
                     platform: p.platform.clone(),
                     fingerprint: p.fingerprint()?.to_string(),
-                    reachable: core.peer_state(&id) == PeerState::Reachable,
+                    state: core.peer_state(&id).into(),
                     transport: core.transport_for(&id).map(Into::into),
+                    // Paired with the state deliberately: a reason kept past
+                    // the reconnection it explains is worse than none.
+                    trouble: (core.peer_state(&id) == PeerState::Unreachable)
+                        .then(|| core.dial_trouble(&id).map(str::to_string))
+                        .flatten(),
                 })
             })
             .collect()
@@ -397,6 +427,49 @@ pub fn media_command_budget_ms() -> u64 {
     acrylius_core::plugins::media::CONTROL_REPLY_BUDGET_MS
 }
 
+/// How long a peer may stop answering before its socket is treated as broken.
+/// See [`acrylius_core::link::DEAD_PEER_MS`].
+#[uniffi::export]
+#[must_use]
+pub fn dead_peer_ms() -> u64 {
+    acrylius_core::link::DEAD_PEER_MS
+}
+
+/// How long a dial may go unanswered before the route it was trying is spent.
+/// See [`acrylius_core::link::DIAL_TIMEOUT_MS`].
+///
+/// Exported because the transport that opened the connection is the only thing
+/// that can hang it up, so it has to bound the dial itself — and it must use
+/// this number rather than one of its own, or the core's backstop and the
+/// host's timeout drift into the order where the backstop fires first.
+#[uniffi::export]
+#[must_use]
+pub fn dial_timeout_ms() -> u64 {
+    acrylius_core::link::DIAL_TIMEOUT_MS
+}
+
+/// How often to re-read a peer's media while watching it play. See
+/// [`acrylius_core::plugins::media::WATCH_INTERVAL_MS`].
+#[uniffi::export]
+#[must_use]
+pub fn media_watch_interval_ms() -> u64 {
+    acrylius_core::plugins::media::WATCH_INTERVAL_MS
+}
+
+/// The same, over a link where a round trip is expensive — Bluetooth.
+#[uniffi::export]
+#[must_use]
+pub fn media_watch_slow_interval_ms() -> u64 {
+    acrylius_core::plugins::media::WATCH_INTERVAL_SLOW_MS
+}
+
+/// How often to re-read while nothing is playing.
+#[uniffi::export]
+#[must_use]
+pub fn media_idle_interval_ms() -> u64 {
+    acrylius_core::plugins::media::IDLE_INTERVAL_MS
+}
+
 /// Whether a reading taken after a command shows the player having acted on it.
 ///
 /// The same rule the desktop waits on, so the two ends cannot disagree about
@@ -427,4 +500,29 @@ pub fn media_command_landed(
         return None;
     };
     media::landed(&action, &player, &before.into(), &now.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The budgets a host is told to use are the core's, not copies of them.
+    ///
+    /// These accessors exist so that a number lives in exactly one place and
+    /// both ends read it. That only holds while each really returns the
+    /// constant it names — an accessor quietly answering something else is
+    /// indistinguishable from the drift they were added to prevent, and it
+    /// would be read on a phone, where nothing else here can see it.
+    #[test]
+    fn the_exported_budgets_are_the_ones_the_core_holds() {
+        assert_eq!(dead_peer_ms(), acrylius_core::link::DEAD_PEER_MS);
+        assert_eq!(dial_timeout_ms(), acrylius_core::link::DIAL_TIMEOUT_MS);
+        assert_eq!(
+            media_watch_interval_ms(),
+            acrylius_core::plugins::media::WATCH_INTERVAL_MS
+        );
+        // And the order between the two halves of a bounded dial: the host
+        // gives up first, because only the host can hang up the connection.
+        assert!(dial_timeout_ms() < CoreConfig::default().dial_timeout_ms);
+    }
 }

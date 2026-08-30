@@ -29,13 +29,62 @@ final class AppModel {
     /// The subset of `capsIn` this phone can act on rather than only ask for.
     var capsServed: [String] = []
 
-    /// The code shown during pairing. Both ends show it; the user compares.
+    /// The six digits shown during pairing. Both ends show them; the user
+    /// compares them, and that comparison is what authenticates the pairing —
+    /// see `ConfirmPairingView`.
     var pairingSas: String?
     var pairingPeerName: String?
     var pairingPeerFingerprint: String?
-    var pairingCode: String?
-    var status: String = "starting"
-    var lastError: String?
+    /// What the app as a whole is doing.
+    ///
+    /// Not per-peer — that is `FfiPeer.state`, and conflating the two is what
+    /// this replaced. The old `status` was a free-form string written from a
+    /// dozen places, so "Receiving holiday.jpg" overwrote "connected to
+    /// desktop" in the one row that displayed either, and neither could be
+    /// tested for.
+    var status: AppStatus = .starting
+
+    /// The last thing that happened worth a line, and nothing a screen should
+    /// reason from. Transfers and one-shot actions land here.
+    var activity: String?
+
+    /// Something went wrong and the person should know.
+    ///
+    /// Stamped on write so it can expire. Nothing used to clear this: an error
+    /// from ten minutes ago sat at the bottom of a list as a grey footnote,
+    /// indistinguishable from one that had just happened.
+    var lastError: String? {
+        didSet { lastErrorAt = lastError == nil ? nil : Date() }
+    }
+
+    private(set) var lastErrorAt: Date?
+
+    // No lifetime any more. An error is an alert now, and an alert that closed
+    // itself on a timer would be one you could miss by looking away — the
+    // expiry existed because a banner had no other way to leave.
+
+    func dismissError() {
+        lastError = nil
+    }
+
+    /// What the app itself is doing. Deliberately small: anything that varies
+    /// per peer belongs on the peer.
+    enum AppStatus: Equatable {
+        case starting
+        case failedToStart
+        /// Running, with nothing paired yet.
+        case noDevices
+        case ready
+
+        var text: String {
+            switch self {
+            case .starting: "Starting…"
+            case .failedToStart: "Could not start"
+            case .noDevices: "No devices paired"
+            case .ready: "Ready"
+            }
+        }
+    }
     /// Files offered but not yet finished, by transfer id, so a screen can say
     /// what is in flight rather than going quiet between the tap and the reply.
     var sending: [UInt64: String] = [:]
@@ -57,6 +106,33 @@ final class AppModel {
     /// travels.
     var incoming: [IncomingOffer] = []
 
+    /// A computer on this network that this phone is not paired with.
+    struct Nearby: Identifiable, Equatable {
+        /// The advertised fingerprint. Not an identity — a hint for telling
+        /// two rows apart, which is all a list needs.
+        var id: String { fingerprint }
+        let fingerprint: String
+        let name: String
+        let addr: String
+        /// Which transport saw it, and therefore which one can reach it.
+        ///
+        /// Carried because a tap now pairs outright. The old flow filled in an
+        /// address for a person to press Pair on and hardcoded transport 1, so
+        /// a machine found over Bluetooth could be listed and never paired
+        /// with — the address was a `ble:` one handed to the Wi-Fi transport.
+        let transport: UInt16
+        /// Whether it says it is already busy pairing with somebody.
+        var pairing: Bool
+        var seen: Date
+    }
+
+    /// What discovery has turned up, newest sighting first.
+    ///
+    /// Empty until M3: the core kept every sighting in a private map with no
+    /// accessor and no event, so the daemon knew every acrylius machine on the
+    /// network and the phone could not be told about one.
+    var nearby: [Nearby] = []
+
     /// What Bluetooth is doing. A projection like everything else here, filled
     /// in by the probe; the model decides nothing about the radio itself.
     let ble = BLEDiagnostics()
@@ -73,6 +149,28 @@ final class AppModel {
     /// nothing on screen to explain it is one people refuse — which only Settings
     /// undoes. Once allowed, `start()` brings it up on every launch without
     /// anyone visiting this screen again.
+    /// Come back from the background properly.
+    ///
+    /// Two things, in this order. The links this process woke up believing in
+    /// are questioned — a suspended app notices nothing, so a socket that died
+    /// while it was away is still in the table and, because TCP outranks
+    /// Bluetooth, is still the route everything is sent down. Then the peers
+    /// are re-read, because whatever was retired has changed their state.
+    ///
+    /// The dialling itself is the core's: retiring a link makes the peer
+    /// unreachable, and the reconnect heartbeat picks it up from there.
+    func cameToForeground() async {
+        await runtime?.revalidateLinks()
+        // And discovery, which suspends no better than the links do. A browse
+        // that failed while the app was away stays failed, and a sighting is
+        // the only thing that moves a session from Bluetooth up to Wi-Fi.
+        await runtime?.rediscover()
+        // Then ask the core to use what it already knows. The addresses are on
+        // file; what was missing was anything to prompt a second look at them.
+        await runtime?.submit(.reconsiderRoutes)
+        await refresh()
+    }
+
     func startBluetooth() {
         #if canImport(CoreBluetooth)
             bluetooth?.startManager()
@@ -128,9 +226,9 @@ final class AppModel {
             capsIn = await rt.capsIn()
             capsOut = await rt.capsOut()
             capsServed = await rt.capsServed()
-            status = peers.isEmpty ? "not paired" : "ready"
+            status = peers.isEmpty ? .noDevices : .ready
         } catch {
-            status = "failed to start"
+            status = .failedToStart
             lastError = String(describing: error)
         }
     }
@@ -138,8 +236,12 @@ final class AppModel {
     /// Retained because `UiSink` is held weakly by the runtime.
     private var sink: Sink?
 
-    func pair(withCode code: String, at addr: String) async {
-        await runtime?.submit(.requestPairing(transport: 1, addr: addr, code: code))
+    /// Start pairing with a machine. The whole gesture is the tap.
+    ///
+    /// There is nothing to type: six digits come back from the handshake and a
+    /// person on each end confirms they match.
+    func pair(at addr: String, transport: UInt16 = 1) async {
+        await runtime?.submit(.requestPairing(transport: transport, addr: addr))
     }
 
     func confirmPairing(_ accept: Bool) async {
@@ -147,8 +249,31 @@ final class AppModel {
         pairingSas = nil
     }
 
-    func connect(_ peer: FfiPeer) async {
+    /// Ask for a computer now, rather than waiting for the next heartbeat.
+    ///
+    /// Dialling is automatic and has been since Stage B, but "Not connected"
+    /// reads as *gave up* — reasonably, since the state right next to it is
+    /// "Connecting". So there is a button again. It is not the old Connect
+    /// button: that one submitted a request and reported success without
+    /// looking. This waits for the peer to actually become reachable and says
+    /// so, and a request a person made is the one kind the core reports the
+    /// failure of out loud.
+    ///
+    /// Returns whether a session opened.
+    @discardableResult
+    func retry(_ peer: FfiPeer) async -> Bool {
         await runtime?.submit(.connect(peer: peer.deviceId))
+        // Generous: a dial walks every route it knows, and a handshake over
+        // Bluetooth is not quick.
+        let deadline = ContinuousClock.now.advanced(by: .seconds(12))
+        while ContinuousClock.now < deadline {
+            await refresh()
+            if peers.first(where: { $0.deviceId == peer.deviceId })?.reachable == true {
+                return true
+            }
+            try? await Task.sleep(for: .milliseconds(400))
+        }
+        return false
     }
 
     func ping(_ peer: FfiPeer) async {
@@ -250,6 +375,10 @@ final class AppModel {
     }
 
     func refreshMedia(_ peer: FfiPeer) async {
+        // Noted before sending, so the reply can be placed halfway back down
+        // the round trip rather than at the moment it arrived. See
+        // `PeerCatalog.measuredAt`.
+        catalog.noteMediaQuery(for: peer.deviceId)
         await send(peer, cap: capMedia(), ty: "query", body: Data())
     }
 
@@ -289,8 +418,26 @@ final class AppModel {
     /// The answer is displayed, not written to this device's pasteboard. Taking
     /// a value the user only asked to look at would be surprising, and it is
     /// what makes two devices fight over a selection.
-    func fetchClipboard(_ peer: FfiPeer) async {
+    /// Returns whether an answer actually came back.
+    ///
+    /// It used to return nothing and the button reported `true` regardless, so
+    /// asking a computer that was not listening drew a tick and then showed the
+    /// value from the last time it worked — which is the worst of the three
+    /// possible outcomes to be confident about.
+    @discardableResult
+    func fetchClipboard(_ peer: FfiPeer) async -> Bool {
+        let before = catalog[peer.deviceId].clipboardAt
         await send(peer, cap: capClipboard(), ty: "get", body: Data())
+        let deadline = ContinuousClock.now.advanced(
+            by: .milliseconds(Int(mediaCommandBudgetMs())))
+        while ContinuousClock.now < deadline {
+            // The arrival time, not the value: fetching the same text twice is
+            // a success both times, so what is being waited for is a *reply*
+            // having landed and not the text having changed.
+            if catalog[peer.deviceId].clipboardAt != before { return true }
+            try? await Task.sleep(for: .milliseconds(120))
+        }
+        return false
     }
 
     /// Push text to the peer.
@@ -307,7 +454,7 @@ final class AppModel {
         // because reading the pasteboard here raises a system alert. A person
         // pressing Paste is not that, and was silently discarded by it.
         await send(peer, cap: capClipboard(), ty: "push", body: Data(text.utf8))
-        status = "Sent to \(peer.name)"
+        activity = "Sent to \(peer.name)"
         return true
     }
 
@@ -355,22 +502,31 @@ final class AppModel {
         sending[offer.transfer] = offer.name
         await send(peer, cap: capShare(), ty: "offer",
                    body: encodeShareOffer(offer: offer))
-        status = "Offered \(offer.name)"
+        activity = "Offered \(offer.name)"
     }
 
     /// Say yes to a file. This is what makes the phone bind a port and wait.
+    /// Transfers this phone has agreed to and not yet seen the end of.
+    ///
+    /// The row needs it: an accepted offer stays in the list while the bytes
+    /// move, and without this it goes on offering the same two buttons as
+    /// though nothing had been decided.
+    var accepting: Set<UInt64> = []
+
     func accept(_ offer: IncomingOffer) async {
         // Left in the list until the transfer actually ends, so the row does
         // not vanish the instant it is tapped and leave nothing to look at
         // while the bytes move.
+        accepting.insert(offer.transfer)
         await answer(offer, ty: "accept")
-        status = "Receiving \(offer.name)"
+        activity = "Receiving \(offer.name)"
     }
 
     func decline(_ offer: IncomingOffer) async {
         incoming.removeAll { $0.transfer == offer.transfer }
+        accepting.remove(offer.transfer)
         await answer(offer, ty: "reject")
-        status = "Declined \(offer.name)"
+        activity = "Declined \(offer.name)"
     }
 
     /// An answer to an offer is the transfer's id and nothing more; the plugin
@@ -403,9 +559,17 @@ final class AppModel {
         #endif
     }
 
+    /// Forget a device.
+    ///
+    /// No refresh here on purpose. `submit` only queues — the pump does the
+    /// work — so reading the peer list back on the next line usually read it
+    /// before the core had removed anything. It looked right whenever the
+    /// device happened to be connected, because closing its link announced
+    /// `peerUnreachable` and *that* refreshed; forgetting a device that was
+    /// already unreachable left the row on screen. The core now says when it
+    /// has done it, and `.revoked` is what redraws.
     func forget(_ peer: FfiPeer) async {
         await runtime?.submit(.revoke(peer: peer.deviceId))
-        await refresh()
     }
 
     private func refresh() async {
@@ -453,35 +617,61 @@ final class AppModel {
         // changed only its position, so this is not once a second.
         if catalog.ingest(event) { publishSnapshot() }
         switch event {
-        case let .pairingWindowOpen(code, _):
-            pairingCode = code
         case let .pairingSas(name, fp, sas):
             pairingPeerName = name
             pairingPeerFingerprint = fp
             pairingSas = sas
+        case let .discovered(fingerprint, name, addr, transport, pairing):
+            // Keyed by fingerprint, because mDNS re-resolves the same machine
+            // whenever anything about it changes — including the `pair` flag
+            // going up — and a list that appended would show one computer
+            // several times, each row claiming something different.
+            let found = Nearby(
+                fingerprint: fingerprint, name: name, addr: addr,
+                transport: transport, pairing: pairing, seen: Date())
+            if let at = nearby.firstIndex(where: { $0.fingerprint == fingerprint }) {
+                nearby[at] = found
+            } else {
+                nearby.append(found)
+            }
+            // A machine already busy pairing sorts last: it is the one a tap
+            // will be refused by, so it is the least useful row to offer.
+            nearby.sort { ($0.pairing ? 1 : 0, $0.name) < ($1.pairing ? 1 : 0, $1.name) }
+        case let .undiscovered(fingerprint):
+            // The other half of a sighting, and it had none: this list only
+            // ever grew, so a computer that had been switched off stayed on
+            // offer as something to pair with until the app was restarted.
+            nearby.removeAll { $0.fingerprint == fingerprint }
         case let .pairingComplete(_, name):
             pairingSas = nil
-            pairingCode = nil
-            status = "paired with \(name)"
+            status = .ready
+            activity = "Paired with \(name)"
             Task { await refresh() }
+        case let .revoked(peer):
+            // The device is gone from the core, so it can go from the screen.
+            // Dropped here rather than re-read, because the answer is already
+            // in hand and a round trip would only be a second chance to race.
+            peers.removeAll { $0.deviceId == peer }
+            publishSnapshot()
         case let .pairingFailed(reason):
             pairingSas = nil
-            pairingCode = nil
             lastError = reason
         case let .peerReachable(peer, name):
-            status = "connected to \(name)"
+            activity = "Connected to \(name)"
             Task {
                 await refresh()
                 await reacquaint(with: peer)
             }
         case .peerUnreachable:
-            status = "not connected"
+            // Nothing said here on purpose. Which peer went is already in
+            // `peers`, and why it went is `FfiPeer.trouble` — read by the row
+            // that draws it, so a peer dropping does not overwrite a line about
+            // some other peer.
             Task { await refresh() }
         // The peer is bound now: answering an offer means naming who made it,
         // and until this phone could receive a file there was nothing here that
         // needed to know.
         case let .plugin(peer, cap, ty, body):
-            if ty == "pong" { status = "pong" }
             // A computer wants to send this phone something. Recorded in two
             // places at once: the inbox settles where it would land, so a name
             // collision is resolved before anyone agrees to anything, and the
@@ -498,21 +688,33 @@ final class AppModel {
                 incoming.append(IncomingOffer(
                     transfer: offer.transfer, peer: peer,
                     name: bulkSafeName(offered: offer.name), size: offer.size))
-                status = "\(offer.name) offered"
+                activity = "\(offer.name) offered"
             }
             // Both ends report a transfer, because each knows only its own
             // half: this phone knows it finished writing, and only the computer
             // knows whether it kept the file.
             if cap == capShare(), ty == "finished" || ty == "reject",
                let end = try? decodeShareFinished(body: body) {
+                // Which way this file was going, decided before either record
+                // is torn down. `sending` holds only what this phone offered,
+                // so a transfer missing from it came the other way — and an
+                // accepted offer stays in `incoming` while the bytes move,
+                // which is what makes its name available here.
+                //
+                // Read off `sending` alone, every ending read as a send: a file
+                // arriving on the phone finished as "Sent the file", naming
+                // neither the direction nor the file.
+                let offered = incoming.first { $0.transfer == end.transfer }?.name
                 incoming.removeAll { $0.transfer == end.transfer }
-                let name = sending.removeValue(forKey: end.transfer) ?? "the file"
+                accepting.remove(end.transfer)
+                let sent = sending.removeValue(forKey: end.transfer)
+                let name = sent ?? offered ?? "the file"
                 if ty == "reject" {
-                    status = "\(name) was refused"
+                    activity = "\(name) was refused"
                 } else if end.ok {
-                    status = "Sent \(name)"
+                    activity = sent == nil ? "Saved \(name)" : "Sent \(name)"
                 } else {
-                    status = "\(name) failed"
+                    activity = "\(name) failed"
                     lastError = end.detail.isEmpty ? nil : end.detail
                 }
             }
@@ -526,14 +728,20 @@ final class AppModel {
                 #if canImport(UIKit)
                 UIPasteboard.general.string = value.text
                 #endif
-                status = "Copied to this phone"
+                activity = "Copied to this phone"
             }
-        case let .error(code, detail):
+        case let .error(peer, code, detail):
             // Local Network permission is the failure users actually hit, and
             // it is silent: iOS offers no API to query it. Say what to do.
             lastError = detail.contains("local network")
                 ? "Allow local network access in Settings → Privacy → Local Network."
                 : "\(code): \(detail)"
+            // And put it on the device it is about, so the screen for that
+            // computer can show it in place rather than only the banner over
+            // everything. `nil` means the failure belongs to this phone.
+            if let peer {
+                catalog.note(error: detail, for: peer)
+            }
         }
     }
 

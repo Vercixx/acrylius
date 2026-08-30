@@ -155,20 +155,62 @@ struct AwaitingConfirm {
     via: Option<(TransportId, String)>,
 }
 
+/// A pairing in flight, from the first frame until a person answers.
+///
+/// Not a window anybody opens: under plain `XX` there is no code and no key, so
+/// any device that can reach this one may start a handshake. What bounds that is
+/// [`Core::why_not_pair`], and the rule it exists to enforce is that **a pending
+/// confirmation is never replaced**.
+///
+/// That rule is load-bearing rather than defensive. An earlier `XXpsk0` build
+/// held the initiator's side in a window with an all-zero psk, which is a
+/// constant anybody can type: for as long as a human was looking at the SAS
+/// dialog, any device that could reach this one completed a handshake against a
+/// known key and *replaced* the pending confirmation. The human then compared
+/// six digits and approved a stranger. Every `XX` handshake is now that
+/// handshake, so the only defence is refusing the second one.
 struct PairingWindow {
-    /// The code's key, or `None` for a window that answers no one.
-    ///
-    /// `None` is the side that *initiated*. It has no code to answer with — it
-    /// already sent one — and only needs somewhere to keep the confirmation it
-    /// is waiting on. It used to keep it in a window with an all-zero psk, which
-    /// is a constant anybody can type: for as long as a human was looking at the
-    /// SAS dialog, any device that could reach this one completed `XXpsk0`
-    /// against a known key, and the handshake it finished *replaced* the pending
-    /// confirmation. The human then compared a code and approved a stranger.
-    psk: Option<[u8; 32]>,
     deadline: u64,
-    attempts: u8,
     awaiting: Option<AwaitingConfirm>,
+}
+
+/// Somebody waiting on a person to compare six digits.
+#[derive(Clone, Debug)]
+pub struct PendingPairing<'a> {
+    pub name: &'a str,
+    pub fingerprint: Fingerprint,
+    pub sas: &'a str,
+}
+
+/// A machine on the network that this one is not paired with.
+///
+/// Borrowed from the core rather than cloned: this is read to answer a question
+/// and then dropped.
+#[derive(Clone, Debug)]
+pub struct Nearby<'a> {
+    pub fingerprint: &'a Fingerprint,
+    pub name: &'a str,
+    /// Transport-defined and opaque, and the best route known for it.
+    pub addr: String,
+    pub transport: TransportId,
+    pub pairing: bool,
+}
+
+/// A machine discovery has shown us, and what it said about itself.
+///
+/// This used to be a bare [`Routes`], which was enough while nothing but a dial
+/// ever read it. It is now also the answer to "what is on this network", and
+/// that needs a name — so a device can be re-offered later without waiting for a
+/// sighting that may never come again. Both transports resolve a machine once
+/// and then stay quiet, so "later" is otherwise never.
+#[derive(Clone, Debug)]
+struct Sighting {
+    routes: Routes,
+    /// Advertised, therefore untrusted. It reaches a screen and nothing else;
+    /// who is actually there is settled by the handshake.
+    name: String,
+    /// Whether it said it was already busy pairing with somebody.
+    pairing: bool,
 }
 
 pub struct Core {
@@ -186,16 +228,40 @@ pub struct Core {
     /// about it changes, so an announcement that arrives before pairing is the
     /// only one there will be. Dropping it because the sender was not yet a
     /// peer meant the address was gone for good.
-    seen: BTreeMap<Fingerprint, Routes>,
+    seen: BTreeMap<Fingerprint, Sighting>,
     pairing: Option<PairingWindow>,
-    /// Dials we started for pairing, and the PSK to use when they land.
-    pending_pair_dials: BTreeMap<DialToken, ([u8; 32], (TransportId, String))>,
+    /// Monotonic time before which no pairing handshake is answered.
+    ///
+    /// Set when a pairing ends without success. Anybody may start a handshake,
+    /// so this is what keeps a hostile device on the network to one dialog
+    /// rather than a dialog every two minutes.
+    pair_quiet_until: u64,
+    /// Dials we started for pairing, and where each was aimed.
+    pending_pair_dials: BTreeMap<DialToken, (TransportId, String)>,
     /// Dials we started to reach a known peer, each with the routes not yet
     /// tried. A dial that fails falls through to the next rather than reporting
     /// the peer unreachable while a working route sits untried.
     /// The flag is whether a person asked, which decides whether failing to
     /// reach them is worth saying out loud.
-    pending_peer_dials: BTreeMap<DialToken, PeerDial>,
+    /// Each carries a deadline, because a transport that answers neither way
+    /// would otherwise hold the walk open forever — see
+    /// [`crate::link::DIAL_TIMEOUT_MS`].
+    pending_peer_dials: BTreeMap<DialToken, (u64, PeerDial)>,
+    /// Why the last attempt to reach a peer ended without a session.
+    ///
+    /// State, deliberately, and not a `UiEvent`. An automatic dial runs on
+    /// every sighting, so announcing each exhausted attempt would make a device
+    /// that is coming up perfectly normally flicker an error — the same reason
+    /// `try_next_route` only says "unreachable" out loud when a person asked.
+    /// A screen showing a peer as not connected wants to say *why* at the
+    /// moment it draws, which is a question about the present, not news.
+    ///
+    /// Bounded by the number of paired peers, and dropped when one is reached
+    /// or forgotten.
+    dial_trouble: BTreeMap<DeviceId, String>,
+    /// When to try the peers nothing can reach again. See
+    /// [`crate::config::CoreConfig::reconnect_every_ms`].
+    reconnect_at: Option<u64>,
     plugins: Vec<Box<dyn Plugin>>,
     /// Which plugin asked for an outstanding effect.
     effect_owner: BTreeMap<EffectToken, usize>,
@@ -279,6 +345,163 @@ impl Core {
             .map(|a| a.sas.as_str())
     }
 
+    /// The whole question a person is being asked, if one is outstanding.
+    ///
+    /// Everything [`UiEvent::PairingSas`] carries, readable at any moment
+    /// rather than only as it happens. A UI that was not running when the
+    /// handshake completed — a notification daemon that was not up, an
+    /// `acryliusctl pair` started afterwards — has no other way to find out
+    /// that somebody is waiting on it, and the alternative is a pairing that
+    /// lapses in silence while its digits sit in a process nobody is watching.
+    #[must_use]
+    pub fn pending_pairing(&self) -> Option<PendingPairing<'_>> {
+        let a = self.pairing.as_ref()?.awaiting.as_ref()?;
+        Some(PendingPairing {
+            name: &a.record.name,
+            fingerprint: a.record.fingerprint()?,
+            sas: &a.sas,
+        })
+    }
+
+    /// Whether a pairing is in flight on this machine right now.
+    ///
+    /// `docs/PROTOCOL.md` § 4 specifies a `pair=0|1` key in the discovery
+    /// advertisement, "a convenience for a user interface". Both ends have read
+    /// it since M1 — `tcp.rs` and `NWTransport.swift` both decode it — and
+    /// nothing wrote it until M3.
+    ///
+    /// It means *busy*, not *ready*. Since anybody may start a pairing, `pair=1`
+    /// is the one thing worth telling a phone in advance: a machine already
+    /// showing somebody six digits will refuse the next handshake, so a screen
+    /// can grey that row out instead of offering a tap that cannot work.
+    ///
+    /// Read rather than announced because a pairing ends four ways: paired,
+    /// refused, given up on, and lapsed. Only the first two have an event, and
+    /// an advertisement that lied because the fourth had no event would be
+    /// worse than none.
+    #[must_use]
+    pub fn pairing_open(&self) -> bool {
+        self.pairing.is_some()
+    }
+
+    /// Why an inbound pairing handshake will not be answered, or `None` to
+    /// answer it.
+    ///
+    /// The whole admission policy, in one place. Under `XXpsk0` this was a
+    /// single question — is a window open with a key in it — and the key did the
+    /// work. Under plain `XX` there is no key, so what is left is: are we
+    /// willing, are we busy, and have we been bothered too recently.
+    fn why_not_pair(&self, now_ms: u64) -> Option<&'static str> {
+        if !self.config.accept_pair_requests {
+            return Some("this device is not accepting pairing requests");
+        }
+        // The rule the design rests on. See `PairingWindow`: a second handshake
+        // must never replace a confirmation a person is already looking at.
+        if let Some(w) = &self.pairing
+            && w.awaiting.is_some()
+        {
+            return Some("already confirming a pairing with somebody else");
+        }
+        if self.pairing.is_some() {
+            return Some("a pairing is already in progress");
+        }
+        if now_ms < self.pair_quiet_until {
+            return Some("too soon after the last pairing attempt");
+        }
+        None
+    }
+
+    /// Offer a machine discovery has seen, on the best route known for it.
+    ///
+    /// Does nothing for a machine already paired: that one has its own row,
+    /// whose state comes from whether a session is up rather than from whether
+    /// discovery can currently see it.
+    fn announce(&self, fp: &Fingerprint, out: &mut Outcome) {
+        let Some(s) = self.seen.get(fp) else { return };
+        let Some((transport, addr)) = s.routes.in_preference_order().next() else {
+            return;
+        };
+        if self
+            .peers
+            .values()
+            .any(|r| r.fingerprint().as_ref() == Some(fp))
+        {
+            return;
+        }
+        out.ui(UiEvent::Discovered {
+            fingerprint: fp.clone(),
+            name: s.name.clone(),
+            addr,
+            transport,
+            pairing: s.pairing,
+        });
+    }
+
+    /// Every machine discovery can currently see that this one is not paired
+    /// with, on the best route known for each.
+    ///
+    /// The desktop's answer to "what could I pair with", which until now had
+    /// none: this map had no accessor and held no name, so `acryliusctl pair
+    /// with` could be told an address and there was nothing that would tell you
+    /// one.
+    pub fn nearby(&self) -> impl Iterator<Item = Nearby<'_>> {
+        self.seen.iter().filter_map(|(fp, s)| {
+            if self
+                .peers
+                .values()
+                .any(|r| r.fingerprint().as_ref() == Some(fp))
+            {
+                return None;
+            }
+            let (transport, addr) = s.routes.in_preference_order().next()?;
+            Some(Nearby {
+                fingerprint: fp,
+                name: &s.name,
+                addr,
+                transport,
+                pairing: s.pairing,
+            })
+        })
+    }
+
+    /// Claim the pairing slot, from either direction.
+    ///
+    /// Called before the first frame rather than after the handshake completes,
+    /// which is what makes [`Self::why_not_pair`] able to refuse the second one:
+    /// two handshakes that both ran to completion would both want to be the
+    /// thing a person confirms, and only the check above stops that.
+    fn begin_pairing(&mut self, now_ms: u64) {
+        self.pairing = Some(PairingWindow {
+            deadline: now_ms + self.config.pairing_window_ms,
+            awaiting: None,
+        });
+    }
+
+    /// Drop the pairing and stay quiet for a while.
+    ///
+    /// `denied` separates a person saying the digits differ — the only signal
+    /// there is that something is relaying between two handshakes — from a
+    /// pairing that merely lapsed.
+    fn end_pairing(&mut self, now_ms: u64, denied: bool) {
+        self.pairing = None;
+        let cooldown = if denied {
+            self.config.pair_denied_cooldown_ms
+        } else {
+            self.config.pair_cooldown_ms
+        };
+        self.pair_quiet_until = now_ms + cooldown;
+    }
+
+    /// Why the last attempt to reach this peer ended without a session, if it
+    /// has not been reached since.
+    ///
+    /// Only meaningful alongside [`PeerState::Unreachable`]. A peer that is
+    /// connecting has an attempt in flight and nothing to explain yet.
+    #[must_use]
+    pub fn dial_trouble(&self, peer: &DeviceId) -> Option<&str> {
+        self.dial_trouble.get(peer).map(String::as_str)
+    }
+
     #[must_use]
     pub fn peer_state(&self, peer: &DeviceId) -> PeerState {
         for st in self.links.values() {
@@ -289,6 +512,19 @@ impl Core {
                 }
                 _ => {}
             }
+        }
+        // A dial that has not produced a link yet is not a link, and it is not
+        // nothing either. Reported as unreachable, it made the screen say "Not
+        // connected" for the entire time the app was busy connecting — and
+        // beside a state called "Connecting", that reads as *gave up* rather
+        // than as *not yet*. It is a longer window now that a dial is given a
+        // budget to answer within, so the difference is one a person sees.
+        if self
+            .pending_peer_dials
+            .values()
+            .any(|(_, (p, _, _))| p == peer)
+        {
+            return PeerState::Connecting;
         }
         PeerState::Unreachable
     }
@@ -307,11 +543,24 @@ impl Core {
             Event::LinkRecv { link, msg } => self.on_link_recv(now_ms, link, &msg, &mut out),
             Event::LinkDown { link, .. } => self.on_link_down(now_ms, link, &mut out),
             Event::DialFailed { dial, reason } => {
-                self.pending_pair_dials.remove(&dial);
-                if let Some(pending) = self.pending_peer_dials.remove(&dial) {
-                    self.try_next_route(pending, &mut out);
-                } else {
+                // Answered by whichever table actually holds the token, and by
+                // neither when nothing does. It used to fall through to
+                // `PairingFailed` for anything it did not recognise, which was
+                // harmless only while every token lived until it was answered.
+                // A dial can now expire, so a host answering one late — the
+                // ordinary case for a connection that was never going to come
+                // up — would announce a pairing failure to someone who had not
+                // been pairing.
+                if self.pending_pair_dials.remove(&dial).is_some() {
+                    // `RequestPairing` claimed the slot before dialling, so a
+                    // dial that never came up has to give it back — otherwise
+                    // one unreachable address locks pairing out for two minutes.
+                    // No cooldown: nobody was bothered, and the person who
+                    // tapped is entitled to try the machine next to it.
+                    self.pairing = None;
                     out.ui(UiEvent::PairingFailed { reason });
+                } else if let Some((_, pending)) = self.pending_peer_dials.remove(&dial) {
+                    self.try_next_route(now_ms, pending, &reason, &mut out);
                 }
             }
             Event::Discovered { transport, peer } => {
@@ -337,10 +586,17 @@ impl Core {
                     if self.seen.len() >= MAX_SEEN && !self.seen.contains_key(&fp) {
                         self.seen.clear();
                     }
-                    self.seen
-                        .entry(fp.clone())
-                        .or_default()
-                        .set(transport, peer.addr.clone());
+                    let sighting = self.seen.entry(fp.clone()).or_insert_with(|| Sighting {
+                        routes: Routes::default(),
+                        name: peer.name.clone(),
+                        pairing: peer.pairing,
+                    });
+                    sighting.routes.set(transport, peer.addr.clone());
+                    // The newest answer wins for both, because both can change:
+                    // a machine can be renamed, and `pair=1` goes up and down as
+                    // somebody pairs with it.
+                    sighting.name = peer.name.clone();
+                    sighting.pairing = peer.pairing;
                     if let Some(rec) = self
                         .peers
                         .values()
@@ -364,7 +620,56 @@ impl Core {
                         // so Wi-Fi coming back does not win until the Bluetooth
                         // session actually ends — which is the conservative way
                         // round, and the same order `dispatch_send` prefers.
-                        self.connect_peer(id, &mut out, false);
+                        self.connect_peer(now_ms, id, &mut out, false);
+                    } else {
+                        // Nobody we know. Said out loud, because until now the
+                        // core kept every sighting in a private map with no
+                        // accessor and no event — it knew every acrylius
+                        // machine on the network and had no way to mention one.
+                        // That is the whole gap between "discovery works" and
+                        // "you can pick a computer to pair with".
+                        //
+                        // The *best* route, not the one that just arrived. A
+                        // screen keys this by fingerprint and the last answer
+                        // wins, so announcing whichever transport spoke most
+                        // recently meant Bluetooth — which repeats — quietly
+                        // replaced a working Wi-Fi address, and a tap then
+                        // paired over the slower radio.
+                        self.announce(&fp, &mut out);
+                    }
+                }
+            }
+            Event::Undiscovered { transport, addr } => {
+                // Only `seen`, never `addrs`.
+                //
+                // `seen` is a cache of what is on the network right now, and it
+                // is what "on this network" is drawn from — so a machine that
+                // has gone has to leave it, or it is offered forever. `addrs`
+                // is the last place a *paired* peer worked, which is a
+                // different claim and still the best guess there is: an mDNS
+                // record that lapses does not mean the computer moved, and
+                // throwing the address away would leave the retry heartbeat
+                // with nothing to try and no way to get it back.
+                let gone: Vec<Fingerprint> = self
+                    .seen
+                    .iter_mut()
+                    .filter_map(|(fp, s)| {
+                        (s.routes.forget(transport, &addr) && s.routes.is_empty())
+                            .then(|| fp.clone())
+                    })
+                    .collect();
+                for fp in gone {
+                    self.seen.remove(&fp);
+                    // Said only for machines that were offered in the first
+                    // place. A paired peer was never in that list — it has its
+                    // own row, whose state comes from whether a session is up
+                    // and not from whether mDNS can currently see it.
+                    if !self
+                        .peers
+                        .values()
+                        .any(|r| r.fingerprint().as_ref() == Some(&fp))
+                    {
+                        out.ui(UiEvent::Undiscovered { fingerprint: fp });
                     }
                 }
             }
@@ -404,6 +709,12 @@ impl Core {
     fn next_deadline(&self) -> Option<u64> {
         let mut best: Option<u64> = self.plugin_wake;
         let mut consider = |d: u64| best = Some(best.map_or(d, |b: u64| b.min(d)));
+        if let Some(r) = self.reconnect_at {
+            consider(r);
+        }
+        for (deadline, _) in self.pending_peer_dials.values() {
+            consider(*deadline);
+        }
         if let Some(p) = &self.pairing {
             consider(p.deadline);
         }
@@ -448,11 +759,11 @@ impl Core {
     ) {
         let deadline = now_ms + self.config.handshake_timeout_ms;
 
-        // A link we dialled to pair: we speak first, with XXpsk3.
+        // A link we dialled to pair: we speak first, with XX.
         if let Some(d) = dial
-            && let Some((psk, via)) = self.pending_pair_dials.remove(&d)
+            && let Some(via) = self.pending_pair_dials.remove(&d)
         {
-            match Handshake::pair_initiator(&self.identity, &psk) {
+            match Handshake::pair_initiator(&self.identity) {
                 Ok(mut hs) => {
                     // XX message 1 is unencrypted, so it carries nothing.
                     match hs.write(b"") {
@@ -471,7 +782,7 @@ impl Core {
                                     pairing_flow: true,
                                     via: Some(via),
                                     // Pairing walks no route list: a person
-                                    // typed one address and a code for it.
+                                    // tapped one machine.
                                     fallback: None,
                                 })),
                             );
@@ -486,7 +797,7 @@ impl Core {
 
         // A link we dialled to reach a known peer: IKpsk2, we speak first.
         if let Some(d) = dial
-            && let Some(pending) = self.pending_peer_dials.remove(&d)
+            && let Some((_, pending)) = self.pending_peer_dials.remove(&d)
         {
             // The routes we have not tried travel with the link, not with the
             // dial token. A connected socket is not a finished session, and
@@ -591,29 +902,26 @@ impl Core {
     ) {
         match kind {
             FrameKind::PairHandshake => {
-                let Some(window) = &mut self.pairing else {
-                    // No window open. Refusing here is what makes a pairing
-                    // window a *window* rather than a permanently reachable
-                    // endpoint that merely usually rejects you.
-                    self.fail_link(link, "no pairing window is open", out);
+                if let Some(why) = self.why_not_pair(now_ms) {
+                    self.fail_link(link, why, out);
                     return;
-                };
-                let Some(psk) = window.psk else {
-                    // A window belonging to a pairing we started. It answers
-                    // nobody: we are the one waiting to be confirmed, and there
-                    // is no code here for anyone to have matched.
-                    self.fail_link(link, "no pairing window is open", out);
-                    return;
-                };
-                match Handshake::pair_responder(&self.identity, &psk) {
+                }
+                match Handshake::pair_responder(&self.identity) {
                     Ok(mut hs) => {
                         if hs.read(body).is_err() {
-                            self.pairing_attempt_failed(link, out);
+                            // Nothing claimed yet, so nothing to give back —
+                            // but a peer that cannot write message 1 should
+                            // still not be able to retry immediately.
+                            self.pair_quiet_until = now_ms + self.config.pair_cooldown_ms;
+                            self.fail_link(link, "malformed pairing handshake", out);
                             return;
                         }
                         let hello = minicbor::to_vec(self.hello(now_ms)).expect("hello encodes");
                         match hs.write(&hello) {
                             Ok(m) => {
+                                // Claim the slot now that this is a real
+                                // handshake and not a stray connection.
+                                self.begin_pairing(now_ms);
                                 out.push(Action::LinkSend {
                                     link,
                                     msg: frame::join(FrameKind::PairHandshake, &m),
@@ -711,7 +1019,7 @@ impl Core {
             Ok(p) => p,
             Err(e) => {
                 if h.pairing_flow {
-                    self.pairing_attempt_failed(link, out);
+                    self.pairing_attempt_failed(now_ms, link, out);
                 } else {
                     self.fail_link(link, &e.to_string(), out);
                 }
@@ -759,6 +1067,7 @@ impl Core {
     fn accept_hello(&mut self, peer: &DeviceId, payload: &[u8], out: &mut Outcome) -> bool {
         let Ok(hello) = minicbor::decode::<Hello>(payload) else {
             out.ui(UiEvent::Error {
+                peer: Some(peer.clone()),
                 code: ErrorCode::BadBody,
                 detail: "handshake payload did not decode".to_string(),
             });
@@ -784,6 +1093,7 @@ impl Core {
             }
             Err(e) => {
                 out.ui(UiEvent::Error {
+                    peer: Some(peer.clone()),
                     code: ErrorCode::NotAllowed,
                     detail: e.to_string(),
                 });
@@ -852,6 +1162,10 @@ impl Core {
                 can_recv,
             })),
         );
+        // Whatever went wrong getting here is history the moment it works.
+        // Leaving it would have a connected peer explain a failure it no
+        // longer has.
+        self.dial_trouble.remove(&peer);
         out.ui(UiEvent::PeerReachable {
             peer: peer.clone(),
             name,
@@ -883,7 +1197,7 @@ impl Core {
             return;
         };
         let Ok(hello) = minicbor::decode::<Hello>(payload) else {
-            self.pairing_attempt_failed(link, out);
+            self.pairing_attempt_failed(now_ms, link, out);
             return;
         };
 
@@ -911,53 +1225,52 @@ impl Core {
             }),
         );
 
-        out.ui(UiEvent::PairingSas {
-            name: record.name.clone(),
-            fingerprint: Fingerprint::of(&pk),
-            sas: sas.clone(),
-        });
-        if let Some(w) = &mut self.pairing {
-            w.awaiting = Some(AwaitingConfirm {
-                link,
-                record,
-                sas,
-                via: h.via,
-            });
-        } else {
-            // We initiated; there is no window, so keep the same state inline.
-            // `None`, not a zero key: this holds a confirmation, it does not
-            // open a door. See `PairingWindow::psk`.
-            self.pairing = Some(PairingWindow {
-                psk: None,
-                // The window a *person* now has to compare six digits in, not
-                // the handshake timeout that got us here. `h.deadline` is
-                // fifteen seconds measured from before the connection was made;
-                // the responder has always given this two minutes, and the side
-                // that typed the code deserves the same.
-                deadline: now_ms + self.config.pairing_window_ms,
-                attempts: 0,
-                awaiting: Some(AwaitingConfirm {
-                    link,
-                    record,
-                    sas,
-                    via: h.via,
-                }),
-            });
+        // Both directions claimed the slot before the first frame, so it is
+        // here. A handshake that completed without one is a handshake that
+        // should never have been answered.
+        let Some(w) = &mut self.pairing else {
+            self.fail_link(link, "no pairing is in progress", out);
+            return;
+        };
+        // The rule the whole design rests on, enforced where it would actually
+        // be broken. `why_not_pair` refuses a second handshake, so reaching this
+        // with a confirmation already up means that refusal has a hole in it —
+        // and the cost of the hole is a person approving a stranger.
+        if w.awaiting.is_some() {
+            self.fail_link(link, "a confirmation is already waiting", out);
+            return;
         }
+        // The clock a *person* now has to compare six digits by, not the
+        // handshake timeout that got us here: `h.deadline` is fifteen seconds
+        // measured from before the connection was made.
+        w.deadline = now_ms + self.config.pairing_window_ms;
+        w.awaiting = Some(AwaitingConfirm {
+            link,
+            record: record.clone(),
+            sas: sas.clone(),
+            via: h.via,
+        });
+
+        out.ui(UiEvent::PairingSas {
+            name: record.name,
+            fingerprint: Fingerprint::of(&pk),
+            sas,
+        });
     }
 
-    fn confirm_pairing(&mut self, accept: bool, out: &mut Outcome) {
+    fn confirm_pairing(&mut self, now_ms: u64, accept: bool, out: &mut Outcome) {
         let Some(w) = &mut self.pairing else { return };
         let Some(a) = w.awaiting.take() else { return };
         if !accept {
-            // A refused SAS is a hostile handshake, not a typo: close the link
-            // and burn the window rather than inviting another attempt.
+            // Digits that do not match are the one signal there is that
+            // something is relaying between two handshakes. Close the link and
+            // go quiet for a long time rather than inviting the next attempt.
             out.push(Action::Close {
                 link: a.link,
                 reason: LinkDownReason::Protocol(ErrorCode::NotAllowed),
             });
             self.links.remove(&a.link);
-            self.pairing = None;
+            self.end_pairing(now_ms, true);
             out.ui(UiEvent::PairingFailed {
                 reason: "the codes did not match".to_string(),
             });
@@ -978,7 +1291,10 @@ impl Core {
         {
             // They dialled us, so we have no address of theirs from the
             // handshake. Discovery may still have shown us one.
-            self.addrs.entry(id.clone()).or_default().merge_from(&via);
+            self.addrs
+                .entry(id.clone())
+                .or_default()
+                .merge_from(&via.routes);
         }
         let (key, value) = Self::peer_blob(&a.record);
         out.push(Action::Persist {
@@ -990,7 +1306,7 @@ impl Core {
             peer: id.clone(),
             name: a.record.name.clone(),
         });
-        self.peers.insert(id, a.record);
+        self.peers.insert(id.clone(), a.record);
         self.pairing = None;
         // The link stays up but unnegotiated. The peer will open a session when
         // it wants one; keeping pairing and session strictly separate means
@@ -1000,22 +1316,39 @@ impl Core {
             reason: LinkDownReason::Closed,
         });
         self.links.remove(&a.link);
+        // And ask to be woken at once, so something opens a session.
+        //
+        // "The peer will open a session when it wants one" was only ever true
+        // between two computers. A phone always dials and is never dialled —
+        // `NWTransport::advertise` is deliberately unimplemented — so when the
+        // phone is the side confirming, nobody dialled at all. Pairing
+        // succeeded and the device sat at "Not connected" until the app was
+        // force-quit, because a relaunch was the only thing that produced a
+        // fresh sighting to act on.
+        //
+        // The reconnect heartbeat rather than a dial from here, and that is
+        // deliberate: the two ends confirm at different moments, so whichever
+        // goes first would dial a peer that has not finished pairing yet and be
+        // refused as a stranger. Arming the timer instead means the attempt is
+        // repeated until it lands, on the one code path that already knows how
+        // to do that.
+        self.reconnect_at = Some(0);
     }
 
-    fn pairing_attempt_failed(&mut self, link: LinkId, out: &mut Outcome) {
-        let burned = if let Some(w) = &mut self.pairing {
-            w.attempts += 1;
-            w.attempts >= self.config.max_pairing_attempts
-        } else {
-            false
-        };
+    /// A pairing handshake that could not be completed.
+    ///
+    /// One strike, not three. There used to be a budget of three, and it made
+    /// sense when the thing that failed was a *typed code* — two people reading
+    /// eight characters aloud deserve another go. Nothing is typed now, so a
+    /// handshake that does not complete is a peer that cannot speak this
+    /// protocol, and repeating it will not help. The cooldown is what bounds
+    /// how often it may try again.
+    fn pairing_attempt_failed(&mut self, now_ms: u64, link: LinkId, out: &mut Outcome) {
         self.fail_link(link, "pairing handshake failed", out);
-        if burned {
-            self.pairing = None;
-            out.ui(UiEvent::PairingFailed {
-                reason: "too many failed attempts; the window is closed".to_string(),
-            });
-        }
+        self.end_pairing(now_ms, false);
+        out.ui(UiEvent::PairingFailed {
+            reason: "the pairing handshake failed".to_string(),
+        });
     }
 
     fn peer_blob(rec: &PeerRecord) -> (String, Option<Vec<u8>>) {
@@ -1070,6 +1403,7 @@ impl Core {
 
         let Ok(env) = Envelope::decode(&plaintext) else {
             out.ui(UiEvent::Error {
+                peer: Some(peer.clone()),
                 code: ErrorCode::BadBody,
                 detail: "envelope did not decode".to_string(),
             });
@@ -1156,6 +1490,7 @@ impl Core {
 
         if !u.can_send.contains(&s.cap) {
             out.ui(UiEvent::Error {
+                peer: Some(u.peer.clone()),
                 code: ErrorCode::CapNotNegotiated,
                 detail: format!("{} is not negotiated with this peer", s.cap),
             });
@@ -1186,6 +1521,7 @@ impl Core {
                 if msg.len() > u.max_message as usize {
                     let (n, cap) = (msg.len(), u.max_message);
                     out.ui(UiEvent::Error {
+                        peer: Some(u.peer.clone()),
                         code: ErrorCode::TooLarge,
                         detail: format!("{} bytes does not fit this link, which takes {cap}", n),
                     });
@@ -1195,6 +1531,7 @@ impl Core {
             }
             Err(e) => {
                 out.ui(UiEvent::Error {
+                    peer: Some(u.peer.clone()),
                     code: ErrorCode::Internal,
                     detail: e.to_string(),
                 });
@@ -1273,7 +1610,7 @@ impl Core {
     /// time. The second used to go nowhere at all — the routes were dropped the
     /// moment the socket opened, on the assumption that a connected socket was a
     /// reached peer.
-    fn try_next_route(&mut self, pending: PeerDial, out: &mut Outcome) {
+    fn try_next_route(&mut self, now_ms: u64, pending: PeerDial, why: &str, out: &mut Outcome) {
         let (peer, mut routes, by_hand) = pending;
         // Something else got there while this was failing. Neither a further
         // dial nor a death notice would be true.
@@ -1284,6 +1621,11 @@ impl Core {
         // because the first failed would be wrong, and wrong in the direction a
         // user cannot diagnose.
         if routes.is_empty() {
+            // Every route is spent, so this is the answer for now and worth
+            // keeping. Recorded whoever asked: a screen that draws a peer as
+            // not connected wants a reason regardless of what started the
+            // attempt, and there is no longer a button to press to produce one.
+            self.dial_trouble.insert(peer.clone(), why.to_string());
             // Only when a person asked. An automatic attempt runs on every
             // sighting, and one route can easily be seen before a working one
             // is — announcing that would make a device flicker "unreachable"
@@ -1297,8 +1639,13 @@ impl Core {
         let (transport, addr) = routes.remove(0);
         self.next_dial += 1;
         let next = DialToken(self.next_dial);
-        self.pending_peer_dials
-            .insert(next, (peer, routes, by_hand));
+        self.pending_peer_dials.insert(
+            next,
+            (
+                now_ms + self.config.dial_timeout_ms,
+                (peer, routes, by_hand),
+            ),
+        );
         out.push(Action::Dial {
             transport,
             addr,
@@ -1306,8 +1653,39 @@ impl Core {
         });
     }
 
-    fn connect_peer(&mut self, peer: DeviceId, out: &mut Outcome, by_hand: bool) {
-        if !by_hand && self.pending_peer_dials.values().any(|(p, _, _)| p == &peer) {
+    /// Make an attempt already under way count as one a person asked for.
+    ///
+    /// The flag decides one thing: whether running out of routes is announced.
+    /// An automatic attempt keeps quiet, because it runs on every sighting and
+    /// saying "unreachable" each time would flicker an error at a device that
+    /// is coming up perfectly normally. A requested one has to speak, or
+    /// whoever asked is left waiting on silence.
+    ///
+    /// Both places an attempt can be living: a dial that has not landed, and a
+    /// handshake carrying the routes it has not tried yet.
+    fn adopt_attempt(&mut self, peer: &DeviceId) {
+        for (_, (p, _, by_hand)) in self.pending_peer_dials.values_mut() {
+            if p == peer {
+                *by_hand = true;
+            }
+        }
+        for st in self.links.values_mut() {
+            if let LinkState::Handshaking(h) = st
+                && let Some((p, _, by_hand)) = h.fallback.as_mut()
+                && p == peer
+            {
+                *by_hand = true;
+            }
+        }
+    }
+
+    fn connect_peer(&mut self, now_ms: u64, peer: DeviceId, out: &mut Outcome, by_hand: bool) {
+        if !by_hand
+            && self
+                .pending_peer_dials
+                .values()
+                .any(|(_, (p, _, _))| p == &peer)
+        {
             return;
         }
         // Three places an address can come from, in order of how much they are
@@ -1315,15 +1693,30 @@ impl Core {
         // shown us, or nothing.
         let known = self.addrs.get(&peer).cloned().or_else(|| {
             let fp = self.peers.get(&peer)?.fingerprint()?;
-            self.seen.get(&fp).cloned()
+            self.seen.get(&fp).map(|s| s.routes.clone())
         });
         let mut routes: Vec<(TransportId, String)> =
             known.iter().flat_map(Routes::in_preference_order).collect();
 
         match self.peer_state(&peer) {
             PeerState::Unreachable => {}
-            // A handshake is already in flight. Let it finish.
-            PeerState::Connecting => return,
+            // A dial or a handshake is already in flight. Let it finish —
+            // what was asked for is already happening, and a second attempt
+            // would not make it happen sooner.
+            //
+            // But a person who asked is owed an answer, and standing down
+            // silently is how they stopped getting one: an automatic attempt
+            // reports nothing when it fails, by design, so `acryliusctl device
+            // connect` sat waiting on an event that was never going to come and
+            // gave up after ten seconds. So the attempt already running is
+            // adopted — it becomes the one this person asked for, and it will
+            // say how it ended.
+            PeerState::Connecting => {
+                if by_hand {
+                    self.adopt_attempt(&peer);
+                }
+                return;
+            }
             PeerState::Reachable => {
                 // Reachable is not the same as reachable *well*, and treating
                 // them as one thing is what put a phone on Bluetooth and left
@@ -1342,7 +1735,17 @@ impl Core {
                 // and picks the lowest — so the better link takes over by
                 // existing, and the worse one stays as the fallback it already
                 // was.
+                // Someone asking for a peer that is already connected is
+                // answered with that, rather than left waiting. The answer
+                // arrived before they asked, so repeating it is the only way
+                // they can hear it.
                 if by_hand {
+                    let name = self
+                        .peers
+                        .get(&peer)
+                        .map(|r| r.name.clone())
+                        .unwrap_or_default();
+                    out.ui(UiEvent::PeerReachable { peer, name });
                     return;
                 }
                 let Some(current) = self.best_link_transport(&peer) else {
@@ -1357,21 +1760,24 @@ impl Core {
         // Best first; the rest stay behind it for `DialFailed` to walk.
         let first = (!routes.is_empty()).then(|| routes.remove(0));
         let Some((transport, addr)) = first else {
+            // "Unreachable" would be true but useless. Not knowing where a
+            // device is differs from failing to reach it, and only one of
+            // those the user can do something about.
+            //
+            // No mention of a command-line flag: this reaches a phone screen as
+            // often as a terminal, and advice about `--addr` there is advice
+            // about a thing that is not on the device reading it.
+            const NOWHERE: &str = "Device is asleep or unreachable. It might be off or on \
+                                   another network.";
+            // Kept whoever asked. This is the most common reason a peer sits
+            // there not connecting, and the screen saying so is the only place
+            // it now gets explained.
+            self.dial_trouble.insert(peer.clone(), NOWHERE.to_string());
             if by_hand {
-                // "Unreachable" would be true but useless. Not knowing where a
-                // device is differs from failing to reach it, and only one of
-                // those the user can do something about.
                 out.ui(UiEvent::Error {
+                    peer: Some(peer.clone()),
                     code: ErrorCode::NotAllowed,
-                    detail: format!(
-                        // No mention of a command-line flag: this reaches a
-                        // phone screen as often as a terminal, and advice about
-                        // `--addr` there is advice about a thing that is not on
-                        // the device reading it.
-                        "no address known for {peer}. Nothing has found it yet — it may \
-                         be switched off, on another network, or a device that only ever \
-                         dials out, which is never discovered at all."
-                    ),
+                    detail: format!("no address known for {peer}. {NOWHERE}"),
                 });
                 out.ui(UiEvent::PeerUnreachable { peer });
             }
@@ -1379,7 +1785,13 @@ impl Core {
         };
         self.next_dial += 1;
         let d = DialToken(self.next_dial);
-        self.pending_peer_dials.insert(d, (peer, routes, by_hand));
+        self.pending_peer_dials.insert(
+            d,
+            (
+                now_ms + self.config.dial_timeout_ms,
+                (peer, routes, by_hand),
+            ),
+        );
         out.push(Action::Dial {
             transport,
             addr,
@@ -1481,10 +1893,11 @@ impl Core {
         // the phone, like a transfer that simply stopped.
         if self.bulk_support_for(&peer) == Some(BulkSupport::None) {
             out.ui(UiEvent::Error {
+                peer: Some(peer.clone()),
                 code: ErrorCode::NotAllowed,
                 detail: format!(
-                    "the link to {peer} cannot carry files. Reach it over the \
-                     network for that."
+                    "transport for connection to {peer} does not support file transfers. \
+                     change transports and try again."
                 ),
             });
             // Reported finished-and-failed as well, so whichever plugin asked
@@ -1500,6 +1913,7 @@ impl Core {
             // finished-and-failed one so the plugin unwinds the same way it
             // would for any other failure rather than waiting forever.
             out.ui(UiEvent::Error {
+                peer: Some(peer.clone()),
                 code: ErrorCode::NotAllowed,
                 detail: format!("no session with {peer} to derive a transfer key from"),
             });
@@ -1567,56 +1981,27 @@ impl Core {
 impl Core {
     fn on_local(&mut self, now_ms: u64, cmd: LocalCommand, out: &mut Outcome) {
         match cmd {
-            LocalCommand::OpenPairingWindow { code } => match pairing::normalize(&code) {
-                Ok(norm) => {
-                    let deadline = now_ms + self.config.pairing_window_ms;
-                    self.pairing = Some(PairingWindow {
-                        psk: Some(pairing::psk(&norm)),
-                        deadline,
-                        attempts: 0,
-                        awaiting: None,
+            LocalCommand::RequestPairing { transport, addr } => {
+                // Claim the slot before dialling. A pairing we started must
+                // block one somebody else starts, or a stranger's handshake
+                // could land while a person here is waiting on their own.
+                if let Some(why) = self.why_not_pair(now_ms) {
+                    out.ui(UiEvent::PairingFailed {
+                        reason: why.to_string(),
                     });
-                    out.ui(UiEvent::PairingWindowOpen {
-                        code: norm,
-                        expires_in_ms: self.config.pairing_window_ms,
-                    });
+                    return;
                 }
-                Err(e) => out.ui(UiEvent::PairingFailed {
-                    reason: e.to_string(),
-                }),
-            },
-            LocalCommand::RequestPairing {
-                transport,
-                addr,
-                code,
-            } => match pairing::normalize(&code) {
-                Ok(norm) => {
-                    self.next_dial += 1;
-                    let d = DialToken(self.next_dial);
-                    self.pending_pair_dials
-                        .insert(d, (pairing::psk(&norm), (transport, addr.clone())));
-                    out.push(Action::Dial {
-                        transport,
-                        addr,
-                        dial: d,
-                    });
-                }
-                Err(e) => out.ui(UiEvent::PairingFailed {
-                    reason: e.to_string(),
-                }),
-            },
-            LocalCommand::ConfirmPairing { accept } => self.confirm_pairing(accept, out),
-            LocalCommand::ClosePairingWindow => {
-                if let Some(w) = self.pairing.take()
-                    && let Some(a) = w.awaiting
-                {
-                    out.push(Action::Close {
-                        link: a.link,
-                        reason: LinkDownReason::Closed,
-                    });
-                    self.links.remove(&a.link);
-                }
+                self.begin_pairing(now_ms);
+                self.next_dial += 1;
+                let d = DialToken(self.next_dial);
+                self.pending_pair_dials.insert(d, (transport, addr.clone()));
+                out.push(Action::Dial {
+                    transport,
+                    addr,
+                    dial: d,
+                });
             }
+            LocalCommand::ConfirmPairing { accept } => self.confirm_pairing(now_ms, accept, out),
             LocalCommand::SetPeerAddress {
                 peer,
                 transport,
@@ -1626,12 +2011,23 @@ impl Core {
                     self.addrs.entry(peer).or_default().set(transport, addr);
                 } else {
                     out.ui(UiEvent::Error {
+                        peer: Some(peer.clone()),
                         code: ErrorCode::NotPaired,
                         detail: format!("{peer} is not a paired device"),
                     });
                 }
             }
-            LocalCommand::Connect { peer } => self.connect_peer(peer, out, true),
+            LocalCommand::Connect { peer } => self.connect_peer(now_ms, peer, out, true),
+            LocalCommand::ReconsiderRoutes => {
+                // Not `by_hand`, deliberately. Nobody pressed anything, so a
+                // peer that cannot be reached is state and not news — and it is
+                // the automatic path that is allowed to improve on a route
+                // already carrying, which is the whole point of asking.
+                let known: Vec<DeviceId> = self.peers.keys().cloned().collect();
+                for peer in known {
+                    self.connect_peer(now_ms, peer, out, false);
+                }
+            }
             LocalCommand::Disconnect { peer } => {
                 let links: Vec<LinkId> = self
                     .links
@@ -1662,6 +2058,7 @@ impl Core {
                     .position(|p| crate::plugin::handles(p.manifest(), &cap))
                 else {
                     out.ui(UiEvent::Error {
+                        peer: Some(peer.clone()),
                         code: ErrorCode::UnknownType,
                         detail: format!("no plugin handles {cap}"),
                     });
@@ -1677,6 +2074,7 @@ impl Core {
                 self.drain_cx(cx, out);
                 if let Err(e) = r {
                     out.ui(UiEvent::Error {
+                        peer: Some(peer.clone()),
                         code: e.code(),
                         detail: e.to_string(),
                     });
@@ -1686,10 +2084,14 @@ impl Core {
     }
 
     fn handle_revoke(&mut self, now_ms: u64, peer: &DeviceId, out: &mut Outcome) {
+        // Kept before the record goes: `announce` below needs it to find the
+        // machine in `seen`, and by then there is nothing left to ask.
+        let fingerprint = self.peers.get(peer).and_then(PeerRecord::fingerprint);
         // Drop the record first, so a race cannot leave a live session against a
         // peer we have decided to forget.
         self.peers.remove(peer);
         self.addrs.remove(peer);
+        self.dial_trouble.remove(peer);
         out.push(Action::Persist {
             key: format!("peer/{peer}"),
             value: None,
@@ -1707,6 +2109,21 @@ impl Core {
                 reason: LinkDownReason::Protocol(ErrorCode::NotPaired),
             });
             self.on_link_down(now_ms, l, out);
+        }
+
+        // Said out loud, so a screen can stop drawing it without having to
+        // guess when the core got round to this. Nothing announced a revoke,
+        // and a host that asked for one and then read the peer list back
+        // usually read it before this had run.
+        out.ui(UiEvent::Revoked { peer: peer.clone() });
+
+        // And offer it again. A machine that is still on the network is a
+        // machine you may want to pair with a second time — but discovery
+        // resolves once and then stays quiet, so nothing would ever mention it
+        // again and the app had to be force-quit to see it. We already know
+        // where it is; this is only the part where we say so.
+        if let Some(fp) = fingerprint {
+            self.announce(&fp, out);
         }
     }
 
@@ -1751,8 +2168,8 @@ impl Core {
     }
 
     fn on_tick(&mut self, now_ms: u64, out: &mut Outcome) {
-        // Pairing window expiry. Measured against the host's monotonic clock,
-        // so moving the wall clock cannot extend it.
+        // A pairing nobody answered. Measured against the host's monotonic
+        // clock, so moving the wall clock cannot extend it.
         if let Some(w) = &self.pairing
             && now_ms >= w.deadline
         {
@@ -1764,8 +2181,12 @@ impl Core {
                 });
                 self.links.remove(&a.link);
             }
+            // Quiet afterwards. Six digits nobody answered is the shape a
+            // device gets if it asks a machine with nobody sitting at it, and
+            // without a cooldown it would simply ask again.
+            self.end_pairing(now_ms, false);
             out.ui(UiEvent::PairingFailed {
-                reason: "the pairing window expired".to_string(),
+                reason: "nobody confirmed the pairing in time".to_string(),
             });
         }
 
@@ -1814,7 +2235,60 @@ impl Core {
             if let Some(LinkState::Handshaking(h)) = was
                 && let Some(pending) = h.fallback
             {
-                self.try_next_route(pending, out);
+                self.try_next_route(now_ms, pending, "got answer that cut off half way", out);
+            }
+        }
+
+        // Dials nobody ever answered.
+        //
+        // A transport is meant to answer every dial exactly once, with a link
+        // or with a failure, and the whole route walk hangs off that promise.
+        // Network.framework does not keep it: a connection with no viable path
+        // waits for one rather than failing, so switching Wi-Fi off left the
+        // phone dialling a Wi-Fi route indefinitely and never walking on to the
+        // Bluetooth route behind it. Nothing above rescues that — the retry
+        // heartbeat declines to start a second dial while one is outstanding,
+        // and this one never came back.
+        //
+        // So the walk is bounded here as well, where it cannot depend on a host
+        // remembering to bound it.
+        let expired: Vec<DialToken> = self
+            .pending_peer_dials
+            .iter()
+            .filter(|(_, (deadline, _))| now_ms >= *deadline)
+            .map(|(d, _)| *d)
+            .collect();
+        for d in expired {
+            let Some((_, pending)) = self.pending_peer_dials.remove(&d) else {
+                continue;
+            };
+            self.try_next_route(now_ms, pending, "peer didn't answer", out);
+        }
+
+        // Try again the peers nothing can reach.
+        //
+        // Auto-connect fires on a sighting, and there is no rule that says a
+        // sighting will ever happen again: mDNS resolves once and goes quiet,
+        // and a peripheral CoreBluetooth has already reported is reported
+        // again at its own discretion. Everything that ended a session without
+        // producing a fresh advertisement therefore left the device
+        // unreachable for good — a sleeping computer, a phone in a pocket, a
+        // Bluetooth link that dropped.
+        if self.reconnect_at.is_none_or(|at| now_ms >= at) {
+            self.reconnect_at = Some(now_ms + self.config.reconnect_every_ms);
+            // Only where there is somewhere to dial. A peer nothing has ever
+            // found has no address to try, and asking again every ten seconds
+            // would be a storm aimed at a machine that is simply off.
+            let waiting: Vec<DeviceId> = self
+                .peers
+                .keys()
+                .filter(|id| self.best_link(id).is_none() && self.addrs.contains_key(*id))
+                .cloned()
+                .collect();
+            for id in waiting {
+                // Not `by_hand`: nobody asked, so a failure is state and not
+                // news, and `connect_peer` drops it if a dial is already out.
+                self.connect_peer(now_ms, id, out, false);
             }
         }
 
@@ -1841,11 +2315,41 @@ impl Core {
             // down the list this dial was walking rather than stopping here
             // with the alternatives still untried and nobody told.
             Some(LinkState::Handshaking(h)) => {
+                // A pairing that died before anyone saw a digit has to give the
+                // slot back. `RequestPairing` claims it before dialling, so
+                // without this one refusal — the far end busy, or not listening
+                // — locked pairing out for the full two minutes, and the person
+                // who tapped got nothing and no way to try again.
+                //
+                // Unconditional, and safe: a link *still handshaking* can never
+                // be the one a confirmation is waiting on, because completing
+                // the handshake is what parks the link in `Pending` and sets
+                // `awaiting` in the same step. Guarding this on "no confirmation
+                // pending" reads as prudent and is provably always true.
+                //
+                // No cooldown. That exists to stop a stranger raising dialogs
+                // here; being told no is not being bothered, and somebody who
+                // tapped the wrong machine may tap the one beside it at once.
+                if h.pairing_flow {
+                    self.pairing = None;
+                }
                 if let Some(pending) = h.fallback {
-                    self.try_next_route(pending, out);
+                    self.try_next_route(
+                        now_ms,
+                        pending,
+                        "connection closed before session was established",
+                        out,
+                    );
                 }
                 return;
             }
+            // A link parked waiting on a person is deliberately *not* torn down
+            // here, tempting as it looks. `confirm_pairing` closes the link as
+            // soon as its own side approves, so this fires on the ordinary path
+            // — and the two ends approve at different moments. Acting on it
+            // would cancel the second person's confirmation the instant the
+            // first one pressed a button. The deadline is what cleans up a peer
+            // that really did go away.
             _ => return,
         };
 
@@ -1870,7 +2374,7 @@ impl Core {
             peer = %u.peer,
             transport = u.transport.0,
             now_on = ?self.best_link(&u.peer).map(|(_, b)| b.transport.0),
-            "a route to a peer went away"
+            "lost route to peer"
         );
 
         if self.best_link(&u.peer).is_some() {
@@ -1894,6 +2398,17 @@ impl Core {
         out.ui(UiEvent::PeerUnreachable {
             peer: u.peer.clone(),
         });
+        // And go looking straight away rather than at the next heartbeat.
+        //
+        // This is the moment a takeover has to happen: the route that was
+        // carrying the session has just died, and the whole point of holding a
+        // second one is that the gap is short. Waiting up to `reconnect_every_ms`
+        // to *begin* would add ten seconds to every switch between radios, on
+        // top of however long the dial itself takes.
+        //
+        // Armed rather than dialled here, so the attempt still runs through the
+        // one path that knows about routes already being walked.
+        self.reconnect_at = Some(0);
         let mut cx = Cx::new(now_ms, self.next_token, self.next_transfer, self.serves);
         for p in &mut self.plugins {
             p.on_peer_disconnected(&mut cx, &u.peer);
@@ -1925,12 +2440,15 @@ impl Core {
         detail: &str,
         out: &mut Outcome,
     ) {
+        // Taken before the link goes back in the table, which moves `u`.
+        let peer = u.peer.clone();
         self.links.insert(link, LinkState::Up(u));
         out.push(Action::Close {
             link,
             reason: LinkDownReason::Protocol(ErrorCode::NotAllowed),
         });
         out.ui(UiEvent::Error {
+            peer: Some(peer),
             code: ErrorCode::NotAllowed,
             detail: detail.to_string(),
         });
@@ -1938,12 +2456,30 @@ impl Core {
     }
 
     fn fail_link(&mut self, link: LinkId, detail: &str, out: &mut Outcome) {
-        self.links.remove(&link);
+        // A link that never finished handshaking has no peer yet, and saying
+        // `None` is the honest answer: naming the device we *hoped* was at the
+        // other end would be attributing a failure to somebody on the strength
+        // of an opener that did not verify.
+        let peer = match self.links.remove(&link) {
+            Some(LinkState::Up(u)) => Some(u.peer.clone()),
+            _ => None,
+        };
+        // Said out loud, because this is where a wire disagreement lands and
+        // until now it landed in silence: the `UiEvent::Error` below reaches a
+        // screen, and a daemon has no screen. A phone speaking a version this
+        // build does not know produced nothing, anywhere, in any log.
+        tracing::warn!(
+            link = link.0,
+            peer = peer.as_ref().map(ToString::to_string),
+            detail,
+            "closing a link"
+        );
         out.push(Action::Close {
             link,
             reason: LinkDownReason::Protocol(ErrorCode::NotAllowed),
         });
         out.ui(UiEvent::Error {
+            peer,
             code: ErrorCode::NotAllowed,
             detail: detail.to_string(),
         });
@@ -2025,7 +2561,7 @@ impl CoreBuilder {
             } else {
                 tracing::debug!(
                     plugin = m.id,
-                    "this host cannot serve requests for this capability, only send them"
+                    "this host cannot serve requests for this capability"
                 );
             }
             caps_out.extend(m.outgoing.iter().map(|s| (*s).to_string()));
@@ -2053,8 +2589,11 @@ impl CoreBuilder {
             addrs: BTreeMap::new(),
             seen: BTreeMap::new(),
             pairing: None,
+            pair_quiet_until: 0,
             pending_pair_dials: BTreeMap::new(),
             pending_peer_dials: BTreeMap::new(),
+            dial_trouble: BTreeMap::new(),
+            reconnect_at: None,
             plugins,
             effect_owner: BTreeMap::new(),
             bulk_owner: BTreeMap::new(),

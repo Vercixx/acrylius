@@ -23,6 +23,14 @@ public struct PeerFeatures: Equatable, Sendable {
     public var wake: FfiWolConfig?
     /// The last clipboard value this peer handed over.
     public var clipboard: String?
+    /// When that value arrived, by this device's clock.
+    ///
+    /// Kept for the same reason as `mediaAt`, but answering a different
+    /// question: whether a *reply* landed. Asking for the same text twice
+    /// leaves `clipboard` identical both times, so a caller comparing values
+    /// cannot tell a second success from no answer at all — which is exactly
+    /// the mistake the media plugin made before `landed()` existed.
+    public var clipboardAt: Date?
     /// What is playing there. Present once the peer has described its players,
     /// which it does on connect and after every command.
     public var media: FfiMediaState?
@@ -31,8 +39,23 @@ public struct PeerFeatures: Equatable, Sendable {
     /// A position is only true at the instant it was measured. Keeping the
     /// instant is what lets a screen show a track advancing without inventing
     /// where it has got to: the elapsed time is the reported position plus how
-    /// long ago this arrived, and nothing else.
+    /// long ago this was measured, and nothing else.
+    ///
+    /// *Measured*, not *arrived* — the difference is a bug that shipped. The
+    /// desktop reads the player when the query reaches it, so a reading is
+    /// already one leg of the round trip old by the time it lands here.
+    /// Stamping arrival made the clock sit exactly that far behind, for as long
+    /// as the track played, and pulled it backwards again on every poll. Tens
+    /// of milliseconds on Wi-Fi and invisible; over Bluetooth a round trip is
+    /// several fragments each way and the poll is only every two seconds, which
+    /// is where it became "the clock is a second behind".
     public var mediaAt: Date?
+    /// When the outstanding media query was sent, if one is.
+    ///
+    /// Half the round trip is the best estimate available of how long ago the
+    /// far end actually looked, and it needs nothing on the wire and no
+    /// agreement between two machines' clocks.
+    public var mediaQuerySentAt: Date?
     /// The most recent refusal, for showing why a button did nothing.
     public var lastError: String?
 
@@ -105,10 +128,57 @@ public struct PeerCatalog: Equatable, Sendable {
 
     public var peers: [String] { Array(byPeer.keys).sorted() }
 
+    /// Record a failure the core reported against a particular peer.
+    ///
+    /// `UiEvent.error` carries who it was about since M3; before that the only
+    /// place such a failure could land was one app-wide string, so a refusal
+    /// from one computer was displayed on the screen of another. It clears the
+    /// same way a refusal that arrived over the wire does — on the next thing
+    /// that peer says.
+    public mutating func note(error: String, for peer: String) {
+        var features = byPeer[peer] ?? PeerFeatures()
+        features.lastError = error
+        byPeer[peer] = features
+    }
+
+    /// Note that a media reading has just been asked for.
+    ///
+    /// Paired with the arrival in `ingest`, which uses the two to place the
+    /// reading halfway between them rather than at the moment it landed.
+    public mutating func noteMediaQuery(for peer: String, at sent: Date = Date()) {
+        var features = byPeer[peer] ?? PeerFeatures()
+        features.mediaQuerySentAt = sent
+        byPeer[peer] = features
+    }
+
+    /// When a reading that arrived `now` was most likely taken.
+    ///
+    /// The midpoint of the round trip, which assumes the two legs are about
+    /// equal — wrong in detail, right on average, and much closer than assuming
+    /// the far end looked at the instant its answer arrived here.
+    static func measuredAt(sent: Date?, arrived: Date) -> Date {
+        guard let sent, sent <= arrived else { return arrived }
+        let round = arrived.timeIntervalSince(sent)
+        // A reply this late is not a round trip, it is a reply to something
+        // else, or a query that was queued behind a reconnect. Halving it would
+        // put the reading seconds into the past and run the clock fast.
+        guard round <= PeerFeatures.staleReading else { return arrived }
+        return sent.addingTimeInterval(round / 2)
+    }
+
     /// Absorb one event. Returns true when something a view shows changed.
     @discardableResult
-    public mutating func ingest(_ event: FfiUiEvent) -> Bool {
+    public mutating func ingest(_ event: FfiUiEvent, at now: Date = Date()) -> Bool {
         guard case let .plugin(peer, cap, ty, body) = event else {
+            if case let .revoked(peer) = event {
+                // Everything here was something that device told us about
+                // itself. Forgetting the device and keeping its command list,
+                // its wake targets and whatever went wrong with it last would
+                // leave all of that to be handed straight back if it were ever
+                // paired again.
+                byPeer.removeValue(forKey: peer)
+                return true
+            }
             if case let .peerUnreachable(peer) = event {
                 // Keep what the peer told us. A wake target is only useful once
                 // the machine is gone, and a command list does not change while
@@ -176,12 +246,16 @@ public struct PeerCatalog: Equatable, Sendable {
         } else if cap == capClipboard() {
             if ty == "set", let value = try? decodeClipboard(body: body) {
                 features.clipboard = value.text
+                features.clipboardAt = Date()
                 changed = true
             }
         } else if cap == capMedia() {
             if ty == "state", let state = try? decodeMediaState(body: body) {
                 features.media = state
-                features.mediaAt = Date()
+                features.mediaAt = Self.measuredAt(sent: features.mediaQuerySentAt, arrived: now)
+                // Answered, so the next reading gets its own round trip rather
+                // than being measured against this one.
+                features.mediaQuerySentAt = nil
                 changed = true
             }
         }

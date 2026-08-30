@@ -155,8 +155,22 @@ const HINTS: &str = r#"
 #
 #               What it does turn off is the advertising itself, which is a radio
 #               announcing this machine continuously. Pairing is unaffected: it
-#               happens over the network, at this keyboard, and never over
-#               Bluetooth.
+#               happens over the network and never over Bluetooth.
+#
+# [pair]
+#   enabled     answer devices asking to pair. On.
+#
+#               Pairing has no code and no shared secret, so any device that can
+#               reach this one may start a handshake and put six digits on this
+#               screen. That is the point: you pair by tapping a computer in the
+#               phone's list, not by reading a code off this one.
+#
+#               What protects it is that those six digits are also on the
+#               asking device, and nothing is stored until somebody here presses
+#               "They match". A device that keeps asking gets one notification
+#               and then a cooldown. Turn this off on a machine that is done
+#               pairing, or on a network you would rather nobody could raise a
+#               dialog from.
 #
 # [commands]
 #   Commands a paired device may run, keyed by the id that travels. The id is

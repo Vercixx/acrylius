@@ -88,6 +88,28 @@ public final class BLEDiagnostics {
     /// `CBManagerAuthorization`. Separate from the state because a user who
     /// denied the prompt can only fix it in Settings, and nothing else will.
     public var authorization: String = "unknown"
+
+    /// What the transport reports when it refused to build a
+    /// `CBCentralManager` because nobody has allowed Bluetooth yet.
+    ///
+    /// Spelled once. Two places compare against it — the transport that pushes
+    /// it and the screen that offers the button — and a literal in both is a
+    /// rename waiting to go wrong silently, since the only symptom would be a
+    /// button that never appears.
+    /// `nonisolated` because the transport reads it, and the transport is not
+    /// on the main actor — it answers CoreBluetooth on its own queue. An
+    /// immutable `String` is Sendable, so there is nothing to protect; without
+    /// this the constant is main-actor isolated purely by living on an
+    /// `@Observable @MainActor` class, and the only compiler that would ever
+    /// say so is the macOS one.
+    public nonisolated static let waitingForPermission = "waiting for permission"
+
+    /// Bluetooth is unusable and asking would still fix it.
+    ///
+    /// Not the same as a refusal: that shows in `authorization` and is undone
+    /// only in Settings. This is the state where a button still means
+    /// something.
+    public var awaitingPermission: Bool { managerState == Self.waitingForPermission }
     public var scanning: Bool = false
     public var sightings: [BLESighting] = []
     /// Whether a link is up, and to whom.
@@ -150,7 +172,10 @@ public final class BLEDiagnostics {
     /// Everything, as text to copy out of the app. A screenshot of a scrolling
     /// list is a poor bug report; this is the thing worth pasting.
     public func transcript() -> String {
-        var out = "state: \(managerState)\nauth: \(authorization)\n"
+        // First line, because a transcript that does not say which build
+        // produced it is a report nobody can act on.
+        var out = "build: \(BuildInfo.current.summary)\n"
+        out += "state: \(managerState)\nauth: \(authorization)\n"
         out += "scanning: \(scanning)\nlink: \(link)\n"
         if let f = fragmentBytes { out += "fragment: \(f) bytes\n" }
         if let t = trouble { out += "trouble: \(t)\n" }

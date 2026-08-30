@@ -116,12 +116,42 @@ struct AcryliusWidgetView: View {
     @ViewBuilder
     private func content(_ peer: PeerSnapshot) -> some View {
         switch family {
+        case .accessoryCircular:
+            CircularView(peer: peer)
         case .accessoryRectangular, .accessoryInline:
             AccessoryView(peer: peer)
         case .systemMedium:
             MediumView(peer: peer)
         default:
             SmallView(peer: peer)
+        }
+    }
+}
+
+/// A lock screen circle, which is one glyph and nothing else.
+///
+/// No name and no timestamp: at this size there is room for a single fact, so
+/// it is the one the machine is actually in — locked, unlocked, or never
+/// having said. A tap opens the app, where all three have detail behind them.
+private struct CircularView: View {
+    let peer: PeerSnapshot
+
+    var body: some View {
+        ZStack {
+            AccessoryWidgetBackground()
+            Image(systemName: symbol)
+                .font(.title2)
+        }
+    }
+
+    private var symbol: String {
+        switch peer.locked {
+        case .some(true): "lock.fill"
+        case .some(false): "lock.open.fill"
+        // Never described a session. `desktopcomputer` rather than a question
+        // mark: not knowing is the ordinary state before the first connection,
+        // not a fault worth drawing as one.
+        case nil: "desktopcomputer"
         }
     }
 }
@@ -270,8 +300,59 @@ struct StatusWidget: Widget {
         .configurationDisplayName("PC")
         .description("What your computer was doing, and a way to wake it.")
         .supportedFamilies([
-            .systemSmall, .systemMedium, .accessoryRectangular, .accessoryInline,
+            .systemSmall, .systemMedium,
+            .accessoryCircular, .accessoryRectangular, .accessoryInline,
         ])
+    }
+}
+
+// MARK: - a control
+
+/// Wake, from Control Centre or the lock screen's own buttons.
+///
+/// Wake and only wake. It is the one thing this app does that a separate
+/// process can genuinely finish: a magic packet needs no session, no identity
+/// and no Keychain, and everything it takes is already on disk — which is
+/// exactly why the Home Screen widget has been allowed to send one since M2.
+///
+/// Lock deliberately has no control. It needs a live Noise session, and a
+/// control runs where the widget runs: no Local Network permission of its own
+/// and a sliver of runtime. A control that silently does nothing is worse than
+/// no control, and the honest alternative — opening the app to do it — is not
+/// a control, it is a shortcut to the app with extra steps.
+@available(iOS 18.0, *)
+struct WakeControl: ControlWidget {
+    var body: some ControlWidgetConfiguration {
+        StaticControlConfiguration(
+            kind: "org.acrylius.control.wake",
+            provider: WakeTargetProvider()
+        ) { peer in
+            ControlWidgetButton(
+                action: WakePCIntent(
+                    pc: PCEntity(id: peer?.deviceId ?? "", name: peer?.name ?? "PC")
+                )
+            ) {
+                Label(peer?.name ?? "Wake PC", systemImage: "power")
+            }
+        }
+        .displayName("Wake PC")
+        .description("Send a wake-up packet without unlocking your phone.")
+    }
+}
+
+/// The first computer that has told this phone how to wake it.
+///
+/// Not simply the first peer: a machine with no wake target on file produces a
+/// button that can only ever apologise. Nil when there is none, which the
+/// button renders as a generic label rather than refusing to exist — a control
+/// that vanishes from the gallery is harder to explain than one that says it
+/// has nothing to aim at yet.
+@available(iOS 18.0, *)
+struct WakeTargetProvider: ControlValueProvider {
+    var previewValue: PeerSnapshot? { nil }
+
+    func currentValue() async throws -> PeerSnapshot? {
+        SnapshotStore.load()?.peers.first { $0.canWake }
     }
 }
 
@@ -279,6 +360,10 @@ struct StatusWidget: Widget {
 struct AcryliusWidgets: WidgetBundle {
     var body: some Widget {
         StatusWidget()
+        // Controls arrived in iOS 18 and the app's floor is 17.
+        if #available(iOS 18.0, *) {
+            WakeControl()
+        }
     }
 }
 

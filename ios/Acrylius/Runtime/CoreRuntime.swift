@@ -84,6 +84,31 @@ public actor CoreRuntime {
         events?.yield(event)
     }
 
+    /// Ask every transport to check the links it is holding.
+    ///
+    /// Called when the app comes back to the foreground. See
+    /// `Transport.revalidate`: a suspended process notices nothing, so the
+    /// links it wakes up believing in have to be questioned rather than
+    /// trusted. Whatever is retired here becomes a `LinkDown`, and the core's
+    /// reconnect heartbeat dials again.
+    public func revalidateLinks() async {
+        for t in transports.values {
+            await t.revalidate()
+        }
+    }
+
+    /// Ask every transport to start discovery over.
+    ///
+    /// Also on the way back to the foreground, and for the same reason as
+    /// `revalidateLinks`: a suspended process notices nothing. A browse that
+    /// failed while the app was away is still failed when it comes back, and
+    /// nothing else would ever replace it — see `Transport.rediscover`.
+    public func rediscover() async {
+        for t in transports.values {
+            await t.rediscover()
+        }
+    }
+
     public func start() {
         guard pump == nil else { return }
         let (stream, continuation) = AsyncStream<FfiEvent>.makeStream(bufferingPolicy: .unbounded)
@@ -144,7 +169,9 @@ public actor CoreRuntime {
         do {
             outcome = try core.handle(monotonicMs: nowMs(), wallMs: wallMs(), event: event)
         } catch {
-            ui?.emit(.error(code: "bad_input", detail: String(describing: error)))
+            // No peer: the core refused to handle an event at all, which is
+            // this machine's problem and not a conversation with anybody.
+            ui?.emit(.error(peer: nil, code: "bad_input", detail: String(describing: error)))
             return
         }
         for action in outcome.actions {
@@ -192,7 +219,7 @@ public actor CoreRuntime {
             do {
                 try store.put(key: key, value: value, sensitivity: sensitivity)
             } catch {
-                ui?.emit(.error(code: "persist_failed", detail: "\(key): \(error)"))
+                ui?.emit(.error(peer: nil, code: "persist_failed", detail: "\(key): \(error)"))
             }
 
         case let .advertise(transport, enable, txt):

@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0.35" y2="1">
+      <stop offset="0" stop-color="#46587F"/>
+      <stop offset="0.55" stop-color="#28324B"/>
+      <stop offset="1" stop-color="#141A28"/>
+    </linearGradient>
+
+    <!-- Cuts the right link where the left one crosses it, so one link reads
+         as passing in front of the other rather than as a Venn diagram. -->
+    <mask id="infront">
+      <rect width="1024" height="1024" fill="white"/>
+      <rect x="180" y="376" width="340" height="272" rx="96"
+            fill="none" stroke="black" stroke-width="130"/>
+    </mask>
+  </defs>
+
+  <rect width="1024" height="1024" fill="url(#bg)"/>
+
+  <g fill="none" stroke="#F2F5FB" stroke-width="66" stroke-linejoin="round">
+    <rect x="504" y="376" width="340" height="272" rx="96" mask="url(#infront)"/>
+    <rect x="180" y="376" width="340" height="272" rx="96"/>
+  </g>
+</svg>

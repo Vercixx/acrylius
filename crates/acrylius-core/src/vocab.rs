@@ -61,7 +61,7 @@ impl TransferId {
     /// [`MINTED_HERE`] is there so an id minted by the core cannot collide with
     /// one a host numbered itself, which matters because a transfer is keyed by
     /// this alone — a collision cancels the wrong one. It is also nineteen
-    /// digits, and `acryliusctl accept` is a number a person reads off a screen
+    /// digits, and `acryliusctl file accept` is a number a person reads off a screen
     /// and retypes. Which half of the range an id came from is not something
     /// they need to know, so it is not shown.
     #[must_use]
@@ -122,6 +122,20 @@ pub enum Event {
         transport: TransportId,
         peer: DiscoveredPeer,
     },
+    /// Something discovery had found is no longer there.
+    ///
+    /// By address, because that is the one thing a transport can be sure of
+    /// when a service goes away: mDNS withdraws an instance, not a fingerprint,
+    /// and the record it withdraws may carry no TXT at all.
+    ///
+    /// Sightings used to be one-way. Nothing was ever un-discovered, so the
+    /// list of machines on the network only grew: a computer that was switched
+    /// off went on being offered as something to pair with until the app was
+    /// restarted.
+    Undiscovered {
+        transport: TransportId,
+        addr: String,
+    },
     /// The single host timer fired. See [`Outcome::next_deadline_ms`].
     Tick,
     /// A host has somewhere for the other end to connect for a bulk transfer.
@@ -162,27 +176,23 @@ pub enum Event {
 /// Something a human asked for, locally.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum LocalCommand {
-    /// Open a pairing window and wait for someone to use `code`.
+    /// Dial `addr` and try to pair with whatever answers.
     ///
-    /// On the desktop this is reachable only over the `SO_PEERCRED`-guarded
-    /// control socket. There is deliberately no network route to it, so "you
-    /// must be at the machine" is a property of the transport rather than a rule
-    /// a handler could forget to enforce.
-    OpenPairingWindow {
-        code: String,
-    },
-    /// Dial `addr` and try to pair using `code`.
+    /// Nothing is trusted about the address: it decides where to knock and
+    /// nothing else. Who answered is settled by the six digits both ends derive
+    /// from the handshake, and a person comparing them.
     RequestPairing {
         transport: TransportId,
         addr: String,
-        code: String,
     },
-    /// Answer the SAS prompt. `false` means the codes did not match, which is
-    /// treated as a hostile handshake, not a typo.
+    /// Answer the SAS prompt.
+    ///
+    /// `false` means the digits did not match. Since the SAS is what
+    /// authenticates a pairing, that is the one observable sign of a handshake
+    /// being relayed — not a typo, and not worth retrying straight away.
     ConfirmPairing {
         accept: bool,
     },
-    ClosePairingWindow,
     /// Tell the core where a peer can be reached, bypassing discovery.
     ///
     /// Discovery is only ever a hint, so a hint supplied by a human who knows
@@ -196,6 +206,21 @@ pub enum LocalCommand {
     Connect {
         peer: DeviceId,
     },
+    /// The network changed; try every peer again from the addresses on file.
+    ///
+    /// Distinct from `Connect` in what it is allowed to do: this may dial a
+    /// peer that is *already reachable*, when a better transport has become
+    /// possible. Going the other way — Bluetooth to Wi-Fi — depends on a fresh
+    /// sighting, and a host has no way to make one happen; mDNS resolves a
+    /// service once and then says nothing. So a phone that lost Wi-Fi and got
+    /// it back stayed on Bluetooth, which cannot carry a file, with a perfectly
+    /// good network in the room.
+    ///
+    /// Host-driven rather than a heartbeat, because the moment is knowable —
+    /// iOS reports a path becoming satisfied — and dialling Wi-Fi every few
+    /// seconds on the chance it has come back is a radio a phone in a pocket
+    /// cannot afford.
+    ReconsiderRoutes,
     Disconnect {
         peer: DeviceId,
     },
@@ -377,12 +402,13 @@ pub enum EffectResult {
 /// Anything a UI or CLI should show.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum UiEvent {
-    PairingWindowOpen {
-        code: String,
-        expires_in_ms: u64,
-    },
     /// Both ends show this. The user compares, then answers with
     /// [`LocalCommand::ConfirmPairing`].
+    ///
+    /// This is the security boundary, not a courtesy: it is the only step that
+    /// distinguishes the machine somebody tapped from something relaying between
+    /// two handshakes. A UI that shows these digits without asking a person to
+    /// compare them has removed the authentication.
     PairingSas {
         name: String,
         fingerprint: Fingerprint,
@@ -392,8 +418,43 @@ pub enum UiEvent {
         peer: DeviceId,
         name: String,
     },
+    /// A peer has been forgotten, and its record is gone.
+    ///
+    /// A host that asks for a revoke and then reads the peer list back is
+    /// racing the core, because asking is one-way. This is the answer arriving,
+    /// and the only reliable moment to redraw.
+    Revoked {
+        peer: DeviceId,
+    },
     PairingFailed {
         reason: String,
+    },
+    /// A device nearby that this one is not paired with.
+    ///
+    /// Untrusted, like everything discovery says: it supplies a name to show
+    /// and an address to try, and nothing may be decided from either. The
+    /// handshake is what settles who is actually there.
+    ///
+    /// Only unpaired devices. A paired one is already in `peers` with somewhere
+    /// to display it, and the core dials it without being asked — so reporting
+    /// it here would be a second list of the same machine that does nothing.
+    Discovered {
+        fingerprint: Fingerprint,
+        name: String,
+        /// Transport-defined and opaque: a `host:port`, a BLE address.
+        addr: String,
+        transport: TransportId,
+        /// Whether it says it is already busy pairing with somebody.
+        ///
+        /// Advisory, and a courtesy to the screen: a machine that says so will
+        /// refuse a handshake, so offering the tap would only fail.
+        pairing: bool,
+    },
+    /// A machine that was on the network is not any more, and should stop being
+    /// offered. The counterpart to [`UiEvent::Discovered`], and said only for
+    /// devices that were reported through it.
+    Undiscovered {
+        fingerprint: Fingerprint,
     },
     PeerReachable {
         peer: DeviceId,
@@ -410,6 +471,18 @@ pub enum UiEvent {
         body: Vec<u8>,
     },
     Error {
+        /// Which peer this is about, when it is about one.
+        ///
+        /// A host that correlates a request with its answer has to be able to
+        /// tell "the peer you asked about refused" from "something else went
+        /// wrong elsewhere". Without this the control socket reported any
+        /// core-level error anywhere as the refusal of whatever request
+        /// happened to be waiting — and with a `share` request waiting an hour,
+        /// that window is an hour long.
+        ///
+        /// `None` for errors that belong to the machine rather than to a
+        /// conversation with somebody.
+        peer: Option<DeviceId>,
         code: ErrorCode,
         detail: String,
     },

@@ -200,7 +200,7 @@ impl Notifier {
 
     /// Take one down, because it has been answered somewhere else.
     ///
-    /// A question left on screen after `acryliusctl accept` answered it is a
+    /// A question left on screen after `acryliusctl file accept` answered it is a
     /// question that will be answered twice.
     pub async fn close(&self, id: u32) {
         let _ = self.proxy.close_notification(id).await;

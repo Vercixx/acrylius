@@ -1,32 +1,111 @@
 #if canImport(SwiftUI)
 
 import SwiftUI
+#if canImport(UIKit)
+import UIKit
+#endif
 
-/// Enter the code the PC printed, and where to reach it.
+/// Pick a computer. That is the whole thing.
+///
+/// There is nothing to type and nothing to scan. Tapping a machine runs the
+/// handshake, six digits appear here and on that machine's screen, and a person
+/// at each end says whether they match. This screen used to open on an empty
+/// text field and an IP address to type on a phone keyboard; then on a field for
+/// an eight-character code read off the other screen. Both were asking somebody
+/// to be at the computer already, which is the one thing pairing a phone to a
+/// computer across the room cannot assume.
 struct PairView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
-    @State private var code = ""
     @State private var addr = ""
+    /// Whether this screen has asked for a pairing yet.
+    ///
+    /// Only so that an error arriving from somewhere else — a transfer, a
+    /// media reading — does not close a screen the person is still reading.
+    @State private var asked = false
+
+    /// Machines seen recently enough to still be worth offering.
+    ///
+    /// mDNS resolves a service once and then says nothing until something
+    /// changes, so an entry is never withdrawn — a computer switched off an
+    /// hour ago would otherwise sit here looking available for the life of the
+    /// app.
+    private var fresh: [AppModel.Nearby] {
+        model.nearby.filter { Date().timeIntervalSince($0.seen) < 300 }
+    }
 
     var body: some View {
         NavigationStack {
             Form {
-                Section("Pairing code") {
-                    TextField("ABCD1234", text: $code)
-                        .textInputAutocapitalization(.characters)
-                        .autocorrectionDisabled()
-                        .font(.body.monospaced())
+                if fresh.isEmpty {
+                    Section {
+                        ContentUnavailableView(
+                            "No computers found",
+                            systemImage: "desktopcomputer.trianglebadge.exclamationmark",
+                            description: Text(
+                                "Make sure acryliusd is running and that this \(deviceKind()) is on the same Wi-Fi network."
+                            )
+                        )
+                    }
+                } else {
+                    Section {
+                        ForEach(fresh) { pc in
+                            Button {
+                                // The whole gesture. Everything a pairing needs
+                                // comes from the handshake this starts.
+                                asked = true
+                                Task { await model.pair(at: pc.addr, transport: pc.transport) }
+                            } label: {
+                                HStack {
+                                    VStack(alignment: .leading) {
+                                        Text(pc.name).foregroundStyle(.primary)
+                                        Text(pc.addr)
+                                            .font(.caption.monospaced())
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    Spacer()
+                                    if pc.pairing {
+                                        Text("busy")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
+                            }
+                            // A machine already showing somebody else six
+                            // digits will refuse this one, so offering the tap
+                            // would only produce a failure to explain.
+                            .disabled(pc.pairing)
+                        }
+                    } header: {
+                        Text("On this network")
+                    } footer: {
+                        Text(
+                            "Tap a computer to pair with it. Both screens will show the same six digits."
+                        )
+                    }
                 }
+
+                // Not an expandable section: `Section(isExpanded:)` has no
+                // initializer that takes a footer, and the footer is the part
+                // that says when this is for.
                 Section {
                     TextField("192.168.1.10:1971", text: $addr)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
                         .keyboardType(.URL)
+                    Button("Pair with this address") {
+                        asked = true
+                        Task { await model.pair(at: addr) }
+                    }
+                    .disabled(addr.isEmpty)
                 } header: {
-                    Text("IP address")
+                    Text("Enter an address")
                 } footer: {
-                    Text("On PC, run `acryliusctl pair` first.")
+                    // An address is a route, not a secret. Typing one still
+                    // ends at the same six digits, so this is a convenience for
+                    // a network mDNS cannot cross rather than a way around the
+                    // comparison.
+                    Text("Only needed if this \(deviceKind()) cannot find the computer by itself.")
                 }
             }
             .navigationTitle("Pair another device")
@@ -34,22 +113,43 @@ struct PairView: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { dismiss() }
                 }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Pair") {
-                        Task { await model.pair(withCode: code, at: addr); dismiss() }
-                    }
-                    .disabled(code.isEmpty || addr.isEmpty)
-                }
+            }
+            // The sheet closes itself when the digits arrive: `RootView` puts
+            // `ConfirmPairingView` up on `pairingSas`, and two sheets at once
+            // would leave the confirmation behind this one.
+            .onChange(of: model.pairingSas) {
+                if model.pairingSas != nil { dismiss() }
+            }
+            // And when the answer is no. A refusal — the far end busy, or
+            // cooling down after a mismatch — reaches `RootView`'s alert, which
+            // is *behind* this sheet and cannot be seen until it closes. Without
+            // this a tap that was turned away looks like a tap that did nothing.
+            .onChange(of: model.lastErrorAt) {
+                if asked { dismiss() }
             }
         }
+    }
+
+    private func deviceKind() -> String {
+        #if canImport(UIKit)
+        return UIDevice.current.model
+        #else
+        return "device"
+        #endif
     }
 }
 
 /// Both ends show the same six digits. The user compares them.
 ///
-/// The code is a cross-check, not the security mechanism: `XXpsk0` already
-/// makes a wrong pairing code fail to decrypt. Showing it costs nothing and
-/// catches the class of bug a PSK check would mask.
+/// **This is the security boundary.** Pairing runs plain `XX` with no shared
+/// secret, so anybody who can reach a device can complete a handshake with it —
+/// and an attacker who can relay traffic completes two, one with each side.
+/// What gives that away is that the two handshake hashes differ, so the digits
+/// differ, and a person notices. Nothing else is checking.
+///
+/// So: never auto-confirm, never make "they match" the easier press by accident,
+/// and never let this be dismissed by a swipe. A person who did not look has not
+/// authenticated anything.
 struct ConfirmPairingView: View {
     @Environment(AppModel.self) private var model
 

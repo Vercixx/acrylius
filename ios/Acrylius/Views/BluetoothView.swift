@@ -41,20 +41,12 @@ struct BluetoothView: View {
                 }
             } header: {
                 Text("Radio")
-            } footer: {
-                // Each of these is a different problem with a different fix, and
-                // they are indistinguishable from the outside.
-                Text(
-                    "\"Not permitted\" can only be undone in Settings. "
-                        + "\"Bluetooth is off\" is Control Centre. "
-                        + "\"No Bluetooth on this device\" means a simulator."
-                )
             }
 
             Section {
                 if model.ble.sightings.isEmpty {
                     ContentUnavailableView(
-                        "Nothing yet",
+                        "No services detected",
                         systemImage: "dot.radiowaves.left.and.right",
                         description: Text(
                             "The computer advertises only while acryliusd is running "
@@ -76,8 +68,8 @@ struct BluetoothView: View {
                             // that is the likeliest reason to find nothing.
                             Text(
                                 s.advertisedOurService
-                                    ? "advertises the acrylius service"
-                                    : "does not advertise it"
+                                    ? "advertises acrylius"
+                                    : "doesn't advertise acrylius"
                             )
                             .font(.caption)
                             .foregroundStyle(s.advertisedOurService ? .green : .secondary)
@@ -85,7 +77,7 @@ struct BluetoothView: View {
                     }
                 }
             } header: {
-                Text("Seen")
+                Text("Detected BLE services")
             }
 
             Section {
@@ -98,10 +90,10 @@ struct BluetoothView: View {
                     }
                 }
             } header: {
-                Text("Recent")
+                Text("CoreBluetooth log")
             } footer: {
                 // A screenshot of a scrolling list is a poor bug report.
-                Text("Newest first. Copy the whole thing with the button above.")
+                Text("You can copy this by pressing the copy button on top.")
             }
         }
         .navigationTitle("Bluetooth")

@@ -5,141 +5,29 @@
 //! socket is `0600` inside `$XDG_RUNTIME_DIR`, and every connection's peer
 //! credentials are checked against our own uid before a single byte is read.
 //!
-//! `pair` has no network route at all. Not a protected one: none. That is
-//! the single best structural idea carried over from `pc-helper-ios`: a future
-//! plugin cannot accidentally expose pairing, because there is nothing to
-//! expose it through.
+//! Pairing used to have no network route at all — not a protected one, none —
+//! and that was the single best structural idea carried over from
+//! `pc-helper-ios`. M3 gave up half of it deliberately: a phone can now start a
+//! pairing handshake, because requiring a code off this machine's screen is
+//! exactly what stops somebody pairing by tapping.
+//!
+//! The half worth keeping is here. **Approving** a pairing has no network route.
+//! A handshake from a stranger costs a notification and nothing else; only
+//! `Approve` writes a peer to the trust store, and it arrives only through this
+//! socket, so a future plugin still cannot expose it.
 
 use std::path::{Path, PathBuf};
 
 use acrylius_core::proto::ids::DeviceId;
 use acrylius_core::vocab::{Event, LocalCommand, UiEvent};
-use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, mpsc};
 
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "cmd", rename_all = "kebab-case")]
-pub enum Request {
-    Status,
-    /// Open a pairing window. Reachable only here.
-    Pair {
-        code: Option<String>,
-    },
-    Approve,
-    Deny,
-    Devices,
-    Revoke {
-        device: String,
-    },
-    Connect {
-        device: String,
-        addr: Option<String>,
-    },
-    Ping {
-        device: String,
-    },
-    /// Dial someone else's open pairing window.
-    PairWith {
-        addr: String,
-        code: String,
-    },
-    /// Ask a peer to lock, unlock, or describe its session.
-    Session {
-        device: String,
-        action: String,
-    },
-    /// Read a peer's clipboard, or push ours to it.
-    Clipboard {
-        device: String,
-        push: Option<String>,
-    },
-    Media {
-        device: String,
-        action: String,
-        player: Option<String>,
-        value: Option<i64>,
-    },
-    /// What a peer is willing to run.
-    Commands {
-        device: String,
-    },
-    /// Run one of them.
-    Run {
-        device: String,
-        id: String,
-    },
-    /// Offer a file to a peer.
-    Send {
-        device: String,
-        path: String,
-    },
-    /// Offers made to this machine that nobody has answered.
-    Offers,
-    /// Answer one.
-    Answer {
-        transfer: u64,
-        accept: bool,
-    },
-    /// Ask a peer to wake a third machine.
-    Wake {
-        device: String,
-        mac: String,
-    },
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub struct Status {
-    pub name: String,
-    pub device_id: String,
-    pub fingerprint: String,
-    pub port: u16,
-    pub peers: usize,
-    pub caps_in: Vec<String>,
-    pub caps_out: Vec<String>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub struct Device {
-    pub device_id: String,
-    pub name: String,
-    pub platform: String,
-    pub fingerprint: String,
-    pub reachable: bool,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "kebab-case")]
-pub enum Response {
-    Ok,
-    Status(Status),
-    /// A struct variant, not `Devices(Vec<Device>)`. serde's internally-tagged
-    /// representation cannot encode a newtype variant wrapping a sequence, and
-    /// it fails at serialisation time, so the wrapper form compiled fine and
-    /// silently closed the connection with no reply.
-    Devices {
-        devices: Vec<Device>,
-    },
-    /// Anything the core wanted a human to see, forwarded verbatim.
-    Event {
-        text: String,
-    },
-    /// A device is waiting on a human. Sent instead of `Event` for the short
-    /// authentication string, because it is the one event that needs an answer
-    /// — the client can then put up its own prompt rather than print prose and
-    /// leave the operator to work out what to run next.
-    Confirm {
-        name: String,
-        fingerprint: String,
-        sas: String,
-    },
-    Error {
-        message: String,
-    },
-}
+// One definition, shared with the CLI. See `crate::ipc`.
+pub use acryliusd::ipc::{
+    Command, Confirmation, Device, Nearby, Player, Report, Request, Response, Status,
+};
 
 /// A live control socket. Unlinked on drop, but only if we are the instance
 /// that bound it.
@@ -176,33 +64,118 @@ pub fn socket_path(state: &Path, explicit_state: bool) -> PathBuf {
         .join("acrylius.sock")
 }
 
+/// What one event means to a request that is waiting.
+#[derive(Debug, PartialEq, Eq)]
+enum Verdict {
+    /// The answer, with the verb it came back under.
+    Reply(String, Vec<u8>),
+    /// It will never be answered, and here is why.
+    Refused(String),
+    /// The device this was aimed at has gone.
+    Gone,
+    /// Somebody else's business.
+    Ignore,
+}
+
+/// Decide what an event means for a request aimed at `id`.
+///
+/// A function rather than match guards inside the wait loop, because the guards
+/// were the fix for the correlation bug and nothing could reach them to test
+/// them — mutation testing flipped every one of `p == id`, `c == cap` and the
+/// `&&` between them with no test objecting. The bug they fix would have come
+/// straight back.
+fn verdict(e: UiEvent, id: &DeviceId, cap: &str, expect: &[&str]) -> Verdict {
+    match e {
+        UiEvent::Plugin {
+            peer,
+            cap: c,
+            ty,
+            body,
+        } => {
+            if &peer == id && c == cap && expect.contains(&ty.as_str()) {
+                Verdict::Reply(ty, body)
+            } else {
+                Verdict::Ignore
+            }
+        }
+        // A request the core refused before it left this machine — a value out
+        // of range, a capability not negotiated. Nothing will ever come back
+        // from the peer, so waiting for one turns an immediate, well-explained
+        // refusal into a fifteen-second timeout reported as if the peer were at
+        // fault.
+        //
+        // An error with no peer is about the machine rather than about a
+        // conversation, and is not this request's answer.
+        UiEvent::Error { peer, code, detail } => {
+            if peer.as_ref() == Some(id) {
+                Verdict::Refused(format!("{detail} ({})", code.as_str()))
+            } else {
+                Verdict::Ignore
+            }
+        }
+        UiEvent::PeerUnreachable { peer } => {
+            if &peer == id {
+                Verdict::Gone
+            } else {
+                Verdict::Ignore
+            }
+        }
+        _ => Verdict::Ignore,
+    }
+}
+
+/// Whether an event is about a particular peer.
+///
+/// The control socket subscribes to one broadcast carrying every device's
+/// events, so anything that waits for an answer has to say which conversation
+/// it is waiting on. Events with no peer — a pairing window opening, a
+/// machine-level error — are about the machine and answer nobody's request.
+fn about(e: &UiEvent, who: &DeviceId) -> bool {
+    match e {
+        UiEvent::PeerReachable { peer, .. }
+        | UiEvent::PeerUnreachable { peer }
+        | UiEvent::Plugin { peer, .. }
+        | UiEvent::PairingComplete { peer, .. } => peer == who,
+        UiEvent::Error { peer, .. } => peer.as_ref() == Some(who),
+        // Nobody's request. A sighting is news about a stranger, and the
+        // control socket's waits are all about a device already paired.
+        UiEvent::Discovered { .. }
+        | UiEvent::Undiscovered { .. }
+        | UiEvent::Revoked { .. }
+        | UiEvent::PairingSas { .. }
+        | UiEvent::PairingFailed { .. } => false,
+    }
+}
+
 /// Render a UI event as a line a human can read.
 fn render(e: &UiEvent) -> String {
     match e {
-        UiEvent::PairingWindowOpen {
-            code,
-            expires_in_ms,
-        } => {
-            format!(
-                "pairing window open, code {code}, for {}s",
-                expires_in_ms / 1000
-            )
-        }
         UiEvent::PairingSas {
             name,
             fingerprint,
             sas,
         } => format!(
-            "{name} wants to pair\n  fingerprint {fingerprint}\n  code on both screens: {sas}\n  run `acryliusctl approve` if they match"
+            "{name} wants to pair\n  fingerprint {fingerprint}\n  code on both screens: {sas}\n  run `acryliusctl pair approve` if they match"
         ),
+        UiEvent::Discovered {
+            name,
+            addr,
+            pairing,
+            ..
+        } => format!(
+            "found {name} at {addr}{}",
+            if *pairing { ", waiting to pair" } else { "" }
+        ),
+        UiEvent::Undiscovered { fingerprint } => format!("{fingerprint} has left the network"),
         UiEvent::PairingComplete { peer, name } => format!("paired with {name} ({peer})"),
+        UiEvent::Revoked { peer } => format!("forgot {peer}"),
         UiEvent::PairingFailed { reason } => format!("pairing failed: {reason}"),
         UiEvent::PeerReachable { peer, name } => format!("{name} ({peer}) is reachable"),
         UiEvent::PeerUnreachable { peer } => format!("{peer} is unreachable"),
         UiEvent::Plugin { cap, ty, body, .. } => {
             format!("{cap} {ty} ({} bytes)", body.len())
         }
-        UiEvent::Error { code, detail } => format!("error [{}]: {detail}", code.as_str()),
+        UiEvent::Error { code, detail, .. } => format!("error [{}]: {detail}", code.as_str()),
     }
 }
 
@@ -213,6 +186,8 @@ pub struct Handles {
     pub ui: broadcast::Sender<UiEvent>,
     pub status: std::sync::Arc<tokio::sync::Mutex<Option<Status>>>,
     pub devices: std::sync::Arc<tokio::sync::Mutex<Vec<Device>>>,
+    pub nearby: std::sync::Arc<tokio::sync::Mutex<Vec<Nearby>>>,
+    pub pending_pair: std::sync::Arc<tokio::sync::Mutex<Option<Confirmation>>>,
 }
 
 pub async fn serve(path: PathBuf, handles: Handles) -> anyhow::Result<ControlSocket> {
@@ -254,6 +229,8 @@ pub async fn serve(path: PathBuf, handles: Handles) -> anyhow::Result<ControlSoc
                 ui: handles.ui.clone(),
                 status: handles.status.clone(),
                 devices: handles.devices.clone(),
+                nearby: handles.nearby.clone(),
+                pending_pair: handles.pending_pair.clone(),
             };
             tokio::spawn(async move {
                 if let Err(e) = handle_conn(stream, h).await {
@@ -321,11 +298,32 @@ async fn handle_conn(stream: UnixStream, h: Handles) -> anyhow::Result<()> {
                 let d = h.devices.lock().await.clone();
                 write(&mut wr, &Response::Devices { devices: d }).await?;
             }
-            Request::Pair { code } => {
-                let code = code.unwrap_or_else(random_code);
+            Request::Nearby => {
+                let n = h.nearby.lock().await.clone();
+                write(&mut wr, &Response::Nearby { nearby: n }).await?;
+            }
+            // Nothing to arm: any device may start a pairing handshake, so this
+            // only subscribes and waits for one. It is what answers a pairing
+            // over SSH, where there is no notification daemon to press.
+            Request::Pair => {
                 let mut rx = h.ui.subscribe();
-                h.events
-                    .send(Event::Local(LocalCommand::OpenPairingWindow { code }))?;
+                // Anything already waiting, before anything new. Subscribing
+                // only ever showed what happened *next*, so a pairing that
+                // completed a moment ago — while no notification daemon was
+                // running, or before anyone thought to run this — was
+                // invisible, and answering it meant knowing to start this
+                // first. It then lapsed in silence two minutes later.
+                if let Some(p) = h.pending_pair.lock().await.clone() {
+                    write(
+                        &mut wr,
+                        &Response::Confirm {
+                            name: p.name,
+                            fingerprint: p.fingerprint,
+                            sas: p.sas,
+                        },
+                    )
+                    .await?;
+                }
                 stream_pairing(&mut wr, &mut rx).await?;
             }
             Request::Approve => {
@@ -354,12 +352,11 @@ async fn handle_conn(stream: UnixStream, h: Handles) -> anyhow::Result<()> {
                     .await?
                 }
             },
-            Request::PairWith { addr, code } => {
+            Request::PairWith { addr } => {
                 let mut rx = h.ui.subscribe();
                 h.events.send(Event::Local(LocalCommand::RequestPairing {
                     transport: h.transport,
                     addr,
-                    code,
                 }))?;
                 stream_pairing(&mut wr, &mut rx).await?;
             }
@@ -374,10 +371,22 @@ async fn handle_conn(stream: UnixStream, h: Handles) -> anyhow::Result<()> {
                         }))?;
                     }
                     h.events
-                        .send(Event::Local(LocalCommand::Connect { peer: id }))?;
-                    if let Ok(Ok(e)) =
-                        tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv()).await
-                    {
+                        .send(Event::Local(LocalCommand::Connect { peer: id.clone() }))?;
+                    // The first event *about this peer*, not the first event at
+                    // all. Taking whatever arrived meant a media push from
+                    // another machine, two seconds after asking, was reported
+                    // as the outcome of connecting.
+                    let waited = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                        loop {
+                            match rx.recv().await {
+                                Ok(e) if about(&e, &id) => return Some(e),
+                                Err(_) => return None,
+                                Ok(_) => {}
+                            }
+                        }
+                    })
+                    .await;
+                    if let Ok(Some(e)) = waited {
                         write(&mut wr, &Response::Event { text: render(&e) }).await?;
                     } else {
                         write(
@@ -681,17 +690,29 @@ async fn handle_conn(stream: UnixStream, h: Handles) -> anyhow::Result<()> {
                 Ok(id) => {
                     let mut rx = h.ui.subscribe();
                     h.events.send(Event::Local(LocalCommand::Plugin {
-                        peer: id,
+                        peer: id.clone(),
                         cap: acrylius_core::plugins::ping::CAP.to_string(),
                         ty: "ping".to_string(),
                         body: b"acryliusctl".to_vec(),
                     }))?;
                     let deadline = std::time::Duration::from_secs(5);
+                    // By peer, like `plugin_request`. A pong is the one reply
+                    // where taking somebody else's would be perfectly
+                    // convincing: every pong is identical, so pinging a device
+                    // that was not answering succeeded whenever any other one
+                    // was.
                     let got = tokio::time::timeout(deadline, async {
                         loop {
                             match rx.recv().await {
-                                Ok(UiEvent::Plugin { ty, .. }) if ty == "pong" => return true,
-                                Ok(UiEvent::PeerUnreachable { .. }) | Err(_) => return false,
+                                Ok(UiEvent::Plugin { peer, ty, .. })
+                                    if peer == id && ty == "pong" =>
+                                {
+                                    return true;
+                                }
+                                Ok(UiEvent::PeerUnreachable { peer }) if peer == id => {
+                                    return false;
+                                }
+                                Err(_) => return false,
                                 Ok(_) => {}
                             }
                         }
@@ -792,7 +813,7 @@ async fn plugin_request(
     };
     let mut rx = h.ui.subscribe();
     h.events.send(Event::Local(LocalCommand::Plugin {
-        peer: id,
+        peer: id.clone(),
         cap: cap.to_string(),
         ty: ty.to_string(),
         body,
@@ -801,27 +822,24 @@ async fn plugin_request(
         return write(wr, &Response::Ok).await;
     }
 
+    // Every arm below is filtered by peer, and that is the whole point of it.
+    //
+    // This used to match on `(cap, ty)` alone against a *global* event
+    // broadcast, so with two devices connected the answer to a question about
+    // one could be somebody else's unsolicited push. That is not theoretical:
+    // the media plugin broadcasts state every two seconds, so `media A query`
+    // was routinely answered with B's now-playing. The same held for the
+    // failure paths — any peer going unreachable ended a request aimed at a
+    // different one, and any core-level error anywhere became this request's
+    // refusal, for as long as an hour on a `share`.
     let waited = tokio::time::timeout(patience, async {
         loop {
-            match rx.recv().await {
-                Ok(UiEvent::Plugin {
-                    cap: c,
-                    ty: t,
-                    body,
-                    ..
-                }) if c == cap && expect.contains(&t.as_str()) => {
-                    return Some(Answer::Reply(t, body));
-                }
-                // A request the core refused before it left this machine — a
-                // value out of range, a capability not negotiated. Nothing will
-                // ever come back from the peer, so waiting for one turns an
-                // immediate, well-explained refusal into a fifteen-second
-                // timeout reported as if the peer were at fault.
-                Ok(UiEvent::Error { code, detail }) => {
-                    return Some(Answer::Refused(format!("{detail} ({})", code.as_str())));
-                }
-                Ok(UiEvent::PeerUnreachable { .. }) | Err(_) => return None,
-                Ok(_) => {}
+            let Ok(e) = rx.recv().await else { return None };
+            match verdict(e, &id, cap, expect) {
+                Verdict::Reply(ty, body) => return Some(Answer::Reply(ty, body)),
+                Verdict::Refused(m) => return Some(Answer::Refused(m)),
+                Verdict::Gone => return None,
+                Verdict::Ignore => {}
             }
         }
     })
@@ -831,8 +849,8 @@ async fn plugin_request(
         Ok(Some(Answer::Reply(ty, body))) => {
             write(
                 wr,
-                &Response::Event {
-                    text: describe(cap, &ty, &body),
+                &Response::Report {
+                    report: report(cap, &ty, &body),
                 },
             )
             .await
@@ -863,130 +881,120 @@ async fn plugin_request(
 ///
 /// The core keeps bodies opaque, which is the right call for routing and the
 /// wrong one for a terminal, so decoding happens here at the edge.
-fn describe(cap: &str, ty: &str, body: &[u8]) -> String {
+/// Decode a peer's answer into data. Wording it is the CLI's job.
+///
+/// This used to return a finished `String`, which is exactly why there was no
+/// `--json` to add: the numbers were decoded here and thrown away one process
+/// before anything could have used them.
+fn report(cap: &str, ty: &str, body: &[u8]) -> Report {
     use acrylius_core::plugins::{clipboard, command, media, session};
     use acrylius_core::proto::envelope::ErrorBody;
 
     if ty == "err" {
         return match minicbor::decode::<ErrorBody>(body) {
-            Ok(e) => format!("refused: {} ({})", e.message, e.code),
-            Err(_) => "refused".to_string(),
+            Ok(e) => Report::Refused {
+                code: e.code.to_string(),
+                message: e.message.to_string(),
+            },
+            Err(_) => Report::Refused {
+                code: "unknown".to_string(),
+                message: "refused".to_string(),
+            },
         };
     }
     if cap == session::CAP {
         if let Ok(s) = minicbor::decode::<session::SessionState>(body) {
-            return format!(
-                "session {} ({}) is {}",
-                s.session_id,
-                s.kind,
-                if s.locked { "locked" } else { "unlocked" }
-            );
+            return Report::Session {
+                session_id: s.session_id.to_string(),
+                kind: s.kind.to_string(),
+                locked: s.locked,
+            };
         }
         if let Ok(o) = minicbor::decode::<session::SessionOutcome>(body) {
-            return format!(
-                "session {} was {} and is now {}",
-                o.session_id,
-                if o.was_locked { "locked" } else { "unlocked" },
-                if o.locked { "locked" } else { "unlocked" }
-            );
+            return Report::SessionChanged {
+                session_id: o.session_id.to_string(),
+                was_locked: o.was_locked,
+                locked: o.locked,
+            };
         }
     }
     if cap == clipboard::CAP
         && let Ok(c) = minicbor::decode::<clipboard::ClipboardSet>(body)
     {
-        return String::from_utf8_lossy(&c.data).into_owned();
+        return Report::Clipboard {
+            text: String::from_utf8_lossy(&c.data).into_owned(),
+        };
     }
     if cap == acrylius_core::plugins::share::CAP {
         use acrylius_core::plugins::share::{Finished, Offer};
         if let Ok(o) = minicbor::decode::<Offer>(body) {
-            return format!("{} offers {} ({})", ty, o.name, human(o.size));
+            return Report::Offer {
+                ty: ty.to_string(),
+                name: o.name.to_string(),
+                size: o.size,
+            };
         }
         if let Ok(f) = minicbor::decode::<Finished>(body) {
             // The same number the offer was listed under. Reporting the stored
             // one instead would end a transfer under a different name from the
             // one it was accepted by.
-            let n = acrylius_core::vocab::TransferId(f.transfer).short();
-            return if f.ok {
-                format!("transfer {n} finished")
-            } else if f.detail.is_empty() {
-                format!("transfer {n} was refused")
-            } else {
-                format!("transfer {n} failed: {}", f.detail)
+            return Report::Transfer {
+                transfer: f.transfer,
+                ok: f.ok,
+                detail: f.detail.to_string(),
             };
         }
     }
     if cap == media::CAP
         && let Ok(s) = minicbor::decode::<media::MediaState>(body)
     {
-        if s.players.is_empty() {
-            // The volume is still worth saying. It is a property of the
-            // machine and it can be turned down whether or not anything is
-            // playing through it.
-            return match s.system_volume {
-                Some(v) => format!("nothing is playing (output volume {v}%)"),
-                None => "nothing is playing".to_string(),
-            };
-        }
-        return s
-            .players
-            .iter()
-            .map(|p| {
-                // The active one is marked, because a command with no player
-                // named goes there and a person should be able to see which.
-                let mark = if p.id == s.active { "*" } else { " " };
-                let mut line = format!("{mark} {:<12} {:<8} {}", p.id, p.status, p.title);
-                if !p.artist.is_empty() {
-                    line.push_str(&format!(" — {}", p.artist));
-                }
-                if p.length_ms > 0 {
-                    line.push_str(&format!(
-                        "  [{}/{}]",
-                        clock(p.position_ms),
-                        clock(p.length_ms)
-                    ));
-                }
-                if let Some(v) = p.volume_percent {
-                    line.push_str(&format!("  vol {v}%"));
-                }
-                if !p.can_control {
-                    line.push_str("  (reports only)");
-                }
-                line
-            })
-            .chain(
-                // Last, and separate: this is the machine's, not a player's,
-                // and it is what a `volume` with no --player moves.
-                s.system_volume
-                    .map(|v| format!("  {:<12} {:<8} output volume {v}%", "system", "")),
-            )
-            .collect::<Vec<_>>()
-            .join("\n");
+        return Report::Media {
+            active: s.active.to_string(),
+            players: s
+                .players
+                .iter()
+                .map(|p| Player {
+                    id: p.id.to_string(),
+                    status: p.status.to_string(),
+                    title: p.title.to_string(),
+                    artist: p.artist.to_string(),
+                    position_ms: p.position_ms,
+                    length_ms: p.length_ms,
+                    volume_percent: p.volume_percent,
+                    can_control: p.can_control,
+                    // Resolved here, where `active` is in hand, so nothing
+                    // downstream has to re-derive which player a command with
+                    // no player named would reach.
+                    active: p.id == s.active,
+                })
+                .collect(),
+            system_volume: s.system_volume,
+        };
     }
     if cap == command::CAP {
         if let Ok(l) = minicbor::decode::<command::CommandList>(body) {
-            if l.commands.is_empty() {
-                return "no commands offered".to_string();
-            }
-            return l
-                .commands
-                .iter()
-                .map(|c| format!("{}  {}", c.id, c.name))
-                .collect::<Vec<_>>()
-                .join("\n");
+            return Report::Commands {
+                commands: l
+                    .commands
+                    .iter()
+                    .map(|c| Command {
+                        id: c.id.to_string(),
+                        name: c.name.to_string(),
+                    })
+                    .collect(),
+            };
         }
         if let Ok(e) = minicbor::decode::<command::Exited>(body) {
-            return format!(
-                "exit {}{}",
-                e.code,
-                if e.truncated {
-                    " (output truncated)"
-                } else {
-                    ""
-                }
-            );
+            return Report::Exited {
+                code: e.code,
+                truncated: e.truncated,
+            };
         }
     }
-    format!("{ty} ({} bytes)", body.len())
+    Report::Opaque {
+        ty: ty.to_string(),
+        bytes: body.len(),
+    }
 }
 
 /// Relay pairing events until the window resolves one way or the other.
@@ -1034,8 +1042,6 @@ async fn write(wr: &mut tokio::net::unix::OwnedWriteHalf, r: &Response) -> anyho
     Ok(())
 }
 
-/// A fresh pairing code from the Crockford-minus-`ILOU` alphabet.
-#[must_use]
 /// A size a person reads rather than counts.
 fn human(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
@@ -1052,15 +1058,199 @@ fn human(bytes: u64) -> String {
     }
 }
 
-/// Milliseconds as m:ss, for a line a person reads.
-fn clock(ms: u64) -> String {
-    let secs = ms / 1000;
-    format!("{}:{:02}", secs / 60, secs % 60)
-}
+// `clock` moved to `ipc`, beside the rendering that is now its only caller.
 
-#[must_use]
-pub fn random_code() -> String {
-    use rand::Rng;
-    let bits: u64 = rand::rng().random::<u64>() & 0xFF_FFFF_FFFF;
-    acrylius_core::proto::pairing::encode(bits)
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use acrylius_core::proto::envelope::ErrorCode;
+
+    /// A device id built the only way one can be from outside: parsed.
+    ///
+    /// 22 base64url characters carry 16 bytes, so the last one holds just two
+    /// significant bits and anything but `A`, `Q`, `g` or `w` there is refused
+    /// as non-canonical. The variation therefore goes at the front.
+    fn who(first: char) -> DeviceId {
+        let s: String = std::iter::once(first)
+            .chain(std::iter::repeat_n('A', DeviceId::CHARS - 1))
+            .collect();
+        DeviceId::parse(&s).expect("a well-formed device id")
+    }
+
+    #[test]
+    fn a_reply_from_another_peer_is_not_this_requests_answer() {
+        // The bug this whole change exists for. The media plugin broadcasts
+        // state every two seconds, so with two devices connected the answer to
+        // "what is playing on A" was routinely B's.
+        let theirs = UiEvent::Plugin {
+            peer: who('B'),
+            cap: "org.acrylius.media/1".to_string(),
+            ty: "state".to_string(),
+            body: Vec::new(),
+        };
+        assert!(!about(&theirs, &who('A')));
+        assert!(about(&theirs, &who('B')));
+    }
+
+    #[test]
+    fn a_machine_leaving_the_network_reads_as_a_sentence() {
+        // `acryliusctl` prints these verbatim, and a sighting and its
+        // withdrawal are the pair a person watches to see discovery working.
+        let fp = acrylius_core::proto::ids::Fingerprint::of(&[7u8; 32]);
+        let line = render(&UiEvent::Undiscovered {
+            fingerprint: fp.clone(),
+        });
+        assert!(
+            line.contains(fp.as_str()) && line.contains("left"),
+            "a withdrawal has to name what left and say that it did: {line}"
+        );
+    }
+
+    #[test]
+    fn another_peer_going_away_does_not_end_this_request() {
+        let gone = UiEvent::PeerUnreachable { peer: who('B') };
+        assert!(
+            !about(&gone, &who('A')),
+            "B going away must not report A as unreachable"
+        );
+        assert!(about(&gone, &who('B')));
+    }
+
+    #[test]
+    fn an_error_about_the_machine_is_nobodys_answer() {
+        // `None` is the honest value for a failure that belongs to this
+        // computer rather than to a conversation. Treating it as an answer is
+        // how any error anywhere became the refusal of whatever request
+        // happened to be waiting — for up to an hour, on a share.
+        let machine = UiEvent::Error {
+            peer: None,
+            code: ErrorCode::Internal,
+            detail: "a disk went away".to_string(),
+        };
+        assert!(!about(&machine, &who('A')));
+
+        let theirs = UiEvent::Error {
+            peer: Some(who('B')),
+            code: ErrorCode::NotAllowed,
+            detail: "no".to_string(),
+        };
+        assert!(!about(&theirs, &who('A')));
+        assert!(about(&theirs, &who('B')));
+    }
+
+    fn reply_from(peer: DeviceId, cap: &str, ty: &str) -> UiEvent {
+        UiEvent::Plugin {
+            peer,
+            cap: cap.to_string(),
+            ty: ty.to_string(),
+            body: b"body".to_vec(),
+        }
+    }
+
+    const MEDIA: &str = "org.acrylius.media/1";
+
+    #[test]
+    fn a_reply_must_match_the_peer_the_cap_and_the_verb() {
+        // All three, and each on its own. Mutation testing flipped every
+        // comparison in the old inline guard and the `&&` between them, and
+        // nothing noticed — so each conjunct gets a case that fails without it.
+        let want = ["state"];
+        assert_eq!(
+            verdict(
+                reply_from(who('A'), MEDIA, "state"),
+                &who('A'),
+                MEDIA,
+                &want
+            ),
+            Verdict::Reply("state".to_string(), b"body".to_vec()),
+        );
+        assert_eq!(
+            verdict(
+                reply_from(who('B'), MEDIA, "state"),
+                &who('A'),
+                MEDIA,
+                &want
+            ),
+            Verdict::Ignore,
+            "the right answer from the wrong device is not this request's"
+        );
+        assert_eq!(
+            verdict(
+                reply_from(who('A'), "org.acrylius.session/1", "state"),
+                &who('A'),
+                MEDIA,
+                &want
+            ),
+            Verdict::Ignore,
+            "a session state is not a media state"
+        );
+        assert_eq!(
+            verdict(
+                reply_from(who('A'), MEDIA, "other"),
+                &who('A'),
+                MEDIA,
+                &want
+            ),
+            Verdict::Ignore,
+            "a verb nobody asked for is not an answer"
+        );
+    }
+
+    #[test]
+    fn only_this_peers_failures_end_this_request() {
+        let mine = UiEvent::Error {
+            peer: Some(who('A')),
+            code: ErrorCode::NotAllowed,
+            detail: "no".to_string(),
+        };
+        assert!(matches!(
+            verdict(mine, &who('A'), MEDIA, &["state"]),
+            Verdict::Refused(_)
+        ));
+
+        for other in [
+            UiEvent::Error {
+                peer: Some(who('B')),
+                code: ErrorCode::NotAllowed,
+                detail: "no".to_string(),
+            },
+            UiEvent::Error {
+                peer: None,
+                code: ErrorCode::Internal,
+                detail: "a disk went away".to_string(),
+            },
+            UiEvent::PeerUnreachable { peer: who('B') },
+        ] {
+            assert_eq!(
+                verdict(other, &who('A'), MEDIA, &["state"]),
+                Verdict::Ignore,
+                "somebody else's trouble must not answer this request"
+            );
+        }
+
+        assert_eq!(
+            verdict(
+                UiEvent::PeerUnreachable { peer: who('A') },
+                &who('A'),
+                MEDIA,
+                &["state"]
+            ),
+            Verdict::Gone
+        );
+    }
+
+    #[test]
+    fn pairing_events_answer_no_ones_request() {
+        // They are about a stranger, not a paired device, and there is no peer
+        // to compare against: somebody asking to pair must not satisfy a
+        // `session query` that happens to be outstanding.
+        assert!(!about(
+            &UiEvent::PairingSas {
+                name: "someone".to_string(),
+                fingerprint: acrylius_core::proto::ids::Fingerprint::of(&[0u8; 32]),
+                sas: "605 480".to_string(),
+            },
+            &who('A')
+        ));
+    }
 }

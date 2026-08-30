@@ -17,34 +17,15 @@ set -euo pipefail
 export LOGNAME="${LOGNAME:-${USER:-builder}}"
 export USER="${USER:-$LOGNAME}"
 
-VERSION=${XCODEGEN_VERSION:-2.44.1}
-# The commit that tag pointed at when it was pinned. See the check below.
-COMMIT=${XCODEGEN_COMMIT:-21ac9944b0ab546a07422dbed86f33dd2ebd76f8}
-CACHE=${XCODEGEN_CACHE:-target/xcodegen}
-BIN="$CACHE/.build/release/xcodegen"
-
-if [ ! -x "$BIN" ]; then
-    echo "building XcodeGen $VERSION (once)…"
-    rm -rf "$CACHE"
-    git clone --depth 1 --branch "$VERSION" https://github.com/yonaskolb/XcodeGen.git "$CACHE"
-    # A tag is a name somebody else can repoint, and this clone is built and run
-    # on every push and every pull request. Checking the commit it resolved to
-    # is what makes the version above mean one particular tree.
-    got="$(cd "$CACHE" && git rev-parse HEAD)"
-    if [ "$got" != "$COMMIT" ]; then
-        echo "XcodeGen $VERSION is $got, expected $COMMIT" >&2
-        echo "If the bump is deliberate, update XCODEGEN_COMMIT in this script." >&2
-        rm -rf "$CACHE"
-        exit 1
-    fi
-    (cd "$CACHE" && swift build -c release)
-fi
+# The pin lives in one place, because the macOS job generates the project it
+# builds with the same one. See scripts/xcodegen-bin.sh.
+BIN="$("$(dirname "$0")/xcodegen-bin.sh")"
 
 # The manifest names the generated bindings; stand in for them so the path check
 # passes without having to run the whole Rust build first.
 mkdir -p ios/Generated && touch ios/Generated/acrylius_ffi.swift
 
-"$PWD/$BIN" generate --spec ios/project.yml --project ios
+"$BIN" generate --spec ios/project.yml --project ios
 echo
 echo "sources picked up:"
 # `sourcecode.swift` is a lastKnownFileType attribute, not a file.
@@ -154,6 +135,37 @@ if [ -z "$app_group" ] || [ "$app_group" != "$widget_group" ] || [ "$app_group" 
     echo "  they must all be the same"
     exit 1
 fi
+
+# The icon is three things that have to agree: an appiconset, a file it names,
+# and a build setting naming the appiconset. Miss any one and the build is
+# clean, the IPA installs, and the home screen shows a blank square — which
+# reads as a signing problem and is not one.
+echo
+echo "app icon:"
+SET=ios/Acrylius/Assets.xcassets/AppIcon.appiconset
+named=$(grep -oE '"filename"[[:space:]]*:[[:space:]]*"[^"]+"' "$SET/Contents.json" \
+    | head -1 | cut -d'"' -f4)
+setting=$(grep -oE 'ASSETCATALOG_COMPILER_APPICON_NAME:[[:space:]]*[A-Za-z]+' ios/project.yml \
+    | head -1 | awk -F': *' '{print $2}')
+echo "  names        ${named:-nothing}"
+echo "  setting      ${setting:-unset}"
+[ -n "$named" ] && [ -f "$SET/$named" ] || {
+    echo "  the appiconset names a file that is not there"; exit 1
+}
+[ "$setting" = "AppIcon" ] || {
+    echo "  project.yml must set ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon"; exit 1
+}
+
+# An icon with an alpha channel is the classic one: iOS composites it over
+# black, so a transparent corner becomes a black corner and the rounding looks
+# broken. Read the colour type out of the PNG's IHDR rather than requiring an
+# image tool the CI container does not have. 4 and 6 are the two that carry
+# alpha.
+colour=$(od -An -tu1 -j 25 -N 1 "$SET/$named" | tr -d ' ')
+case "$colour" in
+    4|6) echo "  alpha        yes — iOS will composite it over black"; exit 1 ;;
+    *)   echo "  alpha        none" ;;
+esac
 
 echo
 echo "project.yml is valid."

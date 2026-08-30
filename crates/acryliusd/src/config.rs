@@ -22,8 +22,30 @@ pub struct Config {
     pub session: SessionConfig,
     pub share: ShareConfig,
     pub ble: BleConfig,
+    pub pair: PairConfig,
     /// Commands a paired device may run, keyed by the id that travels.
     pub commands: BTreeMap<String, CommandSpec>,
+}
+
+/// Pairing.
+///
+/// Pairing has no pre-shared key, so any device that can reach this one may
+/// start a handshake and put six digits on this screen. Nothing is stored
+/// without somebody here pressing a button, and a cooldown keeps a device that
+/// keeps asking to one notification — but a machine that is done pairing has no
+/// reason to answer at all, and this is how to say so.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PairConfig {
+    pub enabled: bool,
+}
+
+impl Default for PairConfig {
+    fn default() -> Self {
+        // On. A machine nobody can pair with is a machine nobody can use, and
+        // the first thing anyone does with this software is pair something.
+        Self { enabled: true }
+    }
 }
 
 /// Bluetooth LE.
@@ -229,6 +251,7 @@ impl Default for Config {
             session: SessionConfig::default(),
             share: ShareConfig::default(),
             ble: BleConfig::default(),
+            pair: PairConfig::default(),
             commands: BTreeMap::new(),
         }
     }

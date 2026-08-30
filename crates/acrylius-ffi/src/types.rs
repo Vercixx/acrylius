@@ -24,6 +24,33 @@ pub enum FfiTransportKind {
     Custom { name: String },
 }
 
+// ----------------------------------------------------------------- peer state
+
+/// Whether a peer can be reached, is being reached, or cannot be.
+///
+/// The core has modelled all three since M0; the FFI used to flatten them to
+/// `reachable: bool` and throw `Connecting` away. That was survivable while a
+/// Connect button existed, because a person who pressed it knew an attempt was
+/// running. With dialling entirely automatic, the difference between "trying"
+/// and "gave up" is the whole of what a screen has to say.
+#[derive(uniffi::Enum, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FfiPeerState {
+    Unreachable,
+    Connecting,
+    Reachable,
+}
+
+impl From<acrylius_core::peer::PeerState> for FfiPeerState {
+    fn from(s: acrylius_core::peer::PeerState) -> Self {
+        use acrylius_core::peer::PeerState as P;
+        match s {
+            P::Unreachable => Self::Unreachable,
+            P::Connecting => Self::Connecting,
+            P::Reachable => Self::Reachable,
+        }
+    }
+}
+
 /// The direction the core does not need but a UI does: what is carrying a
 /// session, so a person can see which one took over.
 impl From<cl::TransportKind> for FfiTransportKind {
@@ -185,19 +212,24 @@ pub enum FfiEvent {
         transport: u16,
         peer: FfiDiscoveredPeer,
     },
-    Tick,
-    OpenPairingWindow {
-        code: String,
+    /// Something discovery had found is gone. See
+    /// [`acrylius_core::vocab::Event::Undiscovered`].
+    Undiscovered {
+        transport: u16,
+        addr: String,
     },
+    Tick,
+    /// Dial `addr` and try to pair with whatever answers.
+    ///
+    /// What a person tapping a machine in the list turns into. There is nothing
+    /// to type: the six digits that come back are what settles who answered.
     RequestPairing {
         transport: u16,
         addr: String,
-        code: String,
     },
     ConfirmPairing {
         accept: bool,
     },
-    ClosePairingWindow,
     SetPeerAddress {
         peer: String,
         transport: u16,
@@ -206,6 +238,9 @@ pub enum FfiEvent {
     Connect {
         peer: String,
     },
+    /// The network changed; try every peer again. See
+    /// [`acrylius_core::vocab::LocalCommand::ReconsiderRoutes`].
+    ReconsiderRoutes,
     Disconnect {
         peer: String,
     },
@@ -314,19 +349,16 @@ impl TryFrom<FfiEvent> for cv::Event {
                     pairing: peer.pairing,
                 },
             },
-            FfiEvent::Tick => Self::Tick,
-            FfiEvent::OpenPairingWindow { code } => Self::Local(L::OpenPairingWindow { code }),
-            FfiEvent::RequestPairing {
-                transport,
-                addr,
-                code,
-            } => Self::Local(L::RequestPairing {
+            FfiEvent::Undiscovered { transport, addr } => Self::Undiscovered {
                 transport: cl::TransportId(transport),
                 addr,
-                code,
+            },
+            FfiEvent::Tick => Self::Tick,
+            FfiEvent::RequestPairing { transport, addr } => Self::Local(L::RequestPairing {
+                transport: cl::TransportId(transport),
+                addr,
             }),
             FfiEvent::ConfirmPairing { accept } => Self::Local(L::ConfirmPairing { accept }),
-            FfiEvent::ClosePairingWindow => Self::Local(L::ClosePairingWindow),
             FfiEvent::SetPeerAddress {
                 peer: p,
                 transport,
@@ -337,6 +369,7 @@ impl TryFrom<FfiEvent> for cv::Event {
                 addr,
             }),
             FfiEvent::Connect { peer: p } => Self::Local(L::Connect { peer: peer(&p)? }),
+            FfiEvent::ReconsiderRoutes => Self::Local(L::ReconsiderRoutes),
             FfiEvent::Disconnect { peer: p } => Self::Local(L::Disconnect { peer: peer(&p)? }),
             FfiEvent::Revoke { peer: p } => Self::Local(L::Revoke { peer: peer(&p)? }),
             FfiEvent::PluginCommand {
@@ -482,10 +515,6 @@ impl From<cv::Effect> for FfiEffect {
 
 #[derive(uniffi::Enum, Clone, Debug)]
 pub enum FfiUiEvent {
-    PairingWindowOpen {
-        code: String,
-        expires_in_ms: u64,
-    },
     PairingSas {
         name: String,
         fingerprint: String,
@@ -495,8 +524,32 @@ pub enum FfiUiEvent {
         peer: String,
         name: String,
     },
+    /// A peer has been forgotten. See [`acrylius_core::vocab::UiEvent::Revoked`].
+    Revoked {
+        peer: String,
+    },
     PairingFailed {
         reason: String,
+    },
+    /// A device nearby that this one is not paired with. See
+    /// [`acrylius_core::vocab::UiEvent::Discovered`].
+    Discovered {
+        fingerprint: String,
+        name: String,
+        addr: String,
+        /// `u16`, like every other transport id across this boundary.
+        ///
+        /// It was widened to `u32` while nothing read it. A tap now pairs over
+        /// whichever transport saw the machine, so this is handed straight back
+        /// as `FfiEvent::RequestPairing`'s `transport` — and a type that did not
+        /// match its only destination is a cast waiting to be written wrong.
+        transport: u16,
+        pairing: bool,
+    },
+    /// A device that was nearby is not any more. See
+    /// [`acrylius_core::vocab::UiEvent::Undiscovered`].
+    Undiscovered {
+        fingerprint: String,
     },
     PeerReachable {
         peer: String,
@@ -512,6 +565,9 @@ pub enum FfiUiEvent {
         body: Vec<u8>,
     },
     Error {
+        /// Which peer this is about, when it is about one. See
+        /// [`acrylius_core::vocab::UiEvent::Error`].
+        peer: Option<String>,
         code: String,
         detail: String,
     },
@@ -520,12 +576,21 @@ pub enum FfiUiEvent {
 impl From<cv::UiEvent> for FfiUiEvent {
     fn from(e: cv::UiEvent) -> Self {
         match e {
-            cv::UiEvent::PairingWindowOpen {
-                code,
-                expires_in_ms,
-            } => Self::PairingWindowOpen {
-                code,
-                expires_in_ms,
+            cv::UiEvent::Discovered {
+                fingerprint,
+                name,
+                addr,
+                transport,
+                pairing,
+            } => Self::Discovered {
+                fingerprint: fingerprint.to_string(),
+                name,
+                addr,
+                transport: transport.0,
+                pairing,
+            },
+            cv::UiEvent::Undiscovered { fingerprint } => Self::Undiscovered {
+                fingerprint: fingerprint.to_string(),
             },
             cv::UiEvent::PairingSas {
                 name,
@@ -539,6 +604,9 @@ impl From<cv::UiEvent> for FfiUiEvent {
             cv::UiEvent::PairingComplete { peer, name } => Self::PairingComplete {
                 peer: peer.to_string(),
                 name,
+            },
+            cv::UiEvent::Revoked { peer } => Self::Revoked {
+                peer: peer.to_string(),
             },
             cv::UiEvent::PairingFailed { reason } => Self::PairingFailed { reason },
             cv::UiEvent::PeerReachable { peer, name } => Self::PeerReachable {
@@ -559,7 +627,8 @@ impl From<cv::UiEvent> for FfiUiEvent {
                 ty,
                 body,
             },
-            cv::UiEvent::Error { code, detail } => Self::Error {
+            cv::UiEvent::Error { peer, code, detail } => Self::Error {
+                peer: peer.map(|p| p.to_string()),
                 code: code.as_str().to_string(),
                 detail,
             },

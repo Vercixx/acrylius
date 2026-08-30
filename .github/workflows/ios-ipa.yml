@@ -1,8 +1,15 @@
 # Builds an unsigned IPA for SideStore to sign on-device with a free Apple ID.
 #
-# On demand and on tags only: macOS runners bill at a 10x multiplier on private
-# repositories. The image is pinned rather than `macos-latest`, so an Xcode bump
-# is a deliberate choice and not a surprise failure.
+# On demand and on tags only. This repository is public, so the minutes are free
+# — but a macOS job is minutes of somebody else's hardware, and a run triggered
+# on every push would be asking to be taken for abuse. Batch the work and
+# dispatch a stage at a time.
+#
+# Both the image and the Xcode inside it are pinned rather than `macos-latest`
+# and a bare `Xcode.app`, so a toolchain bump is a deliberate choice and not a
+# surprise failure. The image carries seven Xcode 26.x versions; naming one is
+# what stops a default change from silently recompiling the app with a different
+# Swift.
 name: ios-ipa
 
 on:
@@ -10,17 +17,31 @@ on:
   push:
     tags: ["v*"]
 
+env:
+  # Outside target/, which Swatinem/rust-cache prunes as its own.
+  XCODEGEN_CACHE: ${{ github.workspace }}/.xcodegen
+  # Xcode derives the compilation cache's location from the DerivedData root,
+  # so `-derivedDataPath build` drags it into the workspace and out again on
+  # the next run. Named outright instead: the cache step, the build and the
+  # check then agree by construction rather than by matching guesses about
+  # where 26.6 would have put it.
+  XCODE_CAS: ${{ github.workspace }}/.xcode-cas
+
 jobs:
   ipa:
-    runs-on: macos-15
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
 
       - name: Select Xcode
         run: |
-          sudo xcode-select -s /Applications/Xcode.app
+          sudo xcode-select -s /Applications/Xcode_26.6.app
           xcodebuild -version
           swift --version
+          # The iOS 26 SDK is what makes the standard controls adopt Liquid
+          # Glass. Say which one built this, so a report about how the app looks
+          # can be tied to a toolchain.
+          xcodebuild -showsdks | grep -i "iphoneos"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -41,17 +62,85 @@ jobs:
           mv ios/Generated/acrylius_ffiFFI.modulemap ios/Generated/module.modulemap
           ls -la ios/Generated
 
+      # Keyed on the pinned commit, so a deliberate XcodeGen bump misses the
+      # cache and rebuilds, and nothing else does.
+      - name: Cache XcodeGen
+        uses: actions/cache@v4
+        with:
+          # Spelled out rather than ${{ env.XCODEGEN_CACHE }}: it must agree
+          # with the env above, and `with:` is the one place a context is worth
+          # not relying on.
+          path: ${{ github.workspace }}/.xcodegen
+          key: xcodegen-${{ runner.os }}-21ac9944b0ab546a07422dbed86f33dd2ebd76f8
+
       - name: Generate the Xcode project
         run: |
-          brew install xcodegen
-          cd ios && xcodegen generate
+          # The same pinned generator scripts/xcodegen-check.sh validates with.
+          # `brew install xcodegen` used to stand here, which is not a version:
+          # it is whatever bottle this image happens to carry.
+          xcodegen="$(./scripts/xcodegen-bin.sh)"
+          "$xcodegen" --version
+          cd ios && "$xcodegen" generate
 
       - name: Show what the project offers
-        run: xcodebuild -project ios/Acrylius.xcodeproj -list
+        run: |
+          xcodebuild -project ios/Acrylius.xcodeproj -list
+          # What Xcode accepted for caching, at the values it will build with.
+          # An unrecognised build setting is not an error — it is carried along
+          # and ignored — so this is the only place a wrong name shows up.
+          #
+          # Every flag the Build step passes is repeated here, -derivedDataPath
+          # included. Reading these settings without it reports the store under
+          # the default DerivedData root and not where this build will keep it,
+          # which is a wrong answer that looks like a right one.
+          xcodebuild -project ios/Acrylius.xcodeproj -scheme Acrylius \
+            -configuration Release -sdk iphoneos -derivedDataPath build \
+            COMPILATION_CACHE_ENABLE_CACHING=YES \
+            COMPILATION_CACHE_CAS_PATH="$XCODE_CAS" -showBuildSettings 2>/dev/null \
+            | grep -iE "COMPILATION_CACHE|COMPILE_CACHE|EXPLICIT_MODULES" \
+            || echo "no compilation-cache settings reported"
+
+      # The only kind of incremental build a fresh runner can actually use.
+      # Xcode 26 keys each compile job by a hash of its inputs — sources,
+      # flags, toolchain — and stores the result in a content-addressed store,
+      # so what carries over is decided by content and not by where the files
+      # came from. Caching DerivedData instead does nothing here: llbuild calls
+      # a file unchanged only if mtime and inode still match, and both are new
+      # for every file actions/checkout writes, so a restored build directory
+      # rebuilds everything and only costs the download.
+      #
+      # Pinned Xcode in the key, next to the Xcode_26.6 selected above. Objects
+      # from another toolchain would never be read — the toolchain is part of
+      # every hash — and this is what stops a bump from dragging them along.
+      #
+      # The run id makes every run save what it restored plus whatever it
+      # compiled that was new; the restore keys walk back to the newest run on
+      # this commit, then this branch. Caches are branch-scoped, so a tag build
+      # sees only the default branch's and should be expected to come up cold.
+      - name: Cache the Xcode compilation cache
+        uses: actions/cache@v4
+        with:
+          # Spelled out rather than ${{ env.XCODE_CAS }}, as with XcodeGen
+          # above: it must agree with the env, and the build setting the Build
+          # step passes, and this is the one place a context is not worth it.
+          path: ${{ github.workspace }}/.xcode-cas
+          key: xcode-cas-${{ runner.os }}-26.6-${{ github.sha }}-${{ github.run_id }}
+          restore-keys: |
+            xcode-cas-${{ runner.os }}-26.6-${{ github.sha }}-
+            xcode-cas-${{ runner.os }}-26.6-
 
       - name: Build
         run: |
           set -o pipefail
+          # Stamped into the app so a screen can say which build it is. The
+          # question this answers — "is the fix I am looking for actually in
+          # the thing on my phone?" — otherwise costs a reinstall, and a
+          # reinstall does not answer it either: installing the same IPA twice
+          # looks exactly like installing a new one.
+          export ACR_BUILD_COMMIT="${{ github.sha }}"
+          ACR_BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          export ACR_BUILD_DATE
+          echo "commit $ACR_BUILD_COMMIT built at $ACR_BUILD_DATE"
           # xcbeautify only prettifies. Piping through it unconditionally means
           # that if it is ever missing from the image, `command not found`
           # becomes the failure and the real compiler output is never shown.
@@ -63,6 +152,10 @@ jobs:
           xcodebuild -project ios/Acrylius.xcodeproj -scheme Acrylius \
             -configuration Release -sdk iphoneos -derivedDataPath build \
             ONLY_ACTIVE_ARCH=NO \
+            COMPILATION_CACHE_ENABLE_CACHING=YES \
+            COMPILATION_CACHE_CAS_PATH="$XCODE_CAS" \
+            ACR_BUILD_COMMIT="$ACR_BUILD_COMMIT" \
+            ACR_BUILD_DATE="$ACR_BUILD_DATE" \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
             build 2>&1 | tee raw.log | "${pretty[@]}" || {
               echo "--- errors ---"
@@ -71,6 +164,53 @@ jobs:
               tail -200 raw.log
               exit 1
             }
+
+      - name: Check the build stamp landed
+        run: |
+          set -euo pipefail
+          app="$(ls -d build/Build/Products/Release-iphoneos/*.app | head -n1)"
+          plist="$app/Info.plist"
+          got_commit="$(/usr/libexec/PlistBuddy -c 'Print :ACRBuildCommit' "$plist" 2>/dev/null || true)"
+          got_date="$(/usr/libexec/PlistBuddy -c 'Print :ACRBuildDate' "$plist" 2>/dev/null || true)"
+          echo "commit: ${got_commit:-<empty>}"
+          echo "date:   ${got_date:-<empty>}"
+          # Checked rather than assumed. Xcode carries an unrecognised build
+          # setting along and ignores it — the same trap the compilation-cache
+          # step above is written around — so a typo here would ship an app
+          # whose only job was to say which build it is, saying nothing.
+          if [ "$got_commit" != "${{ github.sha }}" ]; then
+            echo "::error::ACRBuildCommit is '${got_commit}', expected ${{ github.sha }}"
+            exit 1
+          fi
+          case "$got_date" in
+            ????-??-??T??:??:??Z) ;;
+            *) echo "::error::ACRBuildDate is not an ISO 8601 instant: '${got_date}'"; exit 1 ;;
+          esac
+
+      - name: Say whether the cache filled
+        if: always()
+        run: |
+          # Warns, never fails: a cold cache still produces a correct IPA, and
+          # failing the build over it would trade a shipped artifact for a
+          # performance note. It is here because the alternative is silence —
+          # a setting Xcode ignored and a project too small to benefit look
+          # identical from the outside, and both look like success.
+          if [ -d "$XCODE_CAS" ]; then
+            files="$(find "$XCODE_CAS" -type f | wc -l | tr -d ' ')"
+            echo "$(du -sh "$XCODE_CAS" | cut -f1) across $files files"
+          else
+            echo "::warning::nothing at $XCODE_CAS — COMPILATION_CACHE_CAS_PATH was not honoured"
+            # Name the store that does exist. The first version of this step
+            # reported only the directory it expected, which said a cache had
+            # not been written when one had, somewhere else entirely.
+            for other in build/CompilationCache.noindex \
+                         "$HOME/Library/Developer/Xcode/DerivedData/CompilationCache.noindex" \
+                         "$HOME/Library/Developer/Xcode/CompilationCache.noindex"; do
+              if [ -d "$other" ]; then
+                echo "  a store exists at $other — point the cache step there"
+              fi
+            done
+          fi
 
       - name: Ad-hoc sign
         run: |

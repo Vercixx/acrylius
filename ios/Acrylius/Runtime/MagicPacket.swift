@@ -33,6 +33,13 @@ private final class Once: @unchecked Sendable {
 }
 
 public enum MagicPacketSender {
+    /// How long one destination may take before it is given up on.
+    ///
+    /// Per destination, and there are at most two — the last known address and
+    /// the broadcast — so the whole call is bounded by twice this. It has to
+    /// stay well inside the moment a person expects a button press to finish.
+    static let sendTimeout: TimeInterval = 2
+
     /// Send to every destination in order. Returns true if any send succeeded.
     ///
     /// Every destination is tried even after one succeeds, because a send
@@ -61,6 +68,23 @@ public enum MagicPacketSender {
                 connection.cancel()
                 continuation.resume(returning: ok)
             }
+            // Bounded, because nothing else here is.
+            //
+            // `stateUpdateHandler` only resolves this on `.ready`, `.failed`
+            // or `.cancelled`, and a connection can sit in `.waiting`
+            // indefinitely — which is exactly what happens where there is no
+            // Local Network permission to send with. The continuation was then
+            // never resumed, so `perform()` never returned, so the Control
+            // Centre button stayed lit with no dialog and no way to clear it
+            // but pressing it again.
+            //
+            // Failing is the right answer as well as a bounded one: a datagram
+            // that has not left in two seconds is not going to, and the caller
+            // confirms a wake by watching for the machine to come back rather
+            // than by believing this.
+            let timeout = DispatchWorkItem { finish(false) }
+            DispatchQueue.global().asyncAfter(deadline: .now() + Self.sendTimeout, execute: timeout)
+
             connection.stateUpdateHandler = { state in
                 switch state {
                 case .ready:

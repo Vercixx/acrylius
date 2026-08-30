@@ -46,26 +46,6 @@ fn base64url_vectors() {
 }
 
 #[test]
-fn pairing_vectors() {
-    let norm = pairing::normalize("ABCD1234").unwrap();
-    assert_eq!(norm, "ABCD1234");
-    // Lower case and the confusable four fold onto the same code.
-    assert_eq!(pairing::normalize("abcd1234").unwrap(), norm);
-    // The four confusable characters fold: I and L onto 1, O onto 0, U onto V.
-    // Separators are stripped, so a code can be written out in groups.
-    assert_eq!(pairing::normalize("IOIO-UUUU").unwrap(), "1010VVVV");
-    assert_eq!(pairing::normalize("l0l0 uuuu").unwrap(), "1010VVVV");
-
-    assert_eq!(
-        b64::encode(&pairing::psk(&norm)),
-        "dyRc5CXtth81rAlg0fgf1GXo8Nx8JDlXuuHcLNJnWv8"
-    );
-
-    assert_eq!(pairing::encode(0), "00000000");
-    assert_eq!(pairing::encode(0xFF_FFFF_FFFF), "ZZZZZZZZ");
-}
-
-#[test]
 fn derivation_vectors() {
     let hh = b"acrylius test handshake hash";
     assert_eq!(pairing::sas(hh), "605 480");

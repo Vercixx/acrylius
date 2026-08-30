@@ -47,6 +47,42 @@ pub const CONTROL_REPLY_BUDGET_MS: u64 = CONTROL_CONFIRM_MS + crate::plugin::REP
 // `plugins::session` for the bug it exists to prevent.
 const _: () = assert!(CONTROL_REPLY_BUDGET_MS > CONTROL_CONFIRM_MS);
 
+/// How often a client re-reads a peer's media while it is watching something
+/// play.
+///
+/// A position is reported and never counted forward, and a peer does not
+/// broadcast a state for a position change alone — otherwise anything playing
+/// would send a message a second, forever, to every device connected. So the
+/// side that wants a moving clock asks for it, and the interval is the whole of
+/// how live it feels.
+///
+/// Here rather than in the view that sleeps for it, next to the budgets it has
+/// to stay sensible against: this must comfortably exceed
+/// [`CONTROL_REPLY_BUDGET_MS`]'s worst case being *shorter* than it, or a poll
+/// lands on top of every command and the two race to write the same state.
+pub const WATCH_INTERVAL_MS: u64 = 700;
+
+/// The same, over a link where a round trip is expensive.
+///
+/// Bluetooth carries a couple of hundred bytes per fragment and a query and its
+/// answer are several. Polling it three times a fast link's rate would spend
+/// the transport that exists so the phone keeps working when Wi-Fi does not.
+pub const WATCH_INTERVAL_SLOW_MS: u64 = 2_000;
+
+/// How often to re-read when nothing is playing.
+///
+/// A paused track's position does not move, so the only thing a poll can
+/// discover is that somebody started something — which is worth noticing, and
+/// not worth noticing quickly.
+pub const IDLE_INTERVAL_MS: u64 = 5_000;
+
+// A poll that can arrive while a command is still being confirmed makes two
+// writers of one reading. The watch interval is deliberately shorter than the
+// host's confirm window, so this asserts the relationship that actually
+// matters: the *idle* rate is the one that must not sit inside it.
+const _: () = assert!(IDLE_INTERVAL_MS > CONTROL_CONFIRM_MS);
+const _: () = assert!(WATCH_INTERVAL_SLOW_MS > WATCH_INTERVAL_MS);
+
 /// The values [`MediaPlayer::status`] may take. A host lower-cases whatever its
 /// own player vocabulary is down to one of these.
 pub const PLAYING: &str = "playing";

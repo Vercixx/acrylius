@@ -15,7 +15,11 @@
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u8)]
 pub enum FrameKind {
-    /// A message of an `XXpsk3` pairing handshake.
+    /// A message of an `XX` pairing handshake.
+    ///
+    /// Anybody may send one: pairing has no pre-shared key, so this frame *is*
+    /// the request to pair. What bounds it is the core's admission policy, not
+    /// anything on the wire.
     PairHandshake = 1,
     /// A message of an `IKpsk2` session handshake.
     SessionHandshake = 2,
