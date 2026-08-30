@@ -25,7 +25,9 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, mpsc};
 
 // One definition, shared with the CLI. See `crate::ipc`.
-pub use acryliusd::ipc::{Command, Device, Nearby, Player, Report, Request, Response, Status};
+pub use acryliusd::ipc::{
+    Command, Confirmation, Device, Nearby, Player, Report, Request, Response, Status,
+};
 
 /// A live control socket. Unlinked on drop, but only if we are the instance
 /// that bound it.
@@ -185,6 +187,7 @@ pub struct Handles {
     pub status: std::sync::Arc<tokio::sync::Mutex<Option<Status>>>,
     pub devices: std::sync::Arc<tokio::sync::Mutex<Vec<Device>>>,
     pub nearby: std::sync::Arc<tokio::sync::Mutex<Vec<Nearby>>>,
+    pub pending_pair: std::sync::Arc<tokio::sync::Mutex<Option<Confirmation>>>,
 }
 
 pub async fn serve(path: PathBuf, handles: Handles) -> anyhow::Result<ControlSocket> {
@@ -227,6 +230,7 @@ pub async fn serve(path: PathBuf, handles: Handles) -> anyhow::Result<ControlSoc
                 status: handles.status.clone(),
                 devices: handles.devices.clone(),
                 nearby: handles.nearby.clone(),
+                pending_pair: handles.pending_pair.clone(),
             };
             tokio::spawn(async move {
                 if let Err(e) = handle_conn(stream, h).await {
@@ -303,6 +307,23 @@ async fn handle_conn(stream: UnixStream, h: Handles) -> anyhow::Result<()> {
             // over SSH, where there is no notification daemon to press.
             Request::Pair => {
                 let mut rx = h.ui.subscribe();
+                // Anything already waiting, before anything new. Subscribing
+                // only ever showed what happened *next*, so a pairing that
+                // completed a moment ago — while no notification daemon was
+                // running, or before anyone thought to run this — was
+                // invisible, and answering it meant knowing to start this
+                // first. It then lapsed in silence two minutes later.
+                if let Some(p) = h.pending_pair.lock().await.clone() {
+                    write(
+                        &mut wr,
+                        &Response::Confirm {
+                            name: p.name,
+                            fingerprint: p.fingerprint,
+                            sas: p.sas,
+                        },
+                    )
+                    .await?;
+                }
                 stream_pairing(&mut wr, &mut rx).await?;
             }
             Request::Approve => {

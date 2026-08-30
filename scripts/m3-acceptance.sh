@@ -47,7 +47,14 @@ fi
 cleanup
 for i in $(seq 1 50); do mine >/dev/null || break; sleep 0.1; done
 rm -rf $D; mkdir -p $D/a $D/b $D/c
-export RUST_LOG=acryliusd=warn,acrylius_rt=warn,acrylius_linux=warn
+# `acryliusd` at info, because the journal is the only place a pairing shows up
+# on a machine with no notification daemon, and that is checked below. The noisy
+# ones stay at warn; all of it goes to files either way.
+export RUST_LOG=acryliusd=info,acrylius_rt=warn,acrylius_linux=warn
+# Every daemon log here goes to a file, where colour is escape codes sitting
+# between a field name and its value — which greps below could not match, and a
+# person reading the file to find out why cannot either.
+export NO_COLOR=1
 
 for who in a b c; do
   cat > $D/$who/config.toml <<CFG
@@ -105,6 +112,21 @@ SAS_A=$(digits a); SAS_B=$(digits b)
 [ -n "$SAS_A" ]; check $? "a tap alone put digits on the asking end"
 [ -n "$SAS_B" ]; check $? "and on the answering end, which armed nothing"
 [ -n "$SAS_A" ] && [ "$SAS_A" = "$SAS_B" ]; check $? "the same digits on both ends ($SAS_A)"
+
+echo
+echo "### answering a pairing nobody was watching for"
+# The case a desktop with no notification daemon lands in. Subscribing only
+# ever showed what happened *next*, so a pairing that completed before anyone
+# ran this was invisible and lapsed in silence two minutes later — you had to
+# know to start `acryliusctl pair` before touching the phone.
+grep -q "a device asked to pair" $D/b.log
+check $? "the daemon says so in its log, digits included, with no UI at all"
+grep -q "sas=" $D/b.log
+check $? "and the digits are in there, not just the fact of it"
+rm -f $D/b2.pair
+timeout 5 "$BIN/acryliusctl" --state $D/b pair > $D/b2.pair 2>&1
+grep -q "It should be showing" $D/b2.pair
+check $? "a pair started after the handshake still shows what is waiting"
 
 echo
 echo "### a machine mid-pairing says so, and refuses the next one"

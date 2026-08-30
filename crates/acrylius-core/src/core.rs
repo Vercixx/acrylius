@@ -174,6 +174,14 @@ struct PairingWindow {
     awaiting: Option<AwaitingConfirm>,
 }
 
+/// Somebody waiting on a person to compare six digits.
+#[derive(Clone, Debug)]
+pub struct PendingPairing<'a> {
+    pub name: &'a str,
+    pub fingerprint: Fingerprint,
+    pub sas: &'a str,
+}
+
 /// A machine on the network that this one is not paired with.
 ///
 /// Borrowed from the core rather than cloned: this is read to answer a question
@@ -335,6 +343,24 @@ impl Core {
             .awaiting
             .as_ref()
             .map(|a| a.sas.as_str())
+    }
+
+    /// The whole question a person is being asked, if one is outstanding.
+    ///
+    /// Everything [`UiEvent::PairingSas`] carries, readable at any moment
+    /// rather than only as it happens. A UI that was not running when the
+    /// handshake completed — a notification daemon that was not up, an
+    /// `acryliusctl pair` started afterwards — has no other way to find out
+    /// that somebody is waiting on it, and the alternative is a pairing that
+    /// lapses in silence while its digits sit in a process nobody is watching.
+    #[must_use]
+    pub fn pending_pairing(&self) -> Option<PendingPairing<'_>> {
+        let a = self.pairing.as_ref()?.awaiting.as_ref()?;
+        Some(PendingPairing {
+            name: &a.record.name,
+            fingerprint: a.record.fingerprint()?,
+            sas: &a.sas,
+        })
     }
 
     /// Whether a pairing is in flight on this machine right now.

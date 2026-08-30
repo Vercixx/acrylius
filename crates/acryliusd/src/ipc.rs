@@ -106,6 +106,15 @@ pub struct Device {
     pub reachable: bool,
 }
 
+/// A pairing waiting on somebody at this machine.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub struct Confirmation {
+    pub name: String,
+    pub fingerprint: String,
+    pub sas: String,
+}
+
 /// A machine on this network that this one is not paired with.
 ///
 /// No device id: that is derived from a static key, and nothing has exchanged

@@ -493,6 +493,7 @@ async fn main() -> anyhow::Result<()> {
     let status = Arc::new(Mutex::new(Some(status)));
     let devices = Arc::new(Mutex::new(snapshot_devices(&core)));
     let nearby = Arc::new(Mutex::new(snapshot_nearby(&core)));
+    let pending_pair: Arc<Mutex<Option<control::Confirmation>>> = Arc::new(Mutex::new(None));
 
     let mut rt = Runtime::new(core, effector, Box::new(store));
 
@@ -502,6 +503,7 @@ async fn main() -> anyhow::Result<()> {
     {
         let devices = devices.clone();
         let nearby = nearby.clone();
+        let pending_pair = pending_pair.clone();
         let status = status.clone();
         rt.observe(move |core| {
             if let Ok(mut d) = devices.try_lock() {
@@ -509,6 +511,13 @@ async fn main() -> anyhow::Result<()> {
             }
             if let Ok(mut n) = nearby.try_lock() {
                 *n = snapshot_nearby(core);
+            }
+            if let Ok(mut p) = pending_pair.try_lock() {
+                *p = core.pending_pairing().map(|q| control::Confirmation {
+                    name: q.name.to_string(),
+                    fingerprint: q.fingerprint.to_string(),
+                    sas: q.sas.to_string(),
+                });
             }
             if let Ok(mut s) = status.try_lock()
                 && let Some(s) = s.as_mut()
@@ -596,7 +605,17 @@ async fn main() -> anyhow::Result<()> {
                         fingerprint,
                         sas,
                     } => {
-                        tracing::info!(%name, %fingerprint, "a device asked to pair");
+                        // The digits, not just the fact. This is the last
+                        // resort on a machine with no notification daemon at
+                        // all, where the journal is the only surface left — and
+                        // `docs/M3-DEVICE-TESTS.md` already tells anyone
+                        // testing to keep `journalctl -f` open. They are not a
+                        // secret: both screens show them, and they authenticate
+                        // by being compared rather than by being known.
+                        tracing::info!(
+                            %name, %fingerprint, %sas,
+                            "a device asked to pair; run `acryliusctl pair` to answer"
+                        );
                         prompter.ask_pair(name, &fingerprint.to_string(), sas).await;
                     }
                     // Settled, one way or another — including by somebody using
@@ -679,6 +698,7 @@ async fn main() -> anyhow::Result<()> {
             status,
             devices,
             nearby,
+            pending_pair,
         },
     )
     .await?;

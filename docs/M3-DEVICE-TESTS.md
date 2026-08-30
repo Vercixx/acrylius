@@ -46,7 +46,7 @@ none of it was caught by any gate.
       a radio that cannot carry a file. And the Bonjour browse was created once
       and never replaced, so a browse that failed during the outage reported
       nothing ever again.)*
-- [X] (no, BLE entry is still in the list after suspending PC + bonjour entry also doesn't disappear even after force-quit) **A computer switched off leaves "On this network"** within a few
+- [V] (no, BLE entry is still in the list after suspending PC + bonjour entry also doesn't disappear even after force-quit) **A computer switched off leaves "On this network"** within a few
       seconds, rather than staying on offer until the app is restarted.
       *(Sightings were one-way: nothing was ever un-discovered.)*
 - [V] **Actions can be felt.** A control that lands and one that is refused
@@ -61,30 +61,30 @@ extension, and BLE.
 Reported on a device on 2026-08-29 and fixed since. The first three were one
 bug wearing three hats.
 
-- [ ] **A computer that goes away leaves "On this network"**, and a suspended
+- [V] **A computer that goes away leaves "On this network"**, and a suspended
       one goes within a few seconds of its Bluetooth link dropping. *(The core
       only drops a machine once **every** transport has withdrawn it, and
       `BLETransport` never withdrew anything — `NWTransport` was the only place
       in the app that did. One Bluetooth sighting pinned every entry forever,
       however correctly Bonjour withdrew its own.)*
-- [ ] **A machine seen over both radios lists its Wi-Fi address**, not its
+- [V] **A machine seen over both radios lists its Wi-Fi address**, not its
       `ble:` one, and tapping it pairs over Wi-Fi. *(The core announced whichever
       transport spoke most recently; Bluetooth repeats and Bonjour does not, so
       the slower radio quietly replaced a working address.)*
-- [ ] **Forget a computer, and it reappears under "On this network"** within a
+- [V] **Forget a computer, and it reappears under "On this network"** within a
       few seconds — no force-quit. Then pair with it again. *(Discovery resolves
       once and then stays quiet, so nothing ever mentioned the machine again.
       The core knew where it was and had no name to offer it under.)*
-- [ ] **"Forget this device" inside a device's own screen actually forgets it**,
+- [V] **"Forget this device" inside a device's own screen actually forgets it**,
       including a device that is **not connected** — that is the case that
       failed. *(Asking to revoke is one-way, and the app read the peer list back
       before the core had removed anything. It worked whenever the device
       happened to be connected, because closing its link announced
       `peerUnreachable` and that refreshed.)*
-- [ ] `acryliusctl device nearby` lists machines to pair with, and each address
+- [?] (returns "nothing nearby that is not already paired" because iOS app does not advertise. no second desktop to test against) `acryliusctl device nearby` lists machines to pair with, and each address
       it prints works with `acryliusctl pair with`. A paired machine is not in
       the list.
-- [ ] With `hostnamectl set-hostname --pretty "Кухня"` on the desktop, the phone
+- [V] With `hostnamectl set-hostname --pretty "Кухня"` on the desktop, the phone
       shows that name. *(Only the static hostname was read, which is a DNS label
       and conventionally cannot hold spaces or non-Latin characters.)*
 
@@ -196,9 +196,9 @@ Mostly covered by the M0/M1 acceptance runs, which pass. What they do not cover:
 - [V] `acryliusctl --help` reads as nine groups, and each group's `--help`
       lists its verbs.
 - [V] `acryliusctl --version` prints a version. *(It used to fail.)*
-- [X] (cannot test, iOS app doesn't support media control from PC side) `acryliusctl play status <dev> --json | jq .` parses, and the numbers
+- [?] (cannot test, iOS app doesn't support media control from PC side) `acryliusctl play status <dev> --json | jq .` parses, and the numbers
       agree with the table from the same command without `--json`.
-- [X] (cannot test, no second desktop) **The correlation fix, with two computers paired.** Play something on
+- [?] (cannot test, no second desktop) **The correlation fix, with two computers paired.** Play something on
       both, then run `acryliusctl play status A` repeatedly. Every answer must
       be A's. Before M3 this returned B's now-playing routinely, because the
       media plugin broadcasts state every two seconds. *This is the one item
@@ -214,9 +214,11 @@ typed and nothing is scanned. The code, the QR and the scanner are all gone.
 Most of this is automated by `./scripts/m3-acceptance.sh`; run that first, and
 run it with `ACRYLIUS_M3_PHONE=1` to print the phone half as a checklist.
 
-- [!] (fails to discover after forgetting PC, force-quit required) On the phone: Pair shows an **On this network** section listing the
+- [ ] On the phone: Pair shows an **On this network** section listing the
       desktop, with its name and address. There is **no** code field and **no**
-      scan button anywhere on the screen.
+      scan button anywhere on the screen. *(The "fails to discover after
+      forgetting, force-quit required" note on this line was the second-pass
+      bug above, and is fixed.)*
 - [V] Tapping the row pairs outright rather than filling in a text field.
 - [V] Six digits appear on the phone **and** as a desktop notification, and
       they match.
@@ -232,12 +234,18 @@ run it with `ACRYLIUS_M3_PHONE=1` to print the phone half as a checklist.
 - [V] With `[share] enabled = false` in the desktop config, the pairing
       notification still appears. *It used to be built only alongside file
       sharing, so turning sharing off silently cost every desktop prompt.*
-- [!] (requires running it prior asking for pairing on iOS, user who doesn't know it will be confused) Kill the notification daemon, then pair: the desktop degrades to a
-      notification-free flow that `acryliusctl pair` can still answer, rather
-      than losing the pairing.
+- [ ] Kill the notification daemon, then pair from the phone **without**
+      starting anything on the desktop first. Then run `acryliusctl pair`: it
+      shows the digits that are already waiting, and `pair approve` completes
+      the pairing. *(It used to show only what happened next, so a pairing that
+      completed before you ran it was invisible and lapsed in silence two
+      minutes later — you had to know to start it beforehand.)*
+- [ ] The same pairing appears in `journalctl --user -u acryliusd -f`, digits
+      included. *That is the only surface left when there is no notification
+      daemon at all.*
 - [V] Over SSH with no desktop at all, `acryliusctl pair` waits, prints the
       digits when a phone asks, and `pair approve` answers it.
-- [X] (`acryliusd` seems to use static hostname, not pretty hostname (see the output of `hostnamectl`), which restricts usage of non-Latin characters and spaces. could not reproduce the scenario) A device name with punctuation or non-Latin characters — rename the
+- [V] (`acryliusd` seems to use static hostname, not pretty hostname (see the output of `hostnamectl`), which restricts usage of non-Latin characters and spaces. could not reproduce the scenario) A device name with punctuation or non-Latin characters — rename the
       desktop to something like `Vercixx's PC` or `кухня` — renders correctly in
       the notification summary and in the phone's list.
 
