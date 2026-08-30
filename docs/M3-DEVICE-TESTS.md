@@ -21,7 +21,15 @@ none of it was caught by any gate.
       cancelling the drag before it ended; and its binding read a value
       captured once per rebuild, so it answered the same number however far the
       knob went.)*
-- [X] **The clock is not a second behind** — it advances four times a second.
+- [ ] **The clock is not behind** the desktop's own player. Worth checking over
+      **Bluetooth** especially, which is where it was reported: a reading was
+      stamped when it *arrived* rather than when the desktop took it, so the
+      clock sat one network leg behind for as long as a track played and was
+      pulled backwards again on every poll. Now placed halfway back down the
+      round trip.
+      *(The old wording promised it "advances four times a second". The slider
+      does; the `m:ss` text cannot, and never could — it has one digit per
+      second to move.)*
 - [V] **Swipe a device, tap Forget: the dialog stays** until answered, and
       answering it actually forgets. *(Present since M1. The dialog was
       attached to the row the swipe was removing, so it went with it.)*

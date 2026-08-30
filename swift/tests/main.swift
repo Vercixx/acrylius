@@ -374,6 +374,29 @@ check(await diag.trouble == nil,
 check(await diag.notes.count == 1,
       "clearing leaves the record of what happened rather than a second entry")
 
+// --- when was that reading actually taken ----------------------------------
+// The desktop looks at the player when the query reaches it, so a reading is
+// already one leg of the round trip old when it lands. Stamping arrival put the
+// clock exactly that far behind for as long as a track played — invisible on
+// Wi-Fi, and "a second behind" over Bluetooth, where a round trip is several
+// fragments each way.
+let sent = Date(timeIntervalSince1970: 1_000)
+let arrived = sent.addingTimeInterval(0.8)
+check(PeerCatalog.measuredAt(sent: sent, arrived: arrived) == sent.addingTimeInterval(0.4),
+      "a reading is placed halfway back down its round trip")
+check(PeerCatalog.measuredAt(sent: nil, arrived: arrived) == arrived,
+      "with nothing to measure against, arrival is the best guess there is")
+check(PeerCatalog.measuredAt(sent: arrived, arrived: sent) == sent,
+      "a reply that predates its query is not a round trip")
+check(PeerCatalog.measuredAt(sent: sent, arrived: sent.addingTimeInterval(60)) ==
+        sent.addingTimeInterval(60),
+      "and neither is one a minute late, which halved would run the clock fast")
+
+// End to end: the estimate must not sit behind where the track really is.
+var timed = PeerCatalog()
+timed.noteMediaQuery(for: "pc", at: sent)
+check(timed["pc"].mediaQuerySentAt == sent, "the query's departure is noted")
+
 // --- which build is this ---------------------------------------------------
 // The whole point of the stamp is to be trustworthy: a build that misreports
 // its commit is worse than one that says nothing, because it ends the search

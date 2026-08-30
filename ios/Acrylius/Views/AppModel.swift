@@ -375,6 +375,10 @@ final class AppModel {
     }
 
     func refreshMedia(_ peer: FfiPeer) async {
+        // Noted before sending, so the reply can be placed halfway back down
+        // the round trip rather than at the moment it arrived. See
+        // `PeerCatalog.measuredAt`.
+        catalog.noteMediaQuery(for: peer.deviceId)
         await send(peer, cap: capMedia(), ty: "query", body: Data())
     }
 
