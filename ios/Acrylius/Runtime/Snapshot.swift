@@ -1,15 +1,8 @@
 //
-//  What the app leaves behind for the widget to draw.
-//
-//  A widget cannot open a session. It has no Local Network permission of its
-//  own, it gets a fraction of a second of runtime, and the daemon cannot reach
-//  a phone that is not running the app anyway. So it does not ask anything: it
-//  renders what the app saw last, and says when that was.
-//
-//  This is not protocol and deliberately does not go through the FFI. Nothing
-//  here crosses a network or is read by anything but this app's own processes,
-//  so it is plain `Codable` and may change shape whenever it likes — a decode
-//  that fails is one stale render, not a compatibility break.
+//  What the app leaves behind for the widget to draw. A widget can't open a
+//  session (no Local Network permission, a fraction of a second of runtime),
+//  so it renders what the app saw last. Plain `Codable`, not FFI protocol —
+//  a decode failure is just a stale render.
 //
 
 import Foundation
@@ -18,9 +11,8 @@ public struct PeerSnapshot: Codable, Equatable, Sendable {
     public var deviceId: String
     public var name: String
     public var platform: String
-    /// When this peer was last actually reachable. Nil means not since the app
-    /// started. A widget shows this rather than a live dot, because "connected"
-    /// on a screen the app is not behind is always a lie.
+    /// When this peer was last actually reachable, or nil since the app
+    /// started. Shown instead of a live dot, since "connected" would be a lie.
     public var lastSeen: Date?
     /// Nil when the peer has never described a desktop session.
     public var locked: Bool?
@@ -63,11 +55,8 @@ public enum SnapshotStore {
         SharedContainer.base?.appendingPathComponent("snapshot.json")
     }
 
-    /// Keeps `lastSeen` from the snapshot already on disk.
-    ///
-    /// The app only knows a peer is reachable while it is; the moment it is not,
-    /// the interesting fact is when it stopped, and the running app is the only
-    /// thing that ever knew.
+    /// Keeps `lastSeen` from the snapshot already on disk — once a peer is
+    /// gone, the running app is the only thing that ever knew when.
     public static func save(peers: [PeerSnapshot]) {
         guard let url else { return }
         let previous = load()?.peers.reduce(into: [String: Date]()) { seen, p in

@@ -1,13 +1,8 @@
 //! Running one of a fixed set of commands.
 //!
-//! Nothing a peer sends reaches a shell, an argument, or a path. A peer picks an
-//! id from a list this machine published; everything about what that id means
-//! lives in this machine's own configuration.
-//!
-//! The runner adds three limits that exist because a command someone triggers
-//! from a phone is a command nobody is watching: an absolute path so `PATH`
-//! cannot be redirected, a timeout so a hung process does not accumulate, and an
-//! output cap so a chatty one cannot exhaust memory.
+//! A peer only ever picks an id from a published list; nothing it sends reaches
+//! a shell, argument, or path. Each command needs an absolute path, a timeout,
+//! and an output cap.
 
 use std::collections::BTreeMap;
 use std::process::Stdio;
@@ -24,8 +19,7 @@ pub const DEFAULT_OUTPUT_CAP: usize = 64 * 1024;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CommandSpec {
     pub name: String,
-    /// Absolute path. A bare name would be resolved through `PATH`, which a
-    /// user's shell configuration can change.
+    /// Absolute path; a bare name would resolve through a user's `PATH`.
     pub program: String,
     #[serde(default)]
     pub args: Vec<String>,
@@ -46,9 +40,7 @@ impl CommandCatalog {
         Self { entries }
     }
 
-    /// What to publish to peers. Ids and names only: a peer never learns what a
-    /// command actually runs, because it has no use for that and no business
-    /// with it.
+    /// What to publish to peers: ids and names only, never what a command runs.
     #[must_use]
     pub fn manifest(&self) -> Vec<CommandEntry> {
         self.entries
@@ -71,8 +63,7 @@ impl CommandCatalog {
         self.entries.is_empty()
     }
 
-    /// Reject a configuration that cannot be run safely, at load time rather
-    /// than at the moment someone tries to use it from a phone.
+    /// Reject a configuration that can't run safely, before it's used from a phone.
     pub fn validate(&self) -> Result<(), String> {
         for (id, spec) in &self.entries {
             if !spec.program.starts_with('/') {
@@ -89,11 +80,8 @@ impl CommandCatalog {
     }
 }
 
-/// Read a pipe to EOF, reporting whether it carried more than `cap`.
-///
-/// Nothing is stored. The bytes are not part of the answer — `Exited` says what
-/// the exit code was and whether there was more to say — but they still have to
-/// be taken off the pipe, or the process on the other end never finishes.
+/// Read a pipe to EOF, reporting whether it carried more than `cap`. Nothing is
+/// kept; the pipe must still be drained or the process cannot finish.
 async fn drain<R: tokio::io::AsyncRead + Unpin>(pipe: Option<R>, cap: usize) -> bool {
     let Some(mut pipe) = pipe else { return false };
     let mut buf = vec![0u8; 8192];
@@ -108,8 +96,7 @@ async fn drain<R: tokio::io::AsyncRead + Unpin>(pipe: Option<R>, cap: usize) -> 
 }
 
 pub async fn run(spec: &CommandSpec, run_id: u32) -> anyhow::Result<Exited> {
-    // argv, never a shell string. There is no interpolation anywhere in this
-    // path, so there is nothing to quote and nothing to escape.
+    // argv, never a shell string; nothing to quote or escape.
     let mut child = tokio::process::Command::new(&spec.program)
         .args(&spec.args)
         .stdin(Stdio::null())
@@ -124,26 +111,11 @@ pub async fn run(spec: &CommandSpec, run_id: u32) -> anyhow::Result<Exited> {
         .timeout_secs
         .map_or(DEFAULT_TIMEOUT, Duration::from_secs);
 
-    // Draining and waiting go under ONE timeout, together.
-    //
-    // Reading to EOF first and only then waiting looks equivalent and is not: a
-    // process that never writes and never exits holds the read open for as long
-    // as it lives, so the timeout below would not be reached until the command
-    // had already finished. Everything that can block belongs inside.
+    // Draining and waiting share one timeout. Waiting only after EOF would let
+    // a silent, hung process block here forever before the timeout ever fires.
     let outcome = tokio::time::timeout(timeout, async {
-        // Both pipes, together, and each to the very end.
-        //
-        // stderr was piped and never read. A pipe holds about a buffer's worth
-        // and then blocks the writer, so any command chatty enough on stderr
-        // stopped dead — and because it never exited, stdout never reached EOF
-        // either. Both drains sat there until the timeout killed a process that
-        // had done its work and was only trying to talk. Every such command was
-        // reported as having timed out, however fast it really was.
-        //
-        // Reading past the cap rather than breaking out is the same rule said
-        // again: a reader that stops reading is a writer that stops running.
-        // Only what is *kept* is capped, and nothing is kept — `Exited` carries
-        // an exit code and whether there was more, never the bytes.
+        // Both pipes must be drained fully and concurrently: an unread pipe
+        // fills its buffer and blocks the process, so it can never exit.
         let (out_more, err_more) = tokio::join!(
             drain(stdout, DEFAULT_OUTPUT_CAP),
             drain(stderr, DEFAULT_OUTPUT_CAP)
@@ -160,11 +132,8 @@ pub async fn run(spec: &CommandSpec, run_id: u32) -> anyhow::Result<Exited> {
             truncated,
         }),
         Err(_) => {
-            // Kill rather than leave it. Nobody is watching this process, and a
-            // stuck one would sit there until the daemon restarts.
-            //
-            // `child` was moved into the future above, which has now been
-            // dropped, and `kill_on_drop` means the drop did the killing.
+            // `child` was dropped along with the timed-out future above;
+            // `kill_on_drop` did the actual killing.
             tracing::warn!(program = %spec.program, ?timeout, "command timed out and was killed");
             Ok(Exited {
                 run_id,
@@ -212,17 +181,12 @@ mod tests {
         s.timeout_secs = Some(20);
         let e = run(&s, 7).await.expect("the command runs");
         assert_eq!(e.run_id, 7);
-        // Nobody read stderr, so the pipe filled and the command stopped dead
-        // on a write. It never exited, so stdout never reached EOF either, and
-        // the timeout killed a process that had already done its work. The code
-        // came back -1 and the phone was told the command had hung.
         assert_eq!(e.code, 0, "it exited on its own rather than being killed");
         assert!(e.truncated, "and it did have more to say than we keep");
     }
 
     #[test]
     fn a_relative_program_is_refused_at_load_time() {
-        // Better here than at the moment somebody taps a button on a phone.
         let c = catalog(&[("x", spec("true"))]);
         assert!(c.validate().is_err());
     }

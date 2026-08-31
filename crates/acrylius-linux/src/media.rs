@@ -1,14 +1,7 @@
 //! Media control through MPRIS.
 //!
-//! Every player worth controlling on Linux speaks `org.mpris.MediaPlayer2` on
-//! the session bus, so this needs no per-application anything: a browser, a
-//! music player and a video player all look the same from here.
-//!
-//! What it does not do is trust them. MPRIS is a specification a great many
-//! programs implement partially, so every property here is read defensively —
-//! a player that omits `Metadata`, reports `Position` as the wrong integer
-//! width, or refuses `CanControl` gets reported as what it is rather than
-//! breaking the reading of every other player on the machine.
+//! Every player speaks `org.mpris.MediaPlayer2` on the session bus. MPRIS is
+//! widely implemented but rarely fully, so every property here is read defensively.
 
 use std::collections::HashMap;
 
@@ -19,23 +12,17 @@ use zbus::zvariant::{ObjectPath, OwnedValue};
 /// The prefix every player's bus name carries.
 const PREFIX: &str = "org.mpris.MediaPlayer2.";
 
-/// How long a command may take to show up in a reading before we answer anyway.
-///
-/// The number lives in the core, next to the budget a client waits, because two
-/// independently chosen timeouts that must be ordered is the bug that made a
-/// lock that worked report a failure.
+/// How long to wait for a reading to reflect a command before answering anyway.
+/// Lives in core next to the client's wait budget, so the two stay ordered.
 const CONTROL_CONFIRM: std::time::Duration =
     std::time::Duration::from_millis(acrylius_core::plugins::media::CONTROL_CONFIRM_MS);
 
-/// How often to re-read while waiting. Short, because most players act in well
-/// under a tenth of a second and the common case should not pay for the rest.
+/// How often to re-read while waiting; short since most players act in well
+/// under a tenth of a second.
 const CONTROL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(60);
 
-/// A proxy that mirrors whichever player is active.
-///
-/// Skipped, because it duplicates a player that is already listed and a remote
-/// showing the same track twice looks broken. Anyone running it is served by
-/// the real entries beside it.
+/// `playerctld` mirrors whichever player is active; skipped so it doesn't
+/// duplicate an entry already listed.
 const AGGREGATOR: &str = "playerctld";
 
 #[zbus::proxy(
@@ -85,11 +72,8 @@ pub struct MediaEffector {
     connection: zbus::Connection,
 }
 
-/// Read a string out of a metadata value, whatever shape the player chose.
-///
-/// `xesam:artist` is specified as an array and shipped as a bare string by
-/// enough players that handling only the specified form would leave the artist
-/// blank on a good few of them.
+/// Read a string from a metadata value; `xesam:artist` is spec'd as an array
+/// but plenty of players send a bare string.
 fn as_text(value: Option<&OwnedValue>) -> String {
     let Some(value) = value else {
         return String::new();
@@ -105,13 +89,8 @@ fn as_text(value: Option<&OwnedValue>) -> String {
 
 /// Read `mpris:trackid`, whichever of its two types it arrived as.
 ///
-/// The specification says this field is an object path, and a good many
-/// players send one — but a good many others send the same text typed as a
-/// string, and the two are different D-Bus types that do not convert to each
-/// other. Reading only the string form is why seeking never worked: the path
-/// was right there, `<&str>::try_from` refused it, and `SetPosition` was
-/// answered with "reports no track id" for players that were perfectly capable
-/// of it. Read defensively, like every other MPRIS field here.
+/// Spec says object path, but many players send the same text as a plain
+/// string; the two D-Bus types don't convert to each other.
 fn as_track_id(value: Option<&OwnedValue>) -> Option<ObjectPath<'static>> {
     let value = value?;
     if let Ok(path) = ObjectPath::try_from(value.clone()) {
@@ -153,8 +132,7 @@ impl MediaEffector {
             .filter(|n| n.starts_with(PREFIX))
             .filter(|n| n.strip_prefix(PREFIX) != Some(AGGREGATOR))
             .collect();
-        // Stable order, so a state that has not changed compares equal and
-        // nothing is broadcast for a reshuffle nobody can see.
+        // Stable order so an unchanged state compares equal.
         names.sort();
         Ok(names)
     }
@@ -172,9 +150,8 @@ impl MediaEffector {
         let id = bus.strip_prefix(PREFIX).unwrap_or(bus).to_string();
         let metadata = player.metadata().await.unwrap_or_default();
 
-        // A player that answers nothing still gets an entry. Its absence would
-        // be indistinguishable from it having closed, and the remote would show
-        // a gap rather than something it can at least name.
+        // A player that answers nothing still gets an entry, so it's
+        // distinguishable from having closed.
         Ok(MediaPlayer {
             name: app.identity().await.unwrap_or_else(|_| id.clone()),
             id,
@@ -209,8 +186,7 @@ impl MediaEffector {
         for bus in names {
             match self.read(&bus).await {
                 Ok(p) => players.push(p),
-                // One player that has just exited, or is answering badly, must
-                // not take the rest of the reading with it.
+                // One bad or just-exited player must not break the rest of the reading.
                 Err(e) => tracing::debug!(bus, error = %e, "skipping a player"),
             }
         }
@@ -222,21 +198,15 @@ impl MediaEffector {
         }
     }
 
-    /// Carry out a command, and hand back the reading it was aimed at.
-    ///
-    /// The reading is not a courtesy: [`Media::control_and_settle`] needs to know
-    /// what the player looked like *before*, and this method has already paid for
-    /// it to find the target. `None` is the machine-volume path, which touches no
-    /// player and so has nothing to compare against.
+    /// Carry out a command, and hand back the reading from before it ran (for
+    /// `control_and_settle` to compare against). `None` for the machine-volume path.
     pub async fn control(
         &self,
         player: &str,
         action: MediaAction,
     ) -> anyhow::Result<Option<MediaState>> {
-        // The machine's volume, not a player's, when no player was named. It is
-        // what a person means by "turn it down", it is the one control that
-        // works whatever is playing, and it needs no player to exist at all —
-        // so it is answered before anything looks for one.
+        // No player named means machine volume, not a player's; works even
+        // with nothing playing.
         if let (MediaAction::SetVolume { percent }, true) = (&action, player.is_empty()) {
             crate::mixer::set_volume(*percent).await?;
             return Ok(None);
@@ -253,9 +223,8 @@ impl MediaEffector {
         let Some(found) = state.players.iter().find(|p| p.id == target) else {
             anyhow::bail!("no player called {target}");
         };
-        // Refused rather than attempted. A player that says it cannot be
-        // controlled will ignore the call, and reporting success for something
-        // that did nothing is the failure this whole project keeps running into.
+        // Refused rather than attempted: a call to an uncontrollable player is
+        // silently ignored.
         if !found.can_control {
             anyhow::bail!("{} does not accept control", found.name);
         }
@@ -275,28 +244,15 @@ impl MediaEffector {
             MediaAction::Stop => proxy.stop().await?,
             MediaAction::Seek { offset_ms } => proxy.seek(offset_ms.saturating_mul(1000)).await?,
             MediaAction::SetPosition { ms } => {
-                // SetPosition names the track it applies to, so a seek cannot
-                // land on whatever started playing in the meantime. A player
-                // that does not report a track id cannot be positioned at all.
+                // Track id pins the seek to this track, not whatever plays next; required.
                 let metadata = proxy.metadata().await.unwrap_or_default();
                 let track = as_track_id(metadata.get("mpris:trackid"))
                     .ok_or_else(|| anyhow::anyhow!("{} reports no track id", found.name))?;
                 let us = i64::try_from(ms.saturating_mul(1000)).unwrap_or(i64::MAX);
                 if us == 0 {
-                    // Back to the start, the other way round.
-                    //
-                    // `SetPosition(track, 0)` is ignored by Chromium, verified
-                    // over the bus: `SetPosition(track, 1000)` moves the track
-                    // and `SetPosition(track, 0)` does nothing at all. So the
-                    // most ordinary request a person makes of a timeline — drag
-                    // it to the left edge — was the one position that silently
-                    // did not work.
-                    //
-                    // `Seek` is better specified for exactly this: MPRIS says a
-                    // relative seek landing before the beginning sets the
-                    // position to zero. Asking to go back further than the
-                    // track is long is therefore a defined way to say "the
-                    // start", and it needs no agreement about where zero is.
+                    // Chromium ignores `SetPosition(track, 0)` (nonzero values
+                    // work); seek past the start instead, which MPRIS defines
+                    // as clamping to zero.
                     let here = proxy.position().await.unwrap_or(0);
                     proxy.seek(-(here.saturating_add(1_000_000))).await?;
                 } else {
@@ -305,24 +261,16 @@ impl MediaEffector {
             }
             MediaAction::SetVolume { percent } => {
                 proxy.set_volume(f64::from(percent) / 100.0).await?;
-                // Read it back, because the write is not the answer. `Volume`
-                // is a writable MPRIS property and a player is free to accept
-                // the write and do nothing with it — Chromium does exactly
-                // that, with `CanControl` reporting true — so trusting the call
-                // means reporting a volume change that never happened and
-                // leaving a slider to snap back with no explanation.
-                //
-                // A moment first: a player that does honour it applies the
-                // change asynchronously, and reading immediately would call it
-                // a refusal. Effects run off the pump, so this stalls nothing.
+                // Read back rather than trust the write: Chromium accepts
+                // `Volume` writes (`CanControl: true`) but ignores them. Wait a
+                // moment first since a real change applies asynchronously.
                 tokio::time::sleep(std::time::Duration::from_millis(150)).await;
                 let landed = proxy
                     .volume()
                     .await
                     .map(|v| (v.clamp(0.0, 1.0) * 100.0).round() as u8)
                     .unwrap_or(percent);
-                // A player may round or clamp, and that is not a failure. Only
-                // a value that did not move towards the target is.
+                // Rounding/clamping is fine; only a value that didn't move at all is a failure.
                 if landed.abs_diff(percent) > 5 {
                     anyhow::bail!(
                         "{} ignores volume changes; use the player's own controls",
@@ -334,24 +282,10 @@ impl MediaEffector {
         Ok(Some(state))
     }
 
-    /// Carry out a command and answer with a reading that reflects it.
-    ///
-    /// An MPRIS call returns before the player has acted on it, so the first
-    /// reading afterwards is routinely the state we started from. Answering with
-    /// that one is what leaves a phone showing the previous track's title and a
-    /// timeline still running on something already paused, and — because the
-    /// position has moved between the two readings — it looks like a change, so
-    /// the caller is told the command worked.
-    ///
-    /// So the reading is repeated until it shows the command having landed, or
-    /// until the budget runs out. The last reading is answered with either way:
-    /// a player that ignored a command is a real answer, not an error, and the
-    /// peer can see for itself that nothing moved.
-    ///
-    /// The budget is well under the five seconds a phone waits, because a client
-    /// that gives up before the machine has answered reports a failure that did
-    /// not happen. That is the same mistake as `LOCK_CONFIRM` against
-    /// `awaitScreen`, and it is worth not making twice.
+    /// Carry out a command, then re-read until the state reflects it (or the
+    /// budget runs out) — an MPRIS call returns before the player has acted,
+    /// so the first reading afterwards is often stale. Budget stays well
+    /// under the phone's own wait, same reasoning as `LOCK_CONFIRM`.
     pub async fn control_and_settle(
         &self,
         player: &str,
@@ -362,8 +296,7 @@ impl MediaEffector {
         loop {
             tokio::time::sleep(CONTROL_INTERVAL).await;
             let now = self.state().await;
-            // Nothing to compare against, or nothing a reading can settle: this
-            // is the answer, and waiting longer would only delay it.
+            // Nothing to compare against: this is the answer.
             let Some(before) = before.as_ref() else {
                 return Ok(now);
             };
@@ -377,11 +310,7 @@ impl MediaEffector {
     }
 }
 
-/// Which player a command with no name goes to.
-///
-/// Something that is playing, in preference to something that is merely open.
-/// A machine with a paused video and a playing album should answer the album,
-/// because that is the one the person is listening to.
+/// Which player a nameless command targets: playing beats merely open.
 fn pick_active(players: &[MediaPlayer]) -> String {
     let by = |want: &str| {
         players
@@ -421,7 +350,7 @@ mod tests {
     #[test]
     fn a_player_that_accepts_control_is_preferred_to_one_that_does_not() {
         // A browser tab that reports playing but refuses commands would
-        // otherwise capture every button press on the phone.
+        // otherwise capture every button press.
         let players = vec![
             player("chromium", "playing", false),
             player("spotify", "playing", true),

@@ -1,8 +1,7 @@
 //! Checks that only mean something on a live desktop.
 //!
-//! They report rather than fail when the thing they probe is absent, so CI on a
-//! headless runner stays green while the same command tells a developer at a
-//! real desktop whether it works here.
+//! They report rather than fail when the probed thing is absent, so CI on a
+//! headless runner stays green.
 
 #[tokio::test]
 async fn compositor_probe_against_whatever_is_running() {
@@ -10,8 +9,7 @@ async fn compositor_probe_against_whatever_is_running() {
     match answer {
         Some(v) => {
             println!("compositor answered: locked = {v}");
-            // If it answered at all, the screen is not locked right now: a test
-            // run implies someone is using the machine.
+            // If it answered, the screen isn't locked: running this test implies someone is at the machine.
             assert!(!v, "the screen should not be locked while this test runs");
         }
         None => println!("no compositor answered (not Hyprland, or not running)"),

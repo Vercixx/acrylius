@@ -1,34 +1,15 @@
-//! The plugin seam.
-//!
-//! A plugin here is only the protocol half of a feature, the part that is
-//! identical on every device and therefore belongs in the shared artifact. The
-//! other two thirds live outside: the effector half is whatever the host does
-//! for [`Effect`] (zbus on Linux, mostly nothing on iOS), and the UI half is
-//! SwiftUI or `acryliusctl`. Keeping the protocol half here is the whole reason
-//! there is one implementation rather than five.
-//!
-//! Plugins cannot do IO. They cannot read a clock. Everything they want to
-//! happen goes through [`Cx`], which accumulates intentions that the core turns
-//! into actions once the plugin returns. So a plugin is as testable as the core
-//! is, and a misbehaving one cannot reach a socket.
+//! The plugin seam. A plugin is only the protocol half of a feature, the part
+//! identical on every device; effectors and UI live in the hosts. Plugins
+//! cannot do IO or read a clock — everything goes through [`Cx`], which
+//! accumulates intentions the core turns into actions after the plugin returns.
 
 use crate::proto::envelope::{Envelope, ErrorBody, ErrorCode};
 use crate::proto::ids::DeviceId;
 use crate::vocab::{Effect, EffectKind, EffectResult, EffectToken, UiEvent};
 
-/// How much longer than a host's own budget a client waits for the answer.
-///
-/// Some verbs cannot be answered until the machine has watched something else
-/// happen — a screen locker acting on a signal, a player acting on an MPRIS
-/// call — so the host spends a while confirming before it replies. A client
-/// that gives up inside that window reports a failure that did not happen,
-/// which is exactly what "the screen locked but the phone said it failed" was:
-/// `LOCK_CONFIRM` and the phone's wait were both eight seconds, so the reply
-/// could not arrive before the client had already stopped listening.
-///
-/// The slack covers the answer travelling back, which over Bluetooth is not
-/// instant. Every client budget is a host budget plus this, and there is a test
-/// beside each one saying so, because the two numbers living apart is the bug.
+/// How much longer than a host's own budget a client waits for the answer,
+/// covering the reply's travel time. Every client budget must be the matching
+/// host budget plus this; a test beside each pair enforces it.
 pub const REPLY_SLACK_MS: u64 = 4_000;
 
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -39,15 +20,9 @@ pub struct PluginManifest {
     pub outgoing: &'static [&'static str],
     /// Capabilities this side can handle. Advertised as `caps_in`.
     pub incoming: &'static [&'static str],
-    /// Effects this plugin needs in order to serve requests.
-    ///
-    /// It does not gate registration or advertising. A device that cannot lock
-    /// a session can still ask another one to, and must still be able to
-    /// receive the reply, which arrives under the same capability as the
-    /// request. A host that cannot serve a verb answers `not_allowed`.
-    ///
-    /// What a peer can actually do is discovered from what it announces on
-    /// connect, not from what it lists in the handshake.
+    /// Effects this plugin needs in order to serve requests. Does not gate
+    /// registration or advertising: a device that cannot serve a verb can
+    /// still ask for it, and answers `not_allowed` when asked.
     pub requires: &'static [EffectKind],
 }
 
@@ -91,39 +66,26 @@ pub struct PendingSend {
 
 /// The only way a plugin affects anything.
 pub struct Cx {
-    /// Visible to the core because a bulk request it drains needs a deadline,
-    /// and this is the clock the plugin that asked was working against.
     pub(crate) now_ms: u64,
-    /// Owned rather than borrowed from the core: a `&mut` here would conflict
-    /// with the core's own borrow of the plugin it is calling.
+    /// Owned rather than borrowed: a `&mut` into the core would conflict with
+    /// the core's own borrow of the plugin it is calling.
     pub(crate) next_token: u64,
-    /// The device's own transfer numbering, handed out by [`Cx::new_transfer`].
-    ///
-    /// One counter for the whole device, for the reason `LinkId` namespaces its
-    /// ids by transport: two numbering schemes sharing one table is not a
-    /// collision that might happen, it is one that will. Every device numbered
-    /// its transfers from one, so the id in an offer named something different
-    /// on each side of it.
+    /// One transfer counter for the whole device; see [`Cx::new_transfer`].
     pub(crate) next_transfer: u64,
     pub(crate) sends: Vec<PendingSend>,
     pub(crate) effects: Vec<(EffectToken, Effect)>,
     pub(crate) ui: Vec<UiEvent>,
     pub(crate) wake_at: Option<u64>,
-    /// Bulk transfers this plugin asked to start, filled in with a key by the
-    /// core once it knows which session they belong to.
+    /// Bulk transfers this plugin asked to start; the core supplies the key.
     pub(crate) bulk: Vec<BulkRequest>,
     /// What this host can carry out. See [`Cx::serves`].
     serves: crate::vocab::EffectSet,
-    /// What the link to the peer this dispatch concerns can carry, when there
-    /// is one and the core knows. See [`Cx::peer_can_carry_bulk`].
+    /// What the link to this dispatch's peer can carry, when known.
     peer_bulk: Option<crate::link::BulkSupport>,
 }
 
-/// A plugin asking for a side channel.
-///
-/// It names a peer and a transfer and nothing else. The key is the core's to
-/// supply, because the session secret is the core's alone — a plugin that could
-/// derive one could derive any of them.
+/// A plugin asking for a side channel. It names a peer and a transfer; the key
+/// is the core's to supply, because the session secret is the core's alone.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum BulkRequest {
     /// Accept a connection for this transfer, and say where.
@@ -131,12 +93,8 @@ pub enum BulkRequest {
         peer: DeviceId,
         /// Ours, and what the host is told to listen for.
         transfer: crate::vocab::TransferId,
-        /// The number the offerer gave it, which is a different number.
-        ///
-        /// Carried because the bulk key is derived from the offerer's device id
-        /// and the offerer's transfer number, and both ends have to arrive at
-        /// the same key without sending it. Ours would not do: the sender has
-        /// never heard of it.
+        /// The offerer's number for it: the bulk key is derived from the
+        /// offerer's device id and transfer number on both ends.
         offered_as: u64,
         expect_bytes: u64,
     },
@@ -179,30 +137,15 @@ impl Cx {
         self
     }
 
-    /// Whether a side channel to this peer could carry bytes at all.
-    ///
-    /// The companion to [`Cx::serves`], and needed for the same reason: that
-    /// one answers "can this machine do it", this one answers "can the link
-    /// get there". A plugin that offers a file over a link which cannot carry
-    /// one leaves the far end waiting on a transfer that will never start,
-    /// because the refusal would otherwise happen on the *receiving* side —
-    /// when a person there accepts — and never travels back to the sender.
-    ///
-    /// Unknown counts as yes. Nothing should be blocked because the core has
-    /// not learned an answer yet; only a link that has positively said it
-    /// carries nothing is refused.
+    /// Whether a side channel to this peer could carry bytes at all. Unknown
+    /// counts as yes: only a link that positively said `None` is refused.
     #[must_use]
     pub fn peer_can_carry_bulk(&self) -> bool {
         self.peer_bulk != Some(crate::link::BulkSupport::None)
     }
 
-    /// Whether this host can carry out an effect, as opposed to only ask
-    /// another device for it.
-    ///
-    /// A plugin registers on every device — that is what makes the plugin set
-    /// platform-independent — so this is how one tells "I am on a machine that
-    /// cannot do this" from "nobody has asked yet". A request that can never be
-    /// served should be refused while the far end is still listening.
+    /// Whether this host can carry out an effect, as opposed to only asking
+    /// another device for it. Plugins register on every device.
     #[must_use]
     pub fn serves(&self, kind: crate::vocab::EffectKind) -> bool {
         self.serves.contains(kind)
@@ -236,10 +179,6 @@ impl Cx {
     }
 
     /// Reply to a request whose envelope is no longer in hand.
-    ///
-    /// A plugin that asked the host to do something gets the answer back later,
-    /// by which time the request is a stored id rather than a borrowed
-    /// `Envelope`.
     pub fn send_reply(&mut self, peer: &DeviceId, cap: &str, ty: &str, body: Vec<u8>, re: u32) {
         self.sends.push(PendingSend {
             peer: peer.clone(),
@@ -267,30 +206,10 @@ impl Cx {
         t
     }
 
-    /// A transfer id that means something on this device.
-    ///
-    /// The one every table here is keyed by, and never the one in an offer that
-    /// arrived: that was chosen by the device that sent it, out of a counter
-    /// starting at one, exactly like ours. Two peers offering a file at the same
-    /// time therefore both call it transfer 1, and a table keyed by that has one
-    /// entry where it needs two — the second offer replacing the first, and one
-    /// device's bytes going into the file another device was promised.
-    ///
-    /// A plugin that mints one of these is responsible for remembering which
-    /// remote id it stands for, because the wire keeps using the sender's.
-    ///
-    /// Minted with the top bit set, which is not decoration. A host numbers the
-    /// transfers *it* offers, from one, and hands the id down in the offer —
-    /// `FileBulk` on the desktop does exactly that. So an id minted here from a
-    /// counter starting at one would meet the host's first send head-on, in
-    /// tables the host keys by transfer alone: `forget` clears three maps by id,
-    /// and would take an arriving file out with a finished one. Naming the
-    /// minter in the high bit makes that impossible rather than unlikely, which
-    /// is the same move `LinkId` makes for transports.
-    ///
-    /// The tidier answer is for a host to ask for its ids here too, rather than
-    /// counting its own; that is a bigger change to the host seam than this is
-    /// worth on its own.
+    /// A transfer id valid on this device — never the id in an arriving offer,
+    /// which the sender numbered; the minter must remember that mapping, since
+    /// the wire keeps the sender's id. The top bit marks plugin-minted ids so
+    /// they cannot collide with host-numbered ones.
     pub fn new_transfer(&mut self) -> crate::vocab::TransferId {
         self.next_transfer += 1;
         crate::vocab::TransferId(crate::vocab::MINTED_HERE | self.next_transfer)
@@ -300,11 +219,8 @@ impl Cx {
         self.ui.push(e);
     }
 
-    /// Accept a bulk connection for `transfer` and tell the peer where.
-    ///
-    /// The host answers with an endpoint, or with a failure if it cannot listen
-    /// — a phone cannot, which is why an endpoint is negotiated rather than
-    /// assumed by whichever side happens to be sending.
+    /// Accept a bulk connection for `transfer` and tell the peer where. The
+    /// endpoint is negotiated because a phone cannot listen.
     pub fn bulk_listen(
         &mut self,
         peer: &DeviceId,
@@ -409,21 +325,15 @@ pub trait Plugin: Send {
     }
 }
 
-/// Which capability prefix routes to which plugin.
-///
-/// Matching is on the capability id including its major version, so
-/// `org.acrylius.clipboard/2` does not accidentally reach a plugin that only
-/// declared `/1`.
+/// Matching includes the major version, so `org.acrylius.clipboard/2` does not
+/// reach a plugin that only declared `/1`.
 #[must_use]
 pub fn handles(manifest: &PluginManifest, cap: &str) -> bool {
     manifest.incoming.contains(&cap) || manifest.outgoing.contains(&cap)
 }
 
-/// Test scaffolding for plugin authors.
-///
-/// A plugin is a pure function of its inputs, so testing one needs no core, no
-/// sockets and no clock: hand it a `Cx`, call a method, read what it wanted to
-/// happen.
+/// Test scaffolding for plugin authors: hand a plugin a `Cx`, call a method,
+/// read what it wanted to happen.
 #[cfg(test)]
 pub(crate) mod harness {
     use super::{BulkRequest, Cx, PendingSend};
@@ -443,10 +353,7 @@ pub(crate) mod harness {
             reason = "read by tests that assert a plugin asked for a side channel"
         )]
         pub bulk: Vec<BulkRequest>,
-        /// Where the transfer numbering got to, so a test that needs two
-        /// separate transfers can carry it into the next `run` the way the core
-        /// carries it between dispatches. Without it every call would mint the
-        /// same id and a collision test would be testing nothing.
+        /// Carried into the next `run` so a test can mint distinct transfers.
         #[allow(dead_code, reason = "read by tests that mint more than one transfer")]
         pub next_transfer: u64,
         pub next_token: u64,
@@ -467,10 +374,8 @@ pub(crate) mod harness {
         }
     }
 
-    /// Run one plugin interaction and collect everything it asked for.
-    ///
-    /// On a host that serves everything. Use [`run_on`] for a plugin whose
-    /// behaviour depends on what the machine under it can do.
+    /// Run one plugin interaction on a host that serves everything; use
+    /// [`run_on`] when behaviour depends on what the machine can do.
     pub fn run(next_token: u64, f: impl FnOnce(&mut Cx)) -> Ran {
         run_on(next_token, crate::vocab::EffectSet::all(), f)
     }
@@ -481,8 +386,6 @@ pub(crate) mod harness {
         serves: crate::vocab::EffectSet,
         f: impl FnOnce(&mut Cx),
     ) -> Ran {
-        // Transfers numbered from the same place the tokens are, so a harness
-        // test sees the ids a plugin would really be handed.
         let mut cx = Cx::new(1_000, next_token, next_token, serves);
         f(&mut cx);
         Ran {

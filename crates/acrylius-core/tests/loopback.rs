@@ -1,9 +1,7 @@
 //! Two cores, one process, no sockets and no clock.
 //!
-//! This is the project's spine. It drives a complete `XXpsk3` pairing, then an
-//! `IKpsk2` session, then a plugin round trip, entirely in memory, so the whole
-//! protocol is verifiable on a Linux box with no Apple hardware anywhere near
-//! it. That was the point of making the core sans-IO.
+//! Drives a full `XXpsk3` pairing, an `IKpsk2` session, and a plugin round
+//! trip in memory, so the protocol is verifiable with no Apple hardware.
 
 use std::collections::{BTreeMap, VecDeque};
 
@@ -24,21 +22,12 @@ const TRANSPORT: TransportId = TransportId(0);
 enum Side {
     A,
     B,
-    /// A second computer, so that one device can be paired with two.
-    ///
-    /// Most tests need two devices and say nothing about C. It exists because
-    /// some questions cannot even be asked with two — chiefly "does the core
-    /// route to the *right* peer", which is invisible while every core has
-    /// exactly one peer and any answer is the correct one.
+    /// A second computer, so a test can check the core routes to the *right*
+    /// peer rather than just *a* peer.
     C,
 }
 
 impl Side {
-    // `other()` used to live here, for the one place that assumed a transfer
-    // had the same name at both ends and could therefore be answered by
-    // flipping sides. It cannot: a receiver numbers a transfer itself, so the
-    // harness matches a dial to its listener by the endpoint instead, and there
-    // was nothing left that needed to name "the other one".
     fn addr(self) -> &'static str {
         match self {
             Self::A => "A",
@@ -48,28 +37,23 @@ impl Side {
     }
 }
 
-/// An in-memory transport. It is a transport in exactly the sense the core
-/// means: it produces LinkUp/LinkRecv/LinkDown and consumes Dial/LinkSend/Close.
+/// An in-memory transport: produces LinkUp/LinkRecv/LinkDown, consumes
+/// Dial/LinkSend/Close.
 struct Net {
     a: Core,
     b: Core,
-    /// A second computer. Built for every `Net` and left alone unless a test
-    /// pairs with it, because an unpaired core is inert: it is dialled by
-    /// nothing and dials nothing.
+    /// A second computer, built for every `Net` but left alone unless a test
+    /// pairs with it.
     c: Core,
     now: u64,
     next_link: u64,
-    /// (side, link) -> the far end of the same wire.
-    ///
-    /// Both halves, because with three devices "the other side" is no longer a
-    /// property of the side that sent — it is a property of the wire.
+    /// (side, link) -> the far end of the same wire, tracked from both sides.
     peer_link: BTreeMap<(Side, u64), (Side, u64)>,
     queue: VecDeque<(Side, Event)>,
-    /// Milliseconds to add to side B's clock. Two machines that booted at
-    /// different times do not share an uptime.
+    /// Milliseconds added to B's clock; machines don't share an uptime.
     pub b_skew: u64,
-    /// Milliseconds since the epoch, shared by both sides the way two
-    /// NTP-synced machines share one.
+    /// Milliseconds since the epoch, shared by both sides like NTP-synced
+    /// machines.
     pub wall: u64,
     /// Keys handed to each side's host, so a test can check both derived the
     /// same one without either sending it.
@@ -79,24 +63,20 @@ struct Net {
     /// Every dial the core asked for, in order, so a test can check which route
     /// was preferred and how far the fallback walked.
     pub dialed: Vec<(TransportId, String)>,
-    /// Give new links BLE's attributes rather than loopback's. The differences
-    /// that matter are `BulkSupport::None` and a 16 KiB `max_message`.
+    /// Give new links BLE's attributes rather than loopback's: `BulkSupport::None`
+    /// and a 16 KiB `max_message`.
     pub links_are_ble: bool,
-    /// The same, for one transport only — so a pair can be on Bluetooth and
-    /// Wi-Fi at the same time, which is the arrangement a phone actually has
-    /// and the one where preferring the wrong link shows up.
+    /// Same, but for one transport only, so a pair can be on BLE and Wi-Fi
+    /// at once.
     pub ble_transport: Option<TransportId>,
     /// How far a transfer gets once the sender has been told where to dial.
     pub dials: Dials,
     /// Which side is listening on which endpoint, and what it calls the
-    /// transfer. The two ends number a transfer separately, so a dial can only
-    /// be matched to its listener by where it was told to go.
+    /// transfer. The two ends number a transfer separately, so a dial is
+    /// matched to its listener by endpoint.
     listening: BTreeMap<String, (Side, TransferId)>,
     /// Every link the harness has brought up, and which transport carried it,
-    /// so a test can take one away by name. Losing the better transport while
-    /// the worse one is still connected is the case a real phone meets every
-    /// time Wi-Fi is switched off, and the only way to write it is to be able
-    /// to say *which* link died.
+    /// so a test can take one down by name.
     pub links: Vec<(Side, TransportId, u64)>,
 }
 
@@ -128,8 +108,7 @@ impl Net {
         match s {
             Side::A => 0,
             Side::B => self.b_skew,
-            // Its own origin again, so a three-device test cannot accidentally
-            // pass by two machines sharing an uptime.
+            // Its own origin, so C can't accidentally share an uptime with B.
             Side::C => self.b_skew.wrapping_mul(2),
         }
     }
@@ -153,8 +132,7 @@ impl Net {
         while let Some((side, ev)) = self.queue.pop_front() {
             guard += 1;
             assert!(guard < 500, "the harness did not settle: a message loop?");
-            // Each side keeps its own monotonic origin — machines do not share
-            // an uptime — while the wall clock is the one thing they agree on.
+            // Each side keeps its own monotonic origin; the wall clock is shared.
             let now = Now {
                 monotonic_ms: self.now + self.skew_for(side),
                 wall_ms: self.wall,
@@ -170,19 +148,13 @@ impl Net {
         match action {
             Action::Ui(e) => self.ui.push((side, e)),
 
-            // A bulk channel, simulated. No socket and no bytes: what is being
-            // checked here is the negotiation — that a receiver is asked before
-            // anything is listened for, that the endpoint reaches the sender,
-            // and that both ends are told how it ended. The bytes themselves
-            // are the transport's business and are tested against real sockets.
+            // Simulated bulk channel: no socket, no bytes. Tests the
+            // negotiation only; byte transport is tested against real sockets.
             Action::BulkListen { transfer, key, .. } => {
                 assert_eq!(key.len(), 32, "a host is handed a real key");
                 self.bulk_keys.insert((side, transfer), key);
-                // One endpoint per transfer, so that a dial can be matched back
-                // to the listener that put it there. The two ends no longer
-                // agree on what a transfer is called — the receiver numbers it
-                // itself — so a harness that told both sides the sender's
-                // number would be modelling something no host does.
+                // One endpoint per transfer: the receiver numbers transfers
+                // itself, so a dial is matched to its listener by endpoint.
                 let endpoint = format!("{}:{}", side.addr(), 9000 + (transfer.0 & 0xffff));
                 self.listening.insert(endpoint.clone(), (side, transfer));
                 self.queue
@@ -193,10 +165,9 @@ impl Net {
                 key,
                 endpoint,
             } => {
-                // Both ends must have derived the same key from the session
-                // without either transmitting it. If this ever fails, nothing
-                // would decrypt on a real socket. Looked up by endpoint, since
-                // the listener files it under its own number.
+                // Both ends must derive the same key without either
+                // transmitting it. Looked up by endpoint since the listener
+                // files it under its own transfer id.
                 if let Some(&(listener, theirs)) = self.listening.get(&endpoint)
                     && let Some(k) = self.bulk_keys.get(&(listener, theirs))
                 {
@@ -211,9 +182,8 @@ impl Net {
                 let Some(&(listener, theirs)) = self.listening.get(&endpoint) else {
                     return;
                 };
-                // Only the listening side learns that anything connected, and
-                // only its host could have known. That is the whole reason
-                // `BulkStarted` exists.
+                // Only the listening side learns a connection was made;
+                // that's what `BulkStarted` is for.
                 self.queue
                     .push_back((listener, Event::BulkStarted { transfer: theirs }));
                 if self.dials == Dials::AndKeepsGoing {
@@ -251,20 +221,12 @@ impl Net {
                 transport,
             } => {
                 self.dialed.push((transport, addr.clone()));
-                // A dial that is never answered, either way.
-                //
-                // Not a hypothetical: Network.framework does this by design. A
-                // connection with no viable path waits for one instead of
-                // failing, so with Wi-Fi switched off the phone's dial neither
-                // came up nor failed — it simply hung, and every route behind
-                // it went untried. Every other address here answers, which is
-                // why nothing caught it.
+                // A dial that is never answered, either way. Mirrors
+                // Network.framework waiting on a connection with no viable path.
                 if addr == "silent" {
                     return;
                 }
-                // Only the two cores are wired. Anything else is somewhere that
-                // did not answer — which is the whole point of having more than
-                // one route to try.
+                // Only the two cores are wired; anything else did not answer.
                 let Some(target) = (match addr.as_str() {
                     "A" => Some(Side::A),
                     "B" => Some(Side::B),
@@ -407,10 +369,6 @@ fn paired() -> (Net, DeviceId, DeviceId) {
 }
 
 /// A, paired with two computers at once. Returns their ids in order.
-///
-/// The arrangement a phone actually has, and the one two cores cannot express:
-/// while every device has exactly one peer, routing to the wrong peer is
-/// indistinguishable from routing to the right one.
 fn paired_twice() -> (Net, DeviceId, DeviceId) {
     let (mut net, _a_id, b_id) = paired();
     let c_id = net.c.device_id();
@@ -426,8 +384,7 @@ fn paired_twice() -> (Net, DeviceId, DeviceId) {
     );
     net.local(Side::A, LocalCommand::ConfirmPairing { accept: true });
     net.local(Side::C, LocalCommand::ConfirmPairing { accept: true });
-    // Checked here rather than left to fail later: a helper that quietly did
-    // not pair sends every test built on it looking in the wrong place.
+    // Fail here, not in every test built on this helper.
     assert!(
         net.saw(Side::C, |e| matches!(e, UiEvent::PairingComplete { .. })),
         "the second computer did not pair"
@@ -440,8 +397,7 @@ fn discover(net: &mut Net, side: Side, of: Side) {
     discover_via(net, side, of, TRANSPORT, of.addr());
 }
 
-/// The same, but naming which transport saw it and where. Two transports see the
-/// same device independently, and that is the case worth being able to write.
+/// The same, but naming which transport saw it and where.
 fn discover_via(net: &mut Net, side: Side, of: Side, transport: TransportId, addr: &str) {
     let fp = match of {
         Side::A => net.a.fingerprint(),
@@ -467,37 +423,25 @@ fn discover_via(net: &mut Net, side: Side, of: Side, transport: TransportId, add
 /// this stands in for BLE beside Wi-Fi.
 const SLOWER: TransportId = TransportId(1);
 
-/// What the harness does when a sender is told where to connect.
-///
-/// A working transfer does all of it and does it at once, which is what every
-/// test wanted until the core grew a deadline. Watching it wait needs a way to
-/// stop part-way — and the two ways of stopping are the whole point, because
-/// from the outside they look identical and only one of them should end.
+/// How far a dial gets once a sender is told where to connect.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Dials {
     /// Connects and finishes, the way a small file on a local network does.
     AndFinishes,
-    /// Connects, and is still going. A large file, a slow disk, a phone on the
-    /// edge of the network.
+    /// Connects, and is still going: a large file, a slow disk.
     AndKeepsGoing,
-    /// Never arrives. Its session died between the accept and the dial, or its
-    /// app was killed, or its Wi-Fi went away.
+    /// Never arrives: session died between accept and dial, app killed, or
+    /// Wi-Fi went away.
     Never,
 }
 
-/// Take one transport's link away, the way switching Wi-Fi off does.
-///
-/// Both ends hear it, because both ends have a socket and both are wrong about
-/// it until told otherwise.
 /// Deliver a well-formed transport frame that will not decrypt, on a live link.
 ///
-/// A frame, not junk: junk is refused by the framing before it ever reaches an
-/// established session, and it is the established-session path this exercises.
-/// The link stays in the harness's table on purpose — the point is that the
-/// *core* drops it, and that it says so.
+/// Junk is refused by framing before reaching an established session; this
+/// exercises the established-session path. The link stays in the harness's
+/// table on purpose since the core, not the harness, must drop it.
 fn deliver_undecryptable(net: &mut Net, side: Side, transport: TransportId) {
-    // The last one, not the first: `links` keeps every link the harness ever
-    // brought up, and pairing leaves closed ones in front of the live session.
+    // The last live link, not the first: pairing leaves closed ones in front.
     let link = net
         .links
         .iter()
@@ -542,29 +486,15 @@ fn lose_link(net: &mut Net, transport: TransportId) {
 
 #[test]
 fn a_worse_transport_takes_over_when_the_better_one_dies() {
-    // The mirror of `a_better_transport_is_taken_even_while_a_worse_one_is_working`,
-    // and the half that was missing. Switching Wi-Fi off does not close a TCP
-    // connection — nothing is closed, the peer just stops answering — so both
-    // ends went on believing a dead link was the best route to each other.
-    //
-    // Because routing picks the lowest transport id among *live* links, that
-    // one belief was enough to send every message into a socket that could not
-    // carry it, while a working Bluetooth link sat beside it unused. On the
-    // phone it looked like "connected, but nothing happens"; on the desktop it
-    // was a socket with four kilobytes stuck in its send queue.
-    //
-    // Noticing the death is a host's job — keepalive on Linux, path viability
-    // on iOS. What the core owes is this: once told, fall back at once.
+    // Switching Wi-Fi off does not close a TCP connection: the peer just
+    // stops answering. Once told, the core must fall back at once instead of
+    // keeping the dead link as the preferred route.
     let (mut net, _a_id, b_id) = paired();
     net.ble_transport = Some(SLOWER);
 
-    // Same setup as the upgrade test: pairing already recorded a working route
-    // on the better transport, so it is overwritten with one that does not
-    // answer, the worse transport connects, and only then does Wi-Fi turn up.
     discover_via(&mut net, Side::A, Side::B, TRANSPORT, "not-listening");
     discover_via(&mut net, Side::A, Side::B, SLOWER, "B");
-    // A second session to one peer needs a strictly later opener timestamp than
-    // the last one seen, or it is indistinguishable from a replay of it.
+    // A strictly later opener timestamp than the last one seen.
     net.wall += 1_000;
     discover_via(&mut net, Side::A, Side::B, TRANSPORT, "B");
     assert_eq!(
@@ -590,18 +520,9 @@ fn a_worse_transport_takes_over_when_the_better_one_dies() {
 
 #[test]
 fn losing_one_of_two_routes_does_not_report_the_device_as_gone() {
-    // The sting in the previous test's tail, and what it did not check: the
-    // core stayed right about where to send, and told the user the opposite.
-    // Every link's death was announced as the peer's.
-    //
-    // That is not cosmetic. `PeerUnreachable` is what a host uses to discard
-    // what a peer told it — the phone drops its session state on exactly this
-    // event — and `on_peer_disconnected` is what stops a plugin broadcasting to
-    // a peer. So switching from Wi-Fi to Bluetooth emptied the session controls
-    // and stopped the desktop announcing its lock state to a device it was
-    // still talking to, and nothing restored either: both repairs wait for the
-    // peer to become reachable again, which never happens to a peer that never
-    // left.
+    // Routing stayed correct but the peer was reported unreachable anyway.
+    // `PeerUnreachable` makes a host discard peer state, so losing one of
+    // two live routes must not fire it.
     let (mut net, _a_id, b_id) = paired();
     net.ble_transport = Some(SLOWER);
 
@@ -617,8 +538,7 @@ fn losing_one_of_two_routes_does_not_report_the_device_as_gone() {
         !net.saw(Side::A, |e| matches!(e, UiEvent::PeerUnreachable { .. })),
         "a device still connected over the other transport was reported gone"
     );
-    // And the change is announced rather than left silent: a screen showing
-    // which transport is carrying has no other way to learn it changed.
+    // The route change must be announced, not left silent.
     assert!(
         net.saw(Side::A, |e| matches!(e, UiEvent::PeerReachable { .. })),
         "nothing told the host the route had changed"
@@ -628,12 +548,8 @@ fn losing_one_of_two_routes_does_not_report_the_device_as_gone() {
 
 /// Switch Wi-Fi off on one side only, which is the only way it ever happens.
 ///
-/// `lose_link` tells both ends at once, and that is the one thing losing an
-/// interface never does. The phone's socket dies with the interface and it knows
-/// immediately; this end keeps an ESTABLISHED socket to a peer that has simply
-/// stopped answering, and goes on believing in it until a keepalive says
-/// otherwise — twenty seconds later. So the wire is cut for both — sends into it
-/// vanish, the way a dead socket swallows them — and only `noticed_by` is told.
+/// Unlike `lose_link`, only `noticed_by` learns of it; the other end keeps an
+/// ESTABLISHED socket to a peer that has simply stopped answering.
 fn wifi_goes_off(net: &mut Net, transport: TransportId, noticed_by: Side) {
     let dead: Vec<(Side, u64)> = net
         .links
@@ -661,31 +577,20 @@ fn wifi_goes_off(net: &mut Net, transport: TransportId, noticed_by: Side) {
     net.run();
 }
 
-/// Both routes up at once, which is what a phone beside a desktop always has.
-///
-/// It finds the radio before mDNS resolves anything, so Bluetooth comes up first
-/// and Wi-Fi is dialled alongside it. Reproduced in that order because the order
-/// is what decides which link is older, and the old routing rule cared.
+/// Both routes up at once: Bluetooth comes up first, Wi-Fi dialled alongside it.
 fn both_routes_up(net: &mut Net) {
     discover_via(net, Side::A, Side::B, TRANSPORT, "not-listening");
     discover_via(net, Side::A, Side::B, SLOWER, "B");
-    // A second session to one peer needs a strictly later opener timestamp than
-    // the last one seen, or it is indistinguishable from a replay of it.
+    // A second session needs a strictly later opener timestamp than the last.
     net.wall += 1_000;
     discover_via(net, Side::A, Side::B, TRANSPORT, "B");
 }
 
 #[test]
 fn the_route_a_peer_is_actually_using_is_the_one_it_is_answered_over() {
-    // The takeover, as the journal finally showed it happening. Bluetooth is
-    // already up when Wi-Fi dies, so nothing is dialled and no session is opened
-    // — this end is told nothing at all, and the only news it gets is that the
-    // questions have started arriving the other way.
-    //
-    // Preferring the better transport regardless meant answering into the dead
-    // socket until the keepalive expired. Reported from the phone as a
-    // now-playing timeline that runs on by itself and then corrects ten or
-    // twenty seconds later, which is that timer and nothing else.
+    // Bluetooth is already up when Wi-Fi dies, so nothing is dialled and this
+    // end is told nothing. It must still learn the route from the direction
+    // an answer actually arrives, not keep preferring the dead socket.
     let (mut net, a_id, b_id) = paired();
     net.ble_transport = Some(SLOWER);
     both_routes_up(&mut net);
@@ -702,14 +607,10 @@ fn the_route_a_peer_is_actually_using_is_the_one_it_is_answered_over() {
         "the premise: this end has heard nothing and cannot yet know"
     );
 
-    // Time passes, as it does between a handshake and the next poll. The
-    // harness's clock stands still unless a test moves it, and two links that
-    // last spoke in the same millisecond are equally proven — which is a tie,
-    // and a tie is what transport preference is for.
+    // Two links that last spoke in the same millisecond are equally proven,
+    // which is a tie, and a tie is what transport preference is for.
     net.now += 2_000;
 
-    // What a now-playing screen does every two seconds. The question arrives the
-    // worse way, which is the peer saying that is where it lives now.
     net.ui.clear();
     net.local(
         Side::A,
@@ -736,14 +637,8 @@ fn the_route_a_peer_is_actually_using_is_the_one_it_is_answered_over() {
 
 #[test]
 fn a_route_that_is_merely_out_of_favour_is_never_torn_down() {
-    // The guard on the test above, and on the mistake made reaching it. An
-    // earlier attempt read the same evidence and *closed* the route it judged
-    // dead — which throws away a working Wi-Fi link whenever one stray Bluetooth
-    // frame lands in the moment between this end completing a handshake and the
-    // other end finishing it.
-    //
-    // Choosing wrong has to cost one message the slower way and nothing more, so
-    // that the route is still there the instant the peer uses it again.
+    // Misjudging which route carries must cost one message the slower way,
+    // not close the route it judged dead.
     let (mut net, a_id, b_id) = paired();
     net.ble_transport = Some(SLOWER);
     both_routes_up(&mut net);
@@ -789,15 +684,9 @@ fn a_route_that_is_merely_out_of_favour_is_never_torn_down() {
 
 #[test]
 fn a_peer_that_reconnects_is_not_answered_over_the_socket_it_abandoned() {
-    // Straight from the journal: `a route to a peer went away … now_on=Some(1)`
-    // — a second live route on the transport that had supposedly just gone. A
-    // phone whose Wi-Fi drops and returns leaves this end holding two sockets on
-    // one transport, the older of them dead, because nothing closed it and the
-    // peer had no way to say so.
-    //
-    // `min_by_key` kept the *older* of two equal transports, so the repair made
-    // no difference: every message went on into the socket that was already
-    // being ignored.
+    // Wi-Fi drops and returns, leaving this end holding two sockets on one
+    // transport, the older one dead. It must answer over the new one, not
+    // keep picking the older of two equal transports.
     let (mut net, a_id, b_id) = paired();
     net.ble_transport = Some(SLOWER);
     both_routes_up(&mut net);
@@ -840,11 +729,8 @@ fn a_peer_that_reconnects_is_not_answered_over_the_socket_it_abandoned() {
 
 #[test]
 fn a_session_dropped_over_a_bad_frame_says_the_device_has_gone() {
-    // Dropping a link because the peer sent nonsense is right. Doing it in
-    // silence is not: `on_transport_frame` holds the only `UpLink` out of the
-    // table, so removing it removed nothing, nobody was told the peer had gone,
-    // and the `LinkDown` that followed the close found nothing left to report.
-    // The device stayed `Reachable` with no route under it, for good.
+    // Dropping a link because the peer sent nonsense is right; doing it in
+    // silence, leaving the device `Reachable` with no route, is not.
     let (mut net, _a_id, b_id) = paired();
     discover(&mut net, Side::A, Side::B);
     assert_eq!(net.a.peer_state(&b_id), PeerState::Reachable);
@@ -865,21 +751,17 @@ fn a_session_dropped_over_a_bad_frame_says_the_device_has_gone() {
 
 #[test]
 fn a_handshake_that_never_finishes_falls_back_to_the_next_route() {
-    // A dial that connects has proved a socket, not a peer. Here the preferred
-    // address has the wrong machine on it: the connection opens, the handshake
-    // cannot finish, and the attempt used to end there in silence — the untried
-    // routes were dropped the moment the link came up, on the assumption that a
-    // connected socket was a reached device.
+    // A dial that connects has proved a socket, not a peer: the preferred
+    // address has the wrong machine on it, so the untried routes must not be
+    // dropped just because a connection opened.
     let (mut net, _a_id, b_id) = paired();
-    // Both routes on record before anything is dialled: the preferred transport
-    // points at the wrong machine, the other at B.
+    // The preferred transport points at the wrong machine, the other at B.
     discover_via(&mut net, Side::A, Side::B, TransportId(1), "B");
     discover_via(&mut net, Side::A, Side::B, TransportId(0), "C");
     net.local(Side::A, LocalCommand::Disconnect { peer: b_id.clone() });
     net.ui.clear();
     net.dialed.clear();
-    // A second opener in the same millisecond as the first is a replay, and B is
-    // right to refuse it. Real clocks move; this one has to be told to.
+    // A second opener in the same millisecond as the first is a replay.
     net.wall += 1_000;
 
     net.local(Side::A, LocalCommand::Connect { peer: b_id.clone() });
@@ -907,8 +789,7 @@ fn a_handshake_that_never_finishes_falls_back_to_the_next_route() {
 
 #[test]
 fn losing_the_last_route_does_report_the_device_as_gone() {
-    // The other half, kept honest: the case above must not be bought by never
-    // reporting a departure at all.
+    // The case above must not be bought by never reporting a departure at all.
     let (mut net, _a_id, b_id) = paired();
     discover(&mut net, Side::A, Side::B);
     assert_eq!(net.a.peer_state(&b_id), PeerState::Reachable);
@@ -926,15 +807,12 @@ fn losing_the_last_route_does_report_the_device_as_gone() {
 #[test]
 fn a_sighting_on_one_transport_does_not_evict_another() {
     let (mut net, _a_id, b_id) = paired();
-    // The better transport is overwritten first, because pairing has already
-    // recorded a route that works and any sighting would otherwise just
-    // reconnect on it. With every address bad, nothing connects and what is
-    // left to inspect is the address book itself.
+    // Overwrite the working route pairing recorded, so nothing connects and
+    // the address book itself is what's left to inspect.
     discover_via(&mut net, Side::A, Side::B, TRANSPORT, "not-listening");
     discover_via(&mut net, Side::A, Side::B, SLOWER, "also-not-listening");
 
-    // Pairing dialled too, and so did each sighting; only what Connect does is
-    // under test here.
+    // Only what Connect does is under test here.
     net.dialed.clear();
     net.local(Side::A, LocalCommand::Connect { peer: b_id.clone() });
 
@@ -952,10 +830,8 @@ fn a_sighting_on_one_transport_does_not_evict_another() {
 
 #[test]
 fn seeing_a_paired_device_is_enough_to_reach_it() {
-    // Nobody presses anything. This is what a phone needs: when its Bluetooth
-    // link drops, the radio reconnects and reads identity again, and that
-    // sighting has to be what brings the session back. Waiting for a button is
-    // why it stayed dark until the app was force-quit a second time.
+    // Nobody presses anything: a sighting alone must bring the session back,
+    // the way a Bluetooth radio reconnecting does on a phone.
     let (mut net, _a_id, b_id) = paired();
     assert_eq!(net.a.peer_state(&b_id), PeerState::Unreachable);
 
@@ -972,21 +848,17 @@ fn seeing_a_paired_device_is_enough_to_reach_it() {
 
 #[test]
 fn a_better_transport_is_taken_even_while_a_worse_one_is_working() {
-    // The bug this pins: a phone finds Bluetooth first, because it is already
-    // connected to the desktop's radio while mDNS has yet to resolve. Treating
-    // "a link exists" as "nothing more to do" left it there for the whole
-    // session — and a Bluetooth link cannot carry a file, so every transfer was
-    // refused with a working Wi-Fi route sitting unused.
+    // A phone finds Bluetooth first, but "a link exists" must not mean
+    // "nothing more to do": Bluetooth cannot carry a file.
     let (mut net, _a_id, b_id) = paired();
 
-    // On the worse transport, and only that: pairing's route is overwritten
-    // with one that does not answer, so the fallback is what connects.
+    // Pairing's route is overwritten with one that does not answer, so the
+    // fallback on the worse transport is what connects.
     discover_via(&mut net, Side::A, Side::B, TRANSPORT, "not-listening");
     discover_via(&mut net, Side::A, Side::B, SLOWER, "B");
     assert_eq!(net.a.peer_state(&b_id), PeerState::Reachable);
 
     net.dialed.clear();
-    // Wi-Fi turns up.
     discover_via(&mut net, Side::A, Side::B, TRANSPORT, "B");
 
     assert_eq!(
@@ -994,24 +866,15 @@ fn a_better_transport_is_taken_even_while_a_worse_one_is_working() {
         vec![(TRANSPORT, "B".to_string())],
         "being reachable already is no reason to stay on the worse transport"
     );
-    // And the worse link is still there behind it, rather than torn down: two
-    // ways in is what the fallback needs, and the core sends over the better.
+    // The worse link is still there behind it, not torn down.
     assert_eq!(net.a.peer_state(&b_id), PeerState::Reachable);
 }
 
 #[test]
 fn a_hello_no_newer_than_the_last_one_is_refused() {
-    // `Noise_IKpsk2` message 1 is replayable — an eavesdropper can record a
-    // session opener and send it again — so every opener carries a timestamp
-    // and a peer's watermark only ever moves forward. PROTOCOL.md §7 is about
-    // this, and `accept_hello` is where it is enforced.
-    //
-    // It works. Nothing said so: the whole suite passed with `accept_hello`
-    // replaced by `true`, which accepts every opener ever offered, including
-    // one replayed from a device with no record at all. Found by mutation
-    // testing, which is also how the exact shape below came out — the setup is
-    // the one that hit the watermark by accident while a different test was
-    // being written.
+    // `Noise_IKpsk2` message 1 is replayable, so every opener carries a
+    // timestamp and a peer's watermark only ever moves forward (PROTOCOL.md
+    // §7, enforced in `accept_hello`).
     let (mut net, _a_id, b_id) = paired();
     net.ble_transport = Some(SLOWER);
 
@@ -1023,8 +886,8 @@ fn a_hello_no_newer_than_the_last_one_is_refused() {
         "the worse transport is what connected"
     );
 
-    // Now the better transport turns up — and the clock has deliberately not
-    // moved, so the Hello that comes back repeats a timestamp already seen.
+    // The clock has deliberately not moved, so the Hello that comes back
+    // repeats a timestamp already seen.
     discover_via(&mut net, Side::A, Side::B, TRANSPORT, "B");
 
     assert_eq!(
@@ -1041,10 +904,9 @@ fn a_hello_no_newer_than_the_last_one_is_refused() {
 
 #[test]
 fn a_refused_pairing_goes_quiet_for_longer_than_one_that_merely_lapsed() {
-    // Six digits give an attacker one chance in a million that two relayed
-    // handshakes show the same thing. That bound is only worth anything if the
-    // attempts can be counted — so the cooldown is a security control here, not
-    // a politeness, and refusing the digits has to cost more than walking away.
+    // The cooldown is a security control, not a politeness: refusing the
+    // digits has to cost more than walking away, or the six-digit bound on a
+    // relay attack isn't worth anything.
     let cfg = CoreConfig::default();
     assert!(
         cfg.pair_denied_cooldown_ms > cfg.pair_cooldown_ms,
@@ -1064,15 +926,13 @@ fn a_refused_pairing_goes_quiet_for_longer_than_one_that_merely_lapsed() {
         "a device that just reported a mismatch must not retry on the short cooldown"
     );
 
-    // B never heard the refusal — A closed the link — so its own half is still
-    // sitting there waiting on a person. Let that lapse, which is what the
-    // deadline is for, and costs B the ordinary cooldown in its turn.
+    // B never heard the refusal, so its own half is still waiting on a
+    // person. Let that lapse, costing B the ordinary cooldown in turn.
     net.now += cfg.pair_denied_cooldown_ms;
     net.wall += cfg.pair_denied_cooldown_ms;
     tick(&mut net, Side::B);
 
-    // Past both, pairing is possible again: this is a cooldown, not a permanent
-    // ban on a machine somebody fat-fingered.
+    // Past both, pairing is possible again: a cooldown, not a permanent ban.
     net.now += cfg.pair_cooldown_ms + 1;
     net.wall += cfg.pair_cooldown_ms + 1;
     net.ui.clear();
@@ -1105,9 +965,8 @@ fn ask_to_pair(net: &mut Net) {
 
 #[test]
 fn a_device_already_reached_is_not_dialled_again() {
-    // Discovery repeats — a service resolves, a radio re-announces, a scan
-    // starts over. Dialling per sighting would be a storm aimed at a device
-    // whose only offence is being switched on.
+    // Discovery repeats; dialling per sighting would be a storm aimed at a
+    // device whose only offence is being switched on.
     let (mut net, _a_id, b_id) = paired();
     discover(&mut net, Side::A, Side::B);
     assert_eq!(net.a.peer_state(&b_id), PeerState::Reachable);
@@ -1201,14 +1060,8 @@ fn two_cores_pair_and_agree_on_everything() {
 
 #[test]
 fn a_message_goes_to_the_peer_it_is_addressed_to() {
-    // `best_link` filters the link table by peer before choosing. Removing that
-    // filter — so it returns whichever link sorts first, whoever it belongs to —
-    // left the entire suite green, because every core in it had exactly one
-    // peer and any link was that peer's link.
-    //
-    // What it would cost in the real world is not subtle: a clipboard, a file,
-    // or a command addressed to one computer, delivered to a different one.
-    // Two devices cannot ask the question. This is why C exists.
+    // `best_link` must filter the link table by peer before choosing, not
+    // just return whichever link sorts first.
     let (mut net, b_id, c_id) = paired_twice();
     discover(&mut net, Side::A, Side::B);
     net.wall += 1_000;
@@ -1217,9 +1070,8 @@ fn a_message_goes_to_the_peer_it_is_addressed_to() {
     assert_eq!(net.a.peer_state(&b_id), PeerState::Reachable);
     assert_eq!(net.a.peer_state(&c_id), PeerState::Reachable);
 
-    // Addressed to C, which is deliberately *not* the link that sorts first —
-    // B was paired earlier and holds the lower id, so a core that ignores who a
-    // link belongs to sends this to B.
+    // Addressed to C, deliberately not the link that sorts first: B was
+    // paired earlier and holds the lower id.
     net.local(
         Side::A,
         LocalCommand::Plugin {
@@ -1230,9 +1082,8 @@ fn a_message_goes_to_the_peer_it_is_addressed_to() {
         },
     );
 
-    // The answer names who sent it, which is what makes this observable at all:
-    // a ping delivered to the wrong computer is still answered, and the pong
-    // still comes back. Only the name on it is different.
+    // A ping delivered to the wrong computer is still answered; only the
+    // name on the pong differs.
     assert!(
         net.saw(Side::A, |e| {
             matches!(e, UiEvent::Plugin { peer, ty, body, .. }
@@ -1251,24 +1102,15 @@ fn a_message_goes_to_the_peer_it_is_addressed_to() {
 
 #[test]
 fn the_peer_a_message_is_for_outranks_the_peer_we_heard_from_last() {
-    // The twin of the test above, and what it stopped catching the moment
-    // routing began to care about recency. That one relies on the addressed
-    // peer's link being the *newest*, so dropping the `peer` filter from
-    // `best_link` still happened to answer the right computer — a filter this
-    // suite has already caught being removed once.
-    //
-    // Here the other computer is the one we heard from most recently, so a walk
-    // that forgets who a link belongs to picks it, and a clipboard or a file
-    // meant for one machine arrives at another.
+    // Unlike the test above, the addressed peer's link is not the newest
+    // here, so `best_link` must not fall back to picking by recency.
     let (mut net, b_id, c_id) = paired_twice();
     discover(&mut net, Side::A, Side::B);
     net.wall += 1_000;
     discover(&mut net, Side::A, Side::C);
 
-    // B speaks last, which under the old rule it never did. Sent *from* B, not
-    // asked for by A: a walk that has forgotten who a link belongs to answers
-    // every question wrong in the same direction, so driving this from A would
-    // only misroute the setup as well and leave the trap unsprung.
+    // B speaks last. Sent *from* B, not asked for by A, so driving this
+    // from A instead wouldn't leave the trap sprung.
     net.now += 1_000;
     net.local(
         Side::B,
@@ -1341,19 +1183,9 @@ fn a_paired_peer_can_open_a_session_and_ping() {
 
 #[test]
 fn a_pairing_we_started_does_not_answer_anybody_elses_handshake() {
-    // **The rule the design rests on.** Pairing is plain `XX`, so there is no
-    // key and anybody at all can complete a handshake with this device — see
-    // `noise::any_two_devices_can_complete_a_pairing_handshake`. The only thing
-    // standing between that and a person approving a stranger is that a
-    // confirmation already on screen is never replaced.
-    //
-    // This was a real hole once, under `XXpsk0`: the side that *initiated* kept
-    // its confirmation in a window whose psk was all zeroes — a constant — so
-    // anything that could reach the device completed a handshake against a key
-    // it already knew, and what it finished replaced the confirmation the human
-    // was looking at. Approving the dialog paired the stranger. Every `XX`
-    // handshake is now that handshake, so this stopped being a regression test
-    // and became the load-bearing one.
+    // Pairing is plain `XX`: anybody can complete a handshake with this
+    // device. The only guard is that a confirmation already on screen is
+    // never replaced by a stranger's handshake.
     let (a, b) = (core("phone"), core("pc"));
     let mut net = Net::new(a, b);
     net.local(
@@ -1368,10 +1200,8 @@ fn a_pairing_we_started_does_not_answer_anybody_elses_handshake() {
         .expect("A is waiting to be confirmed")
         .to_string();
 
-    // C, uninvited, aims pairing handshakes at A — more than a pairing's whole
-    // attempt budget, because one is not enough to tell the two behaviours
-    // apart. A device that answers C at all counts these against itself and
-    // gives up on the third; one that refuses C outright never sees them.
+    // More than a pairing's whole attempt budget: a device that answers C at
+    // all counts these against itself and gives up on the third.
     for _ in 0..4 {
         net.local(
             Side::C,
@@ -1408,10 +1238,8 @@ fn offered(net: &Net, side: Side) -> Option<(TransportId, String)> {
 
 #[test]
 fn a_worse_transport_seeing_a_machine_does_not_replace_its_better_address() {
-    // A screen keys "on this network" by fingerprint and the last answer wins,
-    // so announcing whichever transport spoke most recently was enough to break
-    // this: Bluetooth repeats and Bonjour does not, so the slower radio's
-    // address quietly replaced the working one and a tap paired over it.
+    // Bluetooth repeats and Bonjour does not, so a repeated sighting on the
+    // worse transport must not replace the working address.
     let (a, b) = (core("phone"), core("pc"));
     let mut net = Net::new(a, b);
 
@@ -1429,8 +1257,7 @@ fn a_worse_transport_seeing_a_machine_does_not_replace_its_better_address() {
         "a sighting on a worse transport must not become the offered route"
     );
 
-    // And the worse one is still remembered, so losing Wi-Fi falls back to it
-    // rather than losing the machine.
+    // The worse route is still remembered, for falling back to.
     discover_via(&mut net, Side::A, Side::B, SLOWER, "b-over-bluetooth");
     net.queue.push_back((
         Side::A,
@@ -1450,11 +1277,8 @@ fn a_worse_transport_seeing_a_machine_does_not_replace_its_better_address() {
 
 #[test]
 fn what_is_nearby_is_what_is_not_already_paired() {
-    // The desktop's answer to "what could I pair with". Getting the test round
-    // the wrong way would offer every machine already paired and none of the
-    // ones you could actually do something about — and since the only thing
-    // this list is *for* is handing an address to `pair with`, that is a list
-    // of addresses that will all be refused.
+    // Nearby must list only unpaired machines: this list only feeds
+    // `pair with`, and an already-paired address there is always refused.
     let (mut net, _a_id, _b_id) = paired();
     discover(&mut net, Side::A, Side::B);
     discover_via(&mut net, Side::A, Side::C, TRANSPORT, "c-over-wifi");
@@ -1485,17 +1309,9 @@ fn what_is_nearby_is_what_is_not_already_paired() {
 
 #[test]
 fn forgetting_a_device_says_so_and_offers_it_again() {
-    // Two bugs in one flow, both reported from a phone.
-    //
-    // Asking to revoke is one-way, so a host that read the peer list back on
-    // the next line usually read it before the core had removed anything. It
-    // looked right whenever the device was connected, because closing its link
-    // announced `PeerUnreachable` and *that* refreshed — forgetting an
-    // unreachable device left the row on screen.
-    //
-    // And nothing offered the machine again afterwards. Discovery resolves once
-    // and then stays quiet, so a computer you had just forgotten could not be
-    // paired with again until the app was force-quit.
+    // Revoke must announce itself (a host reading the peer list right after
+    // can otherwise miss the removal), and the machine must be offered again
+    // rather than staying quiet until discovery re-resolves it.
     let (mut net, _a_id, b_id) = paired();
     discover(&mut net, Side::A, Side::B);
     net.ui.clear();
@@ -1518,9 +1334,8 @@ fn forgetting_a_device_says_so_and_offers_it_again() {
 
 #[test]
 fn a_machine_never_seen_is_not_offered_after_forgetting_one() {
-    // The other half: `announce` reads a cache of sightings, and a peer paired
-    // by typing an address was never in it. Offering something that had never
-    // been discovered would be inventing a machine.
+    // `announce` reads a cache of sightings; a peer paired by typing an
+    // address was never in it, so it must not be offered either.
     let (mut net, _a_id, b_id) = paired();
     net.ui.clear();
     net.local(Side::A, LocalCommand::Revoke { peer: b_id });
@@ -1532,8 +1347,7 @@ fn a_machine_never_seen_is_not_offered_after_forgetting_one() {
 
 #[test]
 fn nobody_had_to_open_anything_for_a_tap_to_reach_a_screen() {
-    // The whole point of the change: B did not open a window, was not asked to,
-    // and nobody typed anything. A tap alone puts six digits on both screens.
+    // A tap alone puts six digits on both screens; B never has to open anything.
     let (a, b) = (core("phone"), core("pc"));
     let mut net = Net::new(a, b);
     ask_to_pair(&mut net);
@@ -1552,14 +1366,8 @@ fn nobody_had_to_open_anything_for_a_tap_to_reach_a_screen() {
 
 #[test]
 fn rubbish_where_a_handshake_should_be_costs_the_sender_a_cooldown() {
-    // There is no code to get wrong, so a handshake that does not complete is a
-    // peer that cannot speak this protocol rather than two people misreading
-    // eight characters at each other. It gets one strike, not three, and the
-    // cooldown is what stops it hammering.
-    //
-    // This replaces the old three-attempt budget, which mutation testing showed
-    // had become unreachable: the admission gate refuses a second handshake
-    // before anything can count it, so `attempts` could never pass one.
+    // A handshake that does not complete gets one strike and a cooldown,
+    // not three attempts.
     let (a, b) = (core("phone"), core("pc"));
     let mut net = Net::new(a, b);
     garbled_pairing_frame(&mut net, Side::B);
@@ -1570,8 +1378,7 @@ fn rubbish_where_a_handshake_should_be_costs_the_sender_a_cooldown() {
         "and no slot left claimed by a handshake that went nowhere"
     );
 
-    // Immediately afterwards a real attempt is turned away: that is the whole
-    // defence now, so it has to actually bite.
+    // The cooldown has to actually bite on the very next real attempt.
     ask_to_pair(&mut net);
     assert!(
         net.sas_for(Side::B).is_none(),
@@ -1592,11 +1399,8 @@ fn garbled_pairing_frame(net: &mut Net, side: Side) {
             dial: None,
         },
     ));
-    // Too short to be message 1. Note that *long* rubbish is not rubbish at
-    // all: `XX` message 1 is a bare unencrypted ephemeral key, so any 32 bytes
-    // is a legitimate opener and 64 bytes is one with a payload. Only something
-    // that cannot parse gets refused here, which is the honest shape of the
-    // thing — a stranger's well-formed handshake is *meant* to be answered.
+    // Too short to be message 1; long "rubbish" would be a legitimate opener,
+    // since `XX` message 1 is just a bare ephemeral key.
     let msg = acrylius_core::proto::frame::join(
         acrylius_core::proto::frame::FrameKind::PairHandshake,
         &[0xffu8; 8],
@@ -1613,10 +1417,8 @@ fn garbled_pairing_frame(net: &mut Net, side: Side) {
 
 #[test]
 fn another_links_death_does_not_cancel_a_confirmation_on_screen() {
-    // The other half of releasing the slot when a pairing link dies. That
-    // release must be narrow: a person is looking at six digits, and any *other*
-    // link going down — a session to a device already paired, a transport
-    // dropping — must not take the question away from under them.
+    // A person is looking at six digits; an unrelated link going down must
+    // not take the question away from under them.
     let (mut net, a_id, _b_id) = paired();
 
     // A second machine asks B to pair, and B is now showing digits.
@@ -1649,11 +1451,8 @@ fn another_links_death_does_not_cancel_a_confirmation_on_screen() {
 
 #[test]
 fn being_refused_does_not_cost_the_asker_its_next_attempt() {
-    // Found by `scripts/m3-acceptance.sh`, not by this suite. `RequestPairing`
-    // claims the slot before dialling, so when B refused C's handshake — B was
-    // busy with A — C's own slot stayed claimed until its deadline. One refusal
-    // locked C out of pairing with *anything* for two minutes, and the person
-    // who tapped got no digits and no way to try again.
+    // `RequestPairing` claims the slot before dialling, so a refusal must
+    // release it rather than lock the asker out until the deadline.
     let (a, b) = (core("phone"), core("pc"));
     let mut net = Net::new(a, b);
     ask_to_pair(&mut net);
@@ -1671,8 +1470,8 @@ fn being_refused_does_not_cost_the_asker_its_next_attempt() {
         "C was refused, as it should be"
     );
 
-    // C must now be free to try somewhere else at once. Nobody bothered C —
-    // it asked and was told no — so this is not what the cooldown is for.
+    // C must be free to try somewhere else at once; this is not what the
+    // cooldown is for.
     assert!(
         !net.c.pairing_open(),
         "a refused asker must not still be holding its own pairing slot"
@@ -1681,8 +1480,8 @@ fn being_refused_does_not_cost_the_asker_its_next_attempt() {
 
 #[test]
 fn a_device_already_showing_digits_refuses_the_next_handshake() {
-    // The admission policy, from the outside. B is mid-pairing with A, so C
-    // gets nothing — not a second dialog, not a replaced one.
+    // B is mid-pairing with A, so C gets nothing: not a second dialog, not a
+    // replaced one.
     let (a, b) = (core("phone"), core("pc"));
     let mut net = Net::new(a, b);
     ask_to_pair(&mut net);
@@ -1746,10 +1545,8 @@ fn a_pairing_nobody_answers_expires_on_the_hosts_clock() {
     let mut net = Net::new(a, b);
     ask_to_pair(&mut net);
 
-    // The core asked to be woken, and it has more than one reason to be: the
-    // reconnect heartbeat runs on the same deadline, and is sooner. So the
-    // pairing's own budget is what this advances by, not whatever the next
-    // wake-up happens to be for.
+    // The pairing's own budget is what this advances by, not whatever the
+    // next scheduled wake-up (e.g. the reconnect heartbeat) happens to be for.
     let out = net.b.handle(
         Now {
             monotonic_ms: net.now,
@@ -1777,9 +1574,7 @@ fn a_pairing_nobody_answers_expires_on_the_hosts_clock() {
         "the pairing should have lapsed"
     );
 
-    // And answering it afterwards stores nothing: the digits on that screen
-    // are stale, and a person coming back to a laptop an hour later must not
-    // be able to approve them.
+    // Answering it afterwards must store nothing: the digits are stale.
     net.local(Side::B, LocalCommand::ConfirmPairing { accept: true });
     assert_eq!(
         net.b.peers().count(),
@@ -1809,24 +1604,20 @@ fn capabilities_are_negotiated_not_assumed() {
 
 #[test]
 fn pairing_records_the_address_it_proved() {
-    // A pairing that completed has just demonstrated an address works. Nothing
-    // recorded it, so a device that had finished pairing a second earlier
-    // reported itself unreachable, and stayed that way until discovery
-    // happened to speak again.
+    // A pairing that completed has just demonstrated an address works; that
+    // must be recorded, not discarded until discovery speaks again.
     let (mut net, _a_id, b_id) = paired();
 
-    // Deliberately no discovery: the address from the pairing dial is the only
-    // one in play.
+    // Deliberately no discovery: the address from the pairing dial is the
+    // only one in play.
     net.local(Side::A, LocalCommand::Connect { peer: b_id.clone() });
     assert_eq!(net.a.peer_state(&b_id), PeerState::Reachable);
 }
 
 #[test]
 fn an_address_seen_before_pairing_is_not_lost() {
-    // Discovery resolves a service once and then goes quiet until something
-    // about it changes. An announcement that lands before pairing is very
-    // often the only one there will be, so discarding it as "not a peer yet"
-    // threw away the single chance to learn where that device lives.
+    // An announcement landing before pairing is often the only one there
+    // will be, so it must not be discarded as "not a peer yet".
     let (a, b) = (core("phone"), core("pc"));
     let a_id = a.device_id();
     let mut net = Net::new(a, b);
@@ -1844,17 +1635,16 @@ fn an_address_seen_before_pairing_is_not_lost() {
     net.local(Side::A, LocalCommand::ConfirmPairing { accept: true });
     net.local(Side::B, LocalCommand::ConfirmPairing { accept: true });
 
-    // Bravo was dialled, so the handshake taught it nothing about where alpha
-    // is. The earlier announcement has to carry it.
+    // Bravo was dialled, so the handshake taught it nothing about alpha's
+    // address; the earlier announcement has to carry it.
     net.local(Side::B, LocalCommand::Connect { peer: a_id.clone() });
     assert_eq!(net.b.peer_state(&a_id), PeerState::Reachable);
 }
 
 #[test]
 fn a_peer_with_no_address_explains_itself() {
-    // Not knowing where a device is differs from failing to reach it, and only
-    // one of those the user can act on. A phone never announces itself and
-    // never listens, so this is the permanent state of every phone.
+    // Not knowing where a device is differs from failing to reach it, and
+    // only one of those the user can act on.
     let (a, b) = (core("phone"), core("pc"));
     let a_id = a.device_id();
     let mut net = Net::new(a, b);
@@ -1887,11 +1677,8 @@ fn a_peer_with_no_address_explains_itself() {
 
 #[test]
 fn a_machine_busy_pairing_says_so_in_its_advertisement() {
-    // `pair=1` is specified in PROTOCOL.md § 4 and read by both transports.
-    // It means *busy*, not *ready*: anybody may start a pairing, but a machine
-    // already showing somebody six digits will refuse the next handshake, so
-    // this is what lets a phone grey out a row instead of offering a tap that
-    // cannot work.
+    // `pair=1` (PROTOCOL.md § 4) means *busy*, not *ready*: it lets a phone
+    // grey out a row instead of offering a tap that cannot work.
     let (a, b) = (core("phone"), core("pc"));
     let mut net = Net::new(a, b);
     assert!(!net.b.pairing_open(), "nobody is pairing to begin with");
@@ -1913,9 +1700,8 @@ fn a_machine_busy_pairing_says_so_in_its_advertisement() {
 
 #[test]
 fn a_pairing_that_lapses_stops_advertising_itself() {
-    // The case with no event behind it, and the reason this is read rather
-    // than announced: nobody is told a pairing timed out, so an advertisement
-    // driven by events would go on claiming to be busy forever.
+    // Nobody is told a pairing timed out, so an advertisement driven by
+    // events would go on claiming to be busy forever; this must be read live.
     let (a, b) = (core("phone"), core("pc"));
     let mut net = Net::new(a, b);
     ask_to_pair(&mut net);
@@ -1938,14 +1724,9 @@ fn a_pairing_that_lapses_stops_advertising_itself() {
 
 #[test]
 fn pairing_opens_a_session_rather_than_waiting_to_be_dialled() {
-    // Reported from a phone: pairing succeeded and the device then sat at
-    // "Not connected" until the app was force-quit.
-    //
-    // `confirm_pairing` closed the link and left it to the peer to open a
-    // session "when it wants one", which is only ever true between two
-    // computers. A phone always dials and is never dialled, so when the phone
-    // is the side confirming, nobody dials at all — and the relaunch that
-    // fixed it worked only because it produced a fresh sighting.
+    // A phone always dials and is never dialled, so if `confirm_pairing`
+    // leaves it to the peer to open a session "when it wants one", the
+    // phone's side never connects.
     let (a, b) = (core("phone"), core("pc"));
     let b_id = b.device_id();
     let mut net = Net::new(a, b);
@@ -1960,8 +1741,7 @@ fn pairing_opens_a_session_rather_than_waiting_to_be_dialled() {
     net.local(Side::A, LocalCommand::ConfirmPairing { accept: true });
     net.local(Side::B, LocalCommand::ConfirmPairing { accept: true });
 
-    // The runtime is asked to wake immediately — `next_deadline` returns the
-    // armed heartbeat — so this is the tick that follows, not a wait.
+    // The armed heartbeat wakes the runtime immediately; this is that tick.
     net.queue.push_back((Side::A, Event::Tick));
     net.run();
 
@@ -1974,24 +1754,19 @@ fn pairing_opens_a_session_rather_than_waiting_to_be_dialled() {
 
 #[test]
 fn a_peer_nothing_can_reach_is_tried_again_without_a_new_sighting() {
-    // The other half of the same report: backgrounding the app, or putting the
-    // computer to sleep, left the phone unreachable for good.
-    //
-    // Auto-connect fires on a sighting, and mDNS resolves a service once and
-    // then says nothing. So every way of losing a session that does not end
-    // with a fresh advertisement had nothing scheduled to fix it.
+    // Auto-connect fires on a sighting, but mDNS resolves a service once and
+    // then says nothing, so a lost session with no fresh advertisement needs
+    // its own retry.
     let (mut net, _a_id, b_id) = paired();
     discover(&mut net, Side::A, Side::B);
     assert_eq!(net.a.peer_state(&b_id), PeerState::Reachable);
 
-    // The computer goes away, and says nothing more about itself. No second
-    // sighting follows, which is the whole point: mDNS resolved it once.
+    // No second sighting follows: mDNS resolved it once.
     lose_link(&mut net, TRANSPORT);
     assert_eq!(net.a.peer_state(&b_id), PeerState::Unreachable);
 
-    // Both clocks. The monotonic one is what the heartbeat is measured
-    // against; the wall clock is what the next session's `Hello` is stamped
-    // with, and one no newer than the last is refused as a replay.
+    // Both clocks: monotonic drives the heartbeat, wall stamps the next
+    // `Hello` so it isn't refused as a replay.
     net.now += CoreConfig::default().reconnect_every_ms + 1;
     net.wall += CoreConfig::default().reconnect_every_ms + 1;
     net.queue.push_back((Side::A, Event::Tick));
@@ -2006,35 +1781,25 @@ fn a_peer_nothing_can_reach_is_tried_again_without_a_new_sighting() {
 
 #[test]
 fn a_dial_nobody_answers_does_not_hold_the_remaining_routes_hostage() {
-    // Switching Wi-Fi off, and the takeover to Bluetooth that did not happen.
-    //
-    // Every route walk hangs off a promise the transports make: a dial is
-    // answered exactly once, with a link or with a failure. Network.framework
-    // does not keep it — a connection with no viable path waits for one rather
-    // than failing — so the phone dialled the Wi-Fi route into silence and
-    // never reached the Bluetooth route behind it. Nor could anything rescue
-    // it: the retry heartbeat declines to start a second dial while one is
-    // outstanding, and that one was outstanding forever.
+    // A dial that hangs forever (Network.framework waiting on a connection
+    // with no viable path, rather than failing) must not block the retry
+    // heartbeat from ever trying the routes behind it.
     let (mut net, _a_id, b_id) = paired();
     net.ble_transport = Some(SLOWER);
 
-    // Up on the better transport first, because that is the situation a
-    // takeover starts from.
+    // Up on the better transport first, the situation a takeover starts from.
     discover_via(&mut net, Side::A, Side::B, TRANSPORT, "B");
     assert_eq!(net.a.peer_state(&b_id), PeerState::Reachable);
-    // The address that route will be retried at, once it stops working. Both
-    // of these are recorded without dialling: the peer is already reachable
-    // over the best transport there is.
+    // Recorded without dialling: the peer is already reachable over the best
+    // transport there is.
     discover_via(&mut net, Side::A, Side::B, TRANSPORT, "silent");
     discover_via(&mut net, Side::A, Side::B, SLOWER, "B");
 
-    // Wi-Fi goes away.
     lose_link(&mut net, TRANSPORT);
     assert_eq!(net.a.peer_state(&b_id), PeerState::Unreachable);
     net.dialed.clear();
 
-    // The retry begins at once rather than at the next heartbeat, and finds
-    // the route that no longer answers.
+    // The retry begins at once and finds the route that no longer answers.
     net.wall += 1_000;
     net.queue.push_back((Side::A, Event::Tick));
     net.run();
@@ -2049,10 +1814,8 @@ fn a_dial_nobody_answers_does_not_hold_the_remaining_routes_hostage() {
         "a dial is out, so this is a device being reached and not one given up on"
     );
 
-    // Not a moment before the budget is up, either. A dial that is abandoned
-    // early is the same bug pointing the other way: `.preparing` is a
-    // connection that is about to work, and giving up on those is what once
-    // killed the app's very first dial at launch.
+    // Not a moment before the budget is up: abandoning a dial early is the
+    // same bug pointing the other way.
     net.now += CoreConfig::default().dial_timeout_ms - 1;
     net.wall += CoreConfig::default().dial_timeout_ms - 1;
     net.queue.push_back((Side::A, Event::Tick));
@@ -2063,8 +1826,7 @@ fn a_dial_nobody_answers_does_not_hold_the_remaining_routes_hostage() {
         "a dial still inside its budget is still a dial, not a spent route"
     );
 
-    // And now the part that did not exist: the dial is given up on, and the
-    // walk carries on to the transport that works.
+    // The dial is given up on, and the walk carries on to the working route.
     net.now += 2;
     net.wall += 2;
     net.queue.push_back((Side::A, Event::Tick));
@@ -2090,13 +1852,9 @@ fn a_dial_nobody_answers_does_not_hold_the_remaining_routes_hostage() {
 
 #[test]
 fn an_automatic_dial_waits_for_the_one_already_out() {
-    // The guard that made the hang above so total, and which is still right.
-    //
-    // Sightings arrive at whatever rate two radios feel like producing them,
-    // and dialling on each would open a fresh connection every time while the
-    // last was still coming up. So an automatic attempt stands down when one is
-    // already outstanding — which is correct, and is exactly why a dial that
-    // never comes back had to be given a deadline rather than a second dial.
+    // Sightings arrive at whatever rate two radios feel like, and dialling
+    // on each would open a fresh connection while the last was still coming
+    // up, so an automatic attempt must stand down when one is outstanding.
     let (mut net, _a_id, b_id) = paired();
     // Pairing dialled to get here; this is about what happens afterwards.
     net.dialed.clear();
@@ -2117,13 +1875,11 @@ fn an_automatic_dial_waits_for_the_one_already_out() {
         "every sighting dialled again while one was already outstanding: {:?}",
         net.dialed
     );
-    // And it says so. A dial in the air is not a link, but it is not nothing,
-    // and reporting it as unreachable is what made the screen read "Not
-    // connected" throughout the time the app was busy connecting.
+    // A dial in the air is not a link, but it must not be reported as
+    // unreachable either.
     assert_eq!(net.a.peer_state(&b_id), PeerState::Connecting);
 
-    // Nor does a person asking start a second one on top. What they asked for
-    // is already under way, and the screen is now showing them that.
+    // Nor does a person asking start a second dial on top.
     net.ui.clear();
     net.local(Side::A, LocalCommand::Connect { peer: b_id.clone() });
     assert_eq!(
@@ -2133,12 +1889,9 @@ fn an_automatic_dial_waits_for_the_one_already_out() {
         net.dialed
     );
 
-    // But they are owed the outcome. Standing down silently is how they stopped
-    // getting one: the attempt already running was automatic, an automatic
-    // attempt says nothing when it runs out of routes, and so whoever asked
-    // waited on an event that was never coming — which is `acryliusctl device
-    // connect` timing out after ten seconds against a machine that is simply
-    // not there.
+    // They are still owed the outcome: an automatic attempt says nothing
+    // when it runs out of routes, so whoever asked must not be left waiting
+    // on an event that never comes.
     net.now += CoreConfig::default().dial_timeout_ms + 1;
     net.wall += CoreConfig::default().dial_timeout_ms + 1;
     net.queue.push_back((Side::A, Event::Tick));
@@ -2154,10 +1907,8 @@ fn an_automatic_dial_waits_for_the_one_already_out() {
 
 #[test]
 fn asking_for_a_peer_that_is_already_connected_is_answered_at_once() {
-    // The same debt, settled the other way. The answer arrived before the
-    // question, so repeating it is the only way whoever asked can hear it —
-    // otherwise the request meets a peer that needs no dialling, nothing is
-    // emitted, and the caller waits out its whole timeout to be told nothing.
+    // The answer arrived before the question, so it must be repeated rather
+    // than leaving the caller to wait out its whole timeout for nothing.
     let (mut net, _a_id, b_id) = paired();
     discover_via(&mut net, Side::A, Side::B, TRANSPORT, "B");
     assert_eq!(net.a.peer_state(&b_id), PeerState::Reachable);
@@ -2182,12 +1933,9 @@ fn asking_for_a_peer_that_is_already_connected_is_answered_at_once() {
 
 #[test]
 fn the_core_gives_up_on_a_dial_later_than_the_hosts_do() {
-    // Two timeouts on one dial, and the order between them is the whole point.
-    //
-    // The host bounds its own dial because only it holds the connection and can
-    // hang up. The core's is a backstop for a host that does not. If the
-    // backstop fired first it would take the answer away from the half that can
-    // clean up, and leave a stale token for that half to answer into later.
+    // The core's timeout is a backstop for a host that doesn't bound its own
+    // dial. If the backstop fired first, it would take the answer away from
+    // the host that could still clean up its connection.
     assert!(
         CoreConfig::default().dial_timeout_ms > acrylius_core::link::DIAL_TIMEOUT_MS,
         "the backstop must outlast the bound the hosts are told to use"
@@ -2196,18 +1944,13 @@ fn the_core_gives_up_on_a_dial_later_than_the_hosts_do() {
 
 #[test]
 fn every_route_gets_its_own_budget_before_the_next_is_tried() {
-    // One deadline per dial, not one for the walk.
-    //
-    // A route that hangs must not spend the budget of the route behind it: the
-    // second one is usually a different radio, and starting it already out of
-    // time would mean never really trying it. And a walk in which every route
-    // hangs must still end, or the peer sits at "Connecting" forever with
-    // nothing left to try and nothing to say about it.
+    // One deadline per dial, not one for the whole walk, and a walk where
+    // every route hangs must still end rather than sit at "Connecting" forever.
     let (mut net, _a_id, b_id) = paired();
 
-    // Both routes on file up front and neither ever answers, which a pair of
-    // sightings could not arrange: the first would dial and the second would
-    // stand down behind it, leaving the walk with nothing queued.
+    // Both routes on file up front and neither ever answers; a pair of
+    // sightings couldn't arrange this since the first would dial and the
+    // second would stand down behind it.
     net.local(
         Side::A,
         LocalCommand::SetPeerAddress {
@@ -2246,8 +1989,8 @@ fn every_route_gets_its_own_budget_before_the_next_is_tried() {
         "the walk carried on to the route behind it"
     );
 
-    // The second route now gets the same wait the first one did, rather than
-    // inheriting a deadline that has already gone by.
+    // The second route gets the same wait as the first, not an already-spent
+    // deadline.
     net.now += CoreConfig::default().dial_timeout_ms - 1;
     net.wall += CoreConfig::default().dial_timeout_ms - 1;
     net.queue.push_back((Side::A, Event::Tick));
@@ -2258,8 +2001,7 @@ fn every_route_gets_its_own_budget_before_the_next_is_tried() {
         "the second route was given up on before it had its turn"
     );
 
-    // And then the walk ends, with a reason on file rather than a peer stuck
-    // reporting that it is connecting to something that never answers.
+    // The walk ends with a reason on file, not a peer stuck "Connecting".
     net.now += 2;
     net.wall += 2;
     net.queue.push_back((Side::A, Event::Tick));
@@ -2276,16 +2018,14 @@ fn every_route_gets_its_own_budget_before_the_next_is_tried() {
 
 #[test]
 fn a_better_transport_is_dialled_once_while_a_worse_one_carries() {
-    // The phone that walks into the room: Bluetooth connects first because the
-    // radio is already talking, and Wi-Fi is dialled behind it because a
-    // Bluetooth link cannot carry a file. That dial takes time, and sightings
-    // keep arriving while it does — from two radios, at whatever rate each
-    // feels like. Every one of them must not open another connection.
+    // Wi-Fi is dialled behind an already-working Bluetooth link (a Bluetooth
+    // link cannot carry a file); repeat sightings while that dial is in
+    // flight must not open a second one.
     let (mut net, _a_id, b_id) = paired();
     net.ble_transport = Some(SLOWER);
 
-    // Pairing left a Wi-Fi address on file, so it has to stop working before
-    // Bluetooth is what carries — the same setup `both_routes_up` uses.
+    // Pairing left a Wi-Fi address on file; it has to stop working first,
+    // the same setup `both_routes_up` uses.
     discover_via(&mut net, Side::A, Side::B, TRANSPORT, "not-listening");
     discover_via(&mut net, Side::A, Side::B, SLOWER, "B");
     assert_eq!(net.a.peer_state(&b_id), PeerState::Reachable);
@@ -2316,15 +2056,9 @@ fn a_better_transport_is_dialled_once_while_a_worse_one_carries() {
 
 #[test]
 fn the_network_coming_back_moves_a_peer_off_the_worse_radio() {
-    // Bluetooth to Wi-Fi, which is the direction with no natural trigger.
-    //
-    // Wi-Fi dying is announced — the socket fails, the path goes unviable — and
-    // the peer becomes unreachable, which every retry path already watches for.
-    // Wi-Fi *returning* announces nothing to the core at all: the peer never
-    // stopped being reachable, it is simply reachable over a radio that cannot
-    // carry a file. Only a fresh sighting moved it, and mDNS resolves a service
-    // once and then goes quiet, so a phone could sit on Bluetooth indefinitely
-    // with a working network in the room.
+    // Wi-Fi returning announces nothing to the core (the peer never stopped
+    // being reachable), and mDNS won't produce a fresh sighting on its own,
+    // so a phone could sit on Bluetooth indefinitely with Wi-Fi available.
     let (mut net, _a_id, b_id) = paired();
     net.ble_transport = Some(SLOWER);
 
@@ -2333,8 +2067,7 @@ fn the_network_coming_back_moves_a_peer_off_the_worse_radio() {
     discover_via(&mut net, Side::A, Side::B, SLOWER, "B");
     assert_eq!(net.a.transport_for(&b_id), Some(TransportKind::BleGatt));
 
-    // Wi-Fi comes back at the address already on file. Nothing tells the core:
-    // no sighting, no link event, and the peer was reachable throughout.
+    // Wi-Fi comes back at the address already on file; nothing tells the core.
     net.local(
         Side::A,
         LocalCommand::SetPeerAddress {
@@ -2358,16 +2091,14 @@ fn the_network_coming_back_moves_a_peer_off_the_worse_radio() {
         Some(TransportKind::UnixLoopback),
         "Wi-Fi came back and the session stayed on Bluetooth"
     );
-    // The Bluetooth link is left alone rather than torn down: the better link
-    // takes over by existing, and the worse one stays as the fallback it was.
+    // The Bluetooth link is left alone rather than torn down.
     assert_eq!(net.a.peer_state(&b_id), PeerState::Reachable);
 }
 
 #[test]
 fn reconsidering_routes_leaves_a_peer_already_on_the_best_one_alone() {
-    // The other half, and the reason this is a command rather than a timer: it
-    // fires on every network change, and a peer that has nothing better to move
-    // to must not be dialled again each time.
+    // This fires on every network change, so a peer with nothing better to
+    // move to must not be dialled again each time.
     let (mut net, _a_id, b_id) = paired();
     discover_via(&mut net, Side::A, Side::B, TRANSPORT, "B");
     assert_eq!(net.a.peer_state(&b_id), PeerState::Reachable);
@@ -2386,10 +2117,8 @@ fn reconsidering_routes_leaves_a_peer_already_on_the_best_one_alone() {
 
 #[test]
 fn a_machine_that_leaves_the_network_stops_being_offered() {
-    // Sightings were one-way. Nothing was ever un-discovered, so a computer
-    // that had been switched off went on being listed as something to pair
-    // with — and the list is the pairing screen, so it was offering to pair
-    // with a machine that was not there.
+    // A machine switched off must come off the pairing screen, not stay
+    // listed as something to pair with forever.
     let (mut net, _a_id, _b_id) = paired();
     let stranger = net.c.fingerprint();
 
@@ -2432,10 +2161,8 @@ fn a_machine_that_leaves_the_network_stops_being_offered() {
 
 #[test]
 fn a_withdrawal_naming_an_older_address_leaves_a_newer_one_alone() {
-    // Discovery is chatty and out of order: a machine that changes address is
-    // resolved at the new one and *then* withdrawn at the old. Removing by
-    // transport alone would drop the answer that works and un-list a computer
-    // sitting on the network.
+    // A machine that changes address is resolved at the new one and then
+    // withdrawn at the old; removing by transport alone would un-list it.
     let (mut net, _a_id, _b_id) = paired();
     let stranger = net.c.fingerprint();
 
@@ -2473,10 +2200,8 @@ fn a_withdrawal_naming_an_older_address_leaves_a_newer_one_alone() {
 
 #[test]
 fn a_machine_seen_two_ways_stays_listed_while_either_can_see_it() {
-    // A desktop beside a phone is on Wi-Fi and Bluetooth at once, and the two
-    // come and go independently. Wi-Fi lapsing says nothing about whether the
-    // machine is there — Bluetooth is still looking straight at it — so taking
-    // it off the list would be removing something the user can plainly see.
+    // Wi-Fi and Bluetooth come and go independently, so Wi-Fi lapsing must
+    // not remove a machine that Bluetooth can still see.
     let (mut net, _a_id, _b_id) = paired();
     let stranger = net.c.fingerprint();
 
@@ -2511,7 +2236,7 @@ fn a_machine_seen_two_ways_stays_listed_while_either_can_see_it() {
         "one radio losing sight of a machine took it off the list entirely"
     );
 
-    // And now the other one does too, which is the machine actually being gone.
+    // The other transport loses it too, so the machine is actually gone now.
     net.queue.push_back((
         Side::A,
         Event::Undiscovered {
@@ -2531,10 +2256,9 @@ fn a_machine_seen_two_ways_stays_listed_while_either_can_see_it() {
 
 #[test]
 fn a_paired_peer_leaving_the_network_is_not_announced_as_a_stranger() {
-    // `Undiscovered` answers `Discovered`, and a paired peer was never in that
-    // list: it has a row of its own, whose state comes from whether a session
-    // is up rather than from what mDNS can currently see. Saying it here would
-    // ask a host to remove something it never added.
+    // A paired peer's row comes from session state, not from mDNS. Reporting
+    // it as `Undiscovered` would ask a host to remove something it never
+    // added via `Discovered`.
     let (mut net, _a_id, b_id) = paired();
     discover_via(&mut net, Side::A, Side::B, TRANSPORT, "B");
     net.ui.clear();
@@ -2552,9 +2276,8 @@ fn a_paired_peer_leaving_the_network_is_not_announced_as_a_stranger() {
         !net.saw(Side::A, |e| matches!(e, UiEvent::Undiscovered { .. })),
         "a paired peer was reported as a stranger leaving"
     );
-    // And the address it was last reached at survives, because that is a
-    // different claim from what is on the air right now — the retry heartbeat
-    // has nothing else to go on.
+    // The last-reached address survives; the retry heartbeat has nothing
+    // else to go on.
     assert_eq!(net.a.peer_state(&b_id), PeerState::Reachable);
     net.dialed.clear();
     lose_link(&mut net, TRANSPORT);
@@ -2570,11 +2293,9 @@ fn a_paired_peer_leaving_the_network_is_not_announced_as_a_stranger() {
 
 #[test]
 fn a_peer_that_could_not_be_reached_records_why_without_announcing_it() {
-    // The Connect button is gone, so every dial is now automatic. That makes
-    // the reason a dial failed something a screen has to be able to *ask* for,
-    // rather than something it hears about: an automatic attempt runs on every
-    // sighting, and announcing each exhausted one would flicker an error at a
-    // device that is coming up perfectly normally.
+    // Every dial is automatic, run on every sighting, so a failed dial must
+    // be state a screen can ask for, not an announcement that flickers an
+    // error at a device coming up normally.
     let (mut net, _a_id, b_id) = paired();
 
     // Seen, but not where the harness answers. One route, and it fails.
@@ -2630,11 +2351,8 @@ fn forgetting_a_peer_forgets_why_it_would_not_connect() {
 
 #[test]
 fn a_session_survives_two_machines_with_different_uptimes() {
-    // Every test until now started both cores at the same instant, so their
-    // clocks agreed to the millisecond and nothing noticed which clock the
-    // handshake timestamp came from. Real machines do not boot together: a
-    // computer that has been up for hours and a phone just unlocked share no
-    // uptime at all.
+    // Real machines do not boot together; a computer up for hours and a
+    // phone just unlocked share no uptime at all.
     let (a, b) = (core("phone"), core("pc"));
     let b_id = b.device_id();
     let mut net = Net::new(a, b);
@@ -2733,9 +2451,8 @@ fn offer_body(transfer: u64, size: u64) -> Vec<u8> {
 
 /// The transfer id a side most recently announced to its own host.
 ///
-/// A receiver renumbers an offer on arrival, so this is the only way a test can
-/// learn what it is going to call the thing — which is exactly the position a
-/// host is in.
+/// A receiver renumbers an offer on arrival, so this is the only way a test
+/// can learn what it is going to call the thing.
 fn announced_transfer(net: &Net, side: Side, ty: &str) -> u64 {
     net.ui
         .iter()
@@ -2756,15 +2473,10 @@ fn announced_transfer(net: &Net, side: Side, ty: &str) -> u64 {
 
 #[test]
 fn a_transfer_works_when_the_two_ends_number_it_differently() {
-    // The receiver keys everything by a number of its own now, so the two ends
-    // disagree about what the transfer is called as a matter of course. Every
-    // message between them has to be translated, and the bulk key — which
-    // neither end sends and both must derive — has to come from the *sender's*
-    // number or nothing will decrypt.
-    //
-    // Contrived only in how the numbers are made to diverge. Two people sending
-    // you a photo at the same time does it by itself, which is the case this
-    // exists to allow.
+    // The receiver keys transfers by its own number, so the two ends
+    // disagree about what a transfer is called; every message between them
+    // must be translated, and the bulk key must derive from the sender's
+    // number or nothing decrypts.
     let (mut net, b_id) = sharing_pair();
     let a_id = net.a.device_id();
 
@@ -2816,10 +2528,8 @@ fn a_transfer_works_when_the_two_ends_number_it_differently() {
 
 #[test]
 fn a_refusal_reaches_the_sender_under_the_number_the_sender_used() {
-    // Everything the receiver sends back has to be translated, not just the
-    // accept. A reject carrying the receiver's own number names a transfer the
-    // sender has never had, and is refused as somebody else's business — so the
-    // file sits listed as offered until the session ends.
+    // Not just accept: a reject carrying the receiver's own number would
+    // name a transfer the sender never had.
     let (mut net, b_id) = sharing_pair();
     let a_id = net.a.device_id();
 
@@ -2846,9 +2556,8 @@ fn a_refusal_reaches_the_sender_under_the_number_the_sender_used() {
 
 #[test]
 fn a_receiver_cancelling_names_the_transfer_the_sender_knows() {
-    // The same again for a transfer given up on rather than refused, which is
-    // the other way a receiver ends one and the other place the number has to
-    // be put back.
+    // The other way a receiver can end a transfer, so the number has to be
+    // translated back here too.
     let (mut net, b_id) = sharing_pair();
     let a_id = net.a.device_id();
 
@@ -2875,11 +2584,8 @@ fn a_receiver_cancelling_names_the_transfer_the_sender_knows() {
 
 #[test]
 fn a_sender_cancelling_is_reported_under_the_number_the_receiver_uses() {
-    // The mirror, and the direction where the translation runs on the way *in*
-    // rather than out. A host is told about its own transfers and knows nothing
-    // of the sender's numbering, so an ending announced under the sender's
-    // number names something the host has never had — and the file it is
-    // holding a port and a name open for is never cleared.
+    // The mirror direction: translation on the way in. A host knows nothing
+    // of the sender's numbering, so an ending must arrive under its own.
     let (mut net, b_id) = sharing_pair();
     let a_id = net.a.device_id();
 
@@ -2923,17 +2629,13 @@ fn told_it_finished(net: &Net, side: Side, ok: bool) -> bool {
 
 #[test]
 fn a_sender_that_never_dials_is_given_up_on() {
-    // Accepting a file binds a port and reserves a filename, and until now
-    // nothing ever took them back. A sender whose session died between the
-    // accept and the dial left both held for the life of the process, and the
-    // person who had pressed Accept watched a transfer that never moved and
-    // never failed.
+    // Accepting a file binds a port and reserves a filename; a sender whose
+    // session dies between accept and dial must not hold both forever.
     let (mut net, b_id) = sharing_pair();
     let a_id = net.a.device_id();
 
-    // Numbered differently at the two ends, which is the ordinary case now and
-    // the one where telling the sender means translating. Under matching
-    // numbers this passes whether or not anything is translated at all.
+    // Numbered differently at the two ends, so telling the sender requires
+    // translation.
     plugin(&mut net, Side::A, &b_id, "offer", offer_body(1, 16));
     let first = announced_transfer(&net, Side::B, "offer");
     plugin(&mut net, Side::B, &a_id, "reject", answer_body(first));
@@ -2948,8 +2650,7 @@ fn a_sender_that_never_dials_is_given_up_on() {
     plugin(&mut net, Side::B, &a_id, "accept", answer_body(ours));
     net.ui.clear();
 
-    // Not early. A transfer that is merely slow to start is not a failed one,
-    // and a deadline that fires before it is due is worse than none.
+    // Not early: a slow-to-start transfer is not a failed one.
     net.now += BULK_DIAL_WAIT_MS - 1;
     tick(&mut net, Side::B);
     assert!(
@@ -2963,8 +2664,7 @@ fn a_sender_that_never_dials_is_given_up_on() {
         told_it_finished(&net, Side::B, false),
         "the transfer was never ended, so nothing released the port or the name"
     );
-    // And the far end is told rather than left to wonder, which is the rule
-    // every other bulk ending follows.
+    // The far end is told too, the rule every other bulk ending follows.
     assert!(
         told_it_finished(&net, Side::A, false),
         "the sender was not told the transfer it had been offered is over"
@@ -2973,10 +2673,8 @@ fn a_sender_that_never_dials_is_given_up_on() {
 
 #[test]
 fn a_file_still_arriving_is_not_given_up_on() {
-    // The other half, and the reason `BulkStarted` exists at all. Nothing in
-    // the core knows how long a gigabyte should take, so the deadline may only
-    // ever cover the wait for a sender — never the file. Bounding both would
-    // cut off the transfers people most need to work.
+    // Nothing in the core knows how long a gigabyte should take, so the
+    // deadline covers only the wait for a sender, never the file itself.
     let (mut net, b_id) = sharing_pair();
     let a_id = net.a.device_id();
     net.dials = Dials::AndKeepsGoing;
@@ -3023,8 +2721,8 @@ fn a_file_is_offered_accepted_and_finished() {
     let local = announced_transfer(&net, Side::B, "offer");
     plugin(&mut net, Side::B, &a_id, "accept", answer_body(local));
 
-    // Both ends were handed a key, and they match. Neither sent it, and each
-    // filed it under its own number for the transfer.
+    // Both ends were handed a key, and they match, filed under each one's own
+    // number.
     let ours = net
         .bulk_keys
         .get(&(Side::A, TransferId(1)))
@@ -3054,8 +2752,7 @@ fn a_file_is_offered_accepted_and_finished() {
 
 #[test]
 fn nothing_is_listened_for_until_a_person_says_yes() {
-    // The property that keeps this from being a file drop for anything ever
-    // paired with the machine.
+    // Otherwise this is a file drop for anything ever paired with the machine.
     let (mut net, b_id) = sharing_pair();
     plugin(&mut net, Side::A, &b_id, "offer", offer_body(1, 4096));
     assert!(net.bulk_keys.is_empty(), "no key, no endpoint, no listener");
@@ -3081,21 +2778,14 @@ fn rejecting_an_offer_tells_the_sender_and_opens_nothing() {
 
 #[test]
 fn a_link_that_cannot_carry_files_refuses_instead_of_listening() {
-    // `LinkAttrs::bulk` promises the core "refuses one with a clear error
-    // rather than silently trying to push a gigabyte through 185-byte writes".
-    // It went unenforced until a second transport existed to notice: over BLE
-    // the receiver would accept, listen on a TCP port, and hand back an address
-    // a phone with Wi-Fi off can never reach — which looks, from the phone,
-    // like a transfer that simply stopped.
+    // A link that can't carry bulk data must refuse with a clear error, not
+    // silently try to push a gigabyte through 185-byte BLE writes.
     let (mut net, b_id) = ble_sharing_pair();
 
     plugin(&mut net, Side::A, &b_id, "offer", offer_body(1, 4096));
 
-    // On the sender, and before anything leaves. Refusing on the receiver was
-    // the original bug wearing the shape of a fix: the far end declines when a
-    // person there accepts, that refusal is local to it, and the phone that
-    // asked sits on "offered" until the session ends. An error nobody who acted
-    // can see is not a refusal.
+    // On the sender, before anything leaves: refusing only on the receiver
+    // leaves the asking phone stuck on "offered" with no visible error.
     assert!(
         net.saw(Side::A, |e| matches!(
             e,
@@ -3111,9 +2801,8 @@ fn a_link_that_cannot_carry_files_refuses_instead_of_listening() {
         )),
         "and an offer that cannot be completed is never made"
     );
-    // A refusal here sends nothing, so the "reject" a host waits for would
-    // never arrive on its own and the file would sit listed as sending
-    // forever. It is announced locally instead.
+    // A refusal here sends nothing, so it must be announced locally rather
+    // than leaving the file listed as sending forever.
     assert!(
         net.saw(Side::A, |e| matches!(
             e,
@@ -3129,9 +2818,8 @@ fn a_link_that_cannot_carry_files_refuses_instead_of_listening() {
 
 #[test]
 fn a_file_sends_again_once_wi_fi_takes_over_from_bluetooth() {
-    // The reported symptom, end to end. A phone finds Bluetooth first, and
-    // Bluetooth cannot carry a file — so while it was left there, every
-    // transfer was refused. Being on Wi-Fi as well has to un-refuse them.
+    // A phone finds Bluetooth first, and Bluetooth cannot carry a file;
+    // Wi-Fi coming up has to un-refuse transfers, not leave them stuck.
     let (a, b) = (sharing_core("phone"), sharing_core("pc"));
     let b_id = b.device_id();
     let mut net = Net::new(a, b);
@@ -3159,11 +2847,7 @@ fn a_file_sends_again_once_wi_fi_takes_over_from_bluetooth() {
         "over Bluetooth alone a file is refused, and the sender is told"
     );
 
-    // Wi-Fi turns up, a moment later. The clock has to move: a handshake
-    // opener must be strictly newer than the last one accepted, or it is a
-    // replay — so two sessions with one peer in the same millisecond is one
-    // session. Seconds pass between a radio connecting and a network
-    // resolving, but the harness's clock only moves when told.
+    // The clock has to move or the new opener looks like a replay.
     net.wall += 1_000;
     net.dialed.clear();
     net.ui.clear();
@@ -3191,8 +2875,8 @@ fn a_file_sends_again_once_wi_fi_takes_over_from_bluetooth() {
 
 #[test]
 fn a_link_that_can_carry_files_is_left_alone() {
-    // The negative of the above: the check must key on what the link said, not
-    // on there being a check at all. A TCP pair offers and listens as before.
+    // The check must key on what the link said, not on there being a check
+    // at all: a TCP pair still offers and listens as before.
     let (mut net, b_id) = sharing_pair();
     let a_id = net.a.device_id();
 
@@ -3215,12 +2899,8 @@ fn a_link_that_can_carry_files_is_left_alone() {
 
 #[test]
 fn a_body_too_large_for_the_link_is_refused_not_sent() {
-    // The other half of the same promise. A BLE link takes 16 KiB; anything
-    // bigger has to be told so, not handed to a transport that would fragment
-    // it into thousands of notifications and appear to hang.
-    //
-    // Sent over `ping`, which forwards a body verbatim — the share plugin would
-    // reject 32 KiB of zeros as a malformed offer long before the link saw it.
+    // A BLE link takes 16 KiB; anything bigger must be refused, not
+    // fragmented. Sent over `ping`, which forwards a body verbatim.
     let (mut net, b_id) = ble_sharing_pair();
     net.local(
         Side::A,
@@ -3251,11 +2931,9 @@ fn a_body_too_large_for_the_link_is_refused_not_sent() {
 
 #[test]
 fn a_device_with_nowhere_to_put_a_file_refuses_at_once() {
-    // The phone's shape: it registers the plugin and advertises the capability
-    // — otherwise a computer's `send` would fail with `cap_not_negotiated` and
-    // it could never send files either — but it has no download directory and
-    // no way to ask a person. Accepting the offer into a queue nobody can drain
-    // would leave the sender waiting on an answer that is never coming.
+    // A phone advertises the capability, so `send` doesn't fail with
+    // `cap_not_negotiated`, but has no download directory and no way to
+    // ask a person; it must refuse rather than queue the offer forever.
     let phone = CoreBuilder::new(
         Identity::generate().unwrap(),
         CoreConfig {

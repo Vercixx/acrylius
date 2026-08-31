@@ -1,44 +1,14 @@
-//! Transport vocabulary.
-//!
-//! The core never names a socket, an address family or a port. It knows only
-//! that links exist, that they carry whole messages, and what each link can and
-//! cannot do. A transport is whatever produces `LinkUp`/`LinkRecv`/`LinkDown` and
-//! consumes `Dial`/`LinkSend`/`Close`, which is why the iOS transport can be
-//! Swift over Network.framework while the Linux one is Rust over tokio, with no
-//! trait crossing the FFI boundary between them.
+//! Transport vocabulary. The core never names a socket or an address family;
+//! it knows only links that carry whole messages, and what each link can do.
 
 /// How long a peer may stop answering before its socket is treated as broken.
-///
-/// Here, in the core, because **both** hosts have to bound this and only one of
-/// them was. The Linux runtime has derived TCP keepalive and `TCP_USER_TIMEOUT`
-/// from this budget since M2; the phone opened its connections with plain
-/// defaults, so a computer that went to sleep left the phone holding an
-/// ESTABLISHED socket it would never question — reported as "the app still
-/// thinks it's connected" long after the machine had gone.
-///
-/// Sleeping closes nothing, and neither does switching Wi-Fi off: the peer
-/// simply stops answering, and a kernel is extraordinarily patient about that
-/// by default. Twenty seconds is how long a link that is dead but still
-/// believed can go on being preferred over a Bluetooth link beside it that
-/// works.
+/// Both hosts must bound this: sleep and Wi-Fi loss close nothing, they just
+/// go quiet.
 pub const DEAD_PEER_MS: u64 = 20_000;
 
 /// How long a dial may go unanswered before the route it was trying is spent.
-///
-/// A transport answers a dial exactly once, with a link or with a failure, and
-/// the core walks to the next route on the failure. Nothing said what happens
-/// when a transport answers *neither* — and Network.framework does exactly that
-/// by design: a connection with no viable path waits for one indefinitely rather
-/// than failing. So with Wi-Fi switched off the phone dialled the Wi-Fi route,
-/// waited forever, and never reached the Bluetooth route sitting behind it. The
-/// peer stayed unreachable with a working radio in the room, and the retry
-/// heartbeat could not help — it declines to start a second dial while one is
-/// still outstanding, and that one never came back.
-///
-/// Six seconds because this bounds a *local* connection: mDNS resolution plus a
-/// TCP handshake on the same network is well under a second, and anything still
-/// unresolved after six is not resolving. It is also how long a takeover now
-/// takes in the worst case, which is a number a person waits through.
+/// Needed because Network.framework never fails a dial with no viable path,
+/// and the core will not start the next route while one is outstanding.
 pub const DIAL_TIMEOUT_MS: u64 = 6_000;
 
 /// Host-assigned, unique for the lifetime of a process. The core treats it as
@@ -46,25 +16,17 @@ pub const DIAL_TIMEOUT_MS: u64 = 6_000;
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct LinkId(pub u64);
 
-/// Identifies which transport a link came from, so a reconnect goes back out the
-/// same way it came in.
+/// Identifies which transport a link came from.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct TransportId(pub u16);
 
-/// Bits of a `LinkId` left to the transport's own counter. The rest name the
+/// Bits of a `LinkId` left to the transport's own counter; the rest name the
 /// transport.
 const LINK_COUNTER_BITS: u32 = 48;
 
 impl LinkId {
-    /// Build an id that no other transport can collide with.
-    ///
-    /// The core keys links in one flat table, but every transport hands out its
-    /// own ids and none of them can see the others. Two transports that both
-    /// start counting at 1 therefore produce two different links called 1, and
-    /// because `Action::LinkSend` is offered to every transport and acted on by
-    /// whichever recognises the id, the wrong one answers. Naming the transport
-    /// in the high bits makes that impossible rather than unlikely — the same
-    /// move `Runtime` makes for reentrancy.
+    /// Naming the transport in the high bits keeps ids from transports that
+    /// each count from 1 from colliding.
     #[must_use]
     pub fn new(transport: TransportId, counter: u64) -> Self {
         Self((u64::from(transport.0) << LINK_COUNTER_BITS) | (counter & Self::COUNTER_MASK))
@@ -81,13 +43,8 @@ impl LinkId {
     }
 }
 
-/// Where a device can be reached: at most one address per transport.
-///
-/// A single `(TransportId, String)` was enough while there was one transport.
-/// With two, discovery on either overwrites the other, and the last transport to
-/// speak decides how we dial — so a BLE sighting could evict a working Wi-Fi
-/// route and quietly make everything slower. Keeping one per transport also
-/// gives a failed dial somewhere else to go.
+/// Where a device can be reached: at most one address per transport, so one
+/// transport's sighting cannot evict another's route.
 #[derive(Clone, Default, PartialEq, Eq, Debug)]
 pub struct Routes(std::collections::BTreeMap<TransportId, String>);
 
@@ -96,13 +53,8 @@ impl Routes {
         self.0.insert(transport, addr);
     }
 
-    /// Forget this transport's address, if it is the one given.
-    ///
-    /// Checked rather than removed outright: a withdrawal names an address, and
-    /// by the time it arrives that transport may already have found the machine
-    /// somewhere else. Dropping the newer answer because an older one expired
-    /// would lose a route that works.
-    ///
+    /// Forget this transport's address, if it is the one given. Checked because
+    /// a withdrawal can race a newer sighting on the same transport.
     /// Returns whether anything was removed.
     pub fn forget(&mut self, transport: TransportId, addr: &str) -> bool {
         if self.0.get(&transport).is_some_and(|a| a == addr) {
@@ -117,12 +69,8 @@ impl Routes {
         self.0.is_empty()
     }
 
-    /// Routes to try, best first.
-    ///
-    /// "Best" is ascending `TransportId`, which is not a guess: the host assigns
-    /// those ids, and assigns them in preference order. The core stays ignorant
-    /// of what any transport actually is, which is the rule this whole module
-    /// exists to keep.
+    /// Routes to try, best first: ascending `TransportId`, which hosts assign
+    /// in preference order.
     pub fn in_preference_order(&self) -> impl Iterator<Item = (TransportId, String)> + '_ {
         self.0.iter().map(|(t, a)| (*t, a.clone()))
     }
@@ -137,25 +85,17 @@ impl Routes {
 
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum TransportKind {
-    /// TCP over a local network. The M1 transport.
+    /// TCP over a local network.
     TcpLan,
-    /// A Unix socket on the same machine, used by the loopback tests today and
-    /// by out-of-process plugins later.
+    /// A Unix socket on the same machine, used by the loopback tests.
     UnixLoopback,
     /// Bluetooth LE, messages fragmented across GATT writes and notifications.
-    /// See `acrylius_proto::ble` for the framing and PROTOCOL.md §5.1.
-    ///
-    /// GATT rather than an L2CAP connection-oriented channel, which is what this
-    /// variant used to be called. L2CAP needs a PSM, which on BLE has to be
-    /// published over GATT anyway, and on Linux it means raw `AF_BLUETOOTH`
-    /// sockets the hardened user unit does not permit. It is still the right
-    /// answer for bulk later, at which point it earns its own variant.
+    /// See `acrylius_proto::ble` and PROTOCOL.md §5.1.
     BleGatt,
     Custom(&'static str),
 }
 
-/// A hint for plugin behaviour, never for correctness. A plugin may use it to
-/// decide how chatty to be; nothing may depend on it.
+/// A hint for plugin behaviour, never for correctness.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum LatencyClass {
     Loopback,
@@ -166,8 +106,7 @@ pub enum LatencyClass {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum BulkSupport {
-    /// No bulk transfers. The core refuses one with a clear error rather than
-    /// silently trying to push a gigabyte through 185-byte writes.
+    /// No bulk transfers; the core refuses one with a clear error.
     None,
     /// The transport can open a separate channel for bulk bytes.
     SideChannel,
@@ -177,10 +116,8 @@ pub enum BulkSupport {
 pub struct LinkAttrs {
     pub transport: TransportId,
     pub kind: TransportKind,
-    /// The largest whole message this link accepts, after whatever
-    /// fragmentation the transport does internally. The core will never hand
-    /// down a frame larger than this, and enforces it on plugins so an
-    /// oversized body is a `TooLarge` error rather than a mysterious hang.
+    /// Largest whole message this link accepts, after transport-internal
+    /// fragmentation. Enforced on plugins as a `TooLarge` error.
     pub max_message: u32,
     pub reliable: bool,
     pub ordered: bool,
@@ -189,7 +126,6 @@ pub struct LinkAttrs {
 }
 
 impl LinkAttrs {
-    /// The attributes of an ordinary LAN TCP link.
     #[must_use]
     pub fn tcp_lan(transport: TransportId) -> Self {
         Self {
@@ -203,29 +139,20 @@ impl LinkAttrs {
         }
     }
 
-    /// A Bluetooth LE link.
-    ///
-    /// `max_message` is deliberately not the ATT MTU. The transport fragments,
-    /// so this is how much of a message the core may hand down at once — a
-    /// budget, chosen for how long it takes to arrive rather than for what fits
-    /// in one packet. At the 517-byte MTU an iPhone negotiates, 16 KiB is about
-    /// thirty notifications.
+    /// `max_message` is a latency budget, not the ATT MTU: the transport
+    /// fragments, so this bounds how much the core hands down at once.
     #[must_use]
     pub fn ble(transport: TransportId) -> Self {
         Self {
             transport,
             kind: TransportKind::BleGatt,
             max_message: 16 * 1024,
-            // True for as long as the connection lives: the link layer
-            // retransmits, and a connection that cannot deliver drops instead of
-            // silently losing a fragment. When it drops, the link goes down and
-            // the reassembler goes with it.
+            // The link layer retransmits; a connection that cannot deliver
+            // drops, taking the reassembler with it.
             reliable: true,
             ordered: true,
             latency: LatencyClass::Ble,
-            // The bulk side channel is a TCP listener. Claiming one here would
-            // be a lie, and `BulkSupport::None` is the variant that exists for
-            // exactly this case.
+            // The bulk side channel is a TCP listener, which BLE cannot offer.
             bulk: BulkSupport::None,
         }
     }
@@ -241,8 +168,8 @@ impl LinkAttrs {
     }
 
     /// Whether a Noise session on this link may keep its nonce counter
-    /// internally. A lossy or unordered link needs caller-supplied nonces and a
-    /// replay window instead; see `noise::Session`.
+    /// internally; a lossy or unordered link needs caller-supplied nonces and
+    /// a replay window instead. See `noise::Session`.
     #[must_use]
     pub fn supports_stateful_cipher(&self) -> bool {
         self.reliable && self.ordered
@@ -274,8 +201,7 @@ mod tests {
 
     #[test]
     fn a_counter_that_overflows_its_field_stays_in_its_own_transport() {
-        // Wrapping is survivable; leaking into the next transport's range is
-        // not, because it would silently hand our link to someone else.
+        // Wrapping is survivable; leaking into another transport's range is not.
         let huge = LinkId::new(TransportId(7), u64::MAX);
         assert_eq!(huge.transport(), TransportId(7));
     }

@@ -1,29 +1,9 @@
 //! `org.acrylius.share/1`: send a file.
 //!
-//! The bytes never touch this plugin, and never touch an envelope. All that
-//! travels on the session is an offer, an endpoint and a result; the file goes
-//! over a connection of its own, encrypted with a key the core derives from the
-//! session and hands to the host. See [`crate::proto::bulk`].
-//!
-//! ## Who listens
-//!
-//! Not "the sender listens", which is what a design that had only ever run on
-//! two computers would settle on. A phone cannot accept connections at all —
-//! there is no background push on a free developer account and nothing to keep
-//! a listener alive — so a rule that assumed the sender could listen would work
-//! in exactly one direction.
-//!
-//! So the endpoint is negotiated. The receiver is asked whether it can listen;
-//! if it can, it says where, and the sender connects. A phone therefore always
-//! dials, in both directions, which is the same shape the session itself has
-//! and for the same reason. If neither side can listen the transfer is refused
-//! rather than left hanging.
-//!
-//! ## Accepting
-//!
-//! An offer is not accepted automatically. A device that wrote whatever a peer
-//! sent it, wherever it liked, would be a file drop for anything that had ever
-//! been paired with it. The host decides, and until it does the sender waits.
+//! Only an offer, an endpoint and a result travel on the session; the bytes go
+//! over a bulk connection keyed from it (see [`crate::proto::bulk`]). The
+//! receiver says where to connect — a phone cannot listen, so it always dials.
+//! Nothing is accepted until the host asks a person.
 
 use std::collections::BTreeMap;
 
@@ -34,9 +14,7 @@ use crate::vocab::{EffectKind, TransferId, UiEvent};
 
 pub const CAP: &str = "org.acrylius.share/1";
 
-/// Refused outright rather than attempted. Not a statement about disks: a
-/// transfer this big over a link this project targets is a mistake, and finding
-/// out four gigabytes in is worse than being told at the start.
+/// Refused at the offer rather than discovered gigabytes in.
 pub const MAX_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 
 /// What a sender is offering.
@@ -45,9 +23,7 @@ pub struct Offer {
     /// Chosen by the sender and unique within the session.
     #[n(0)]
     pub transfer: u64,
-    /// A file name, never a path. A receiver treats it as a suggestion and is
-    /// responsible for making it safe: anything else would let a sender choose
-    /// where its bytes landed.
+    /// A file name, never a path; the receiver must make it safe.
     #[n(1)]
     pub name: String,
     #[n(2)]
@@ -81,9 +57,7 @@ static MANIFEST: PluginManifest = PluginManifest {
     id: "org.acrylius.share",
     outgoing: &[CAP],
     incoming: &[CAP],
-    // Files are the host's business: this plugin never opens one. What it needs
-    // is somewhere to put an incoming one and something to read an outgoing one
-    // from, which is what a host declaring this effect kind is promising.
+    // Files are the host's business: this plugin never opens one.
     requires: &[EffectKind::Share],
 };
 
@@ -94,13 +68,8 @@ struct Incoming {
     offer: Offer,
     /// The envelope id of the offer, so a result can answer it.
     request: u32,
-    /// What the sender calls this transfer.
-    ///
-    /// Kept because everything that goes back over the wire has to use it: the
-    /// accept, the reject, the finished, and the greeting on the bulk socket.
-    /// The sender numbers its transfers from one and so do we, so this is
-    /// almost never the id we know it by, and using ours would name one of the
-    /// sender's other transfers — or nothing at all.
+    /// The sender's number for this transfer. Everything back over the wire
+    /// must use it; ours would name one of the sender's other transfers.
     offered_as: u64,
 }
 
@@ -124,24 +93,15 @@ impl SharePlugin {
         self.offered.iter().map(|(id, i)| (*id, &i.peer, &i.offer))
     }
 
-    /// Whether this outgoing transfer is the one we have with `peer`.
-    ///
-    /// A transfer id is chosen by whoever offered, so two peers hand out the
-    /// same small numbers as a matter of course and an id on its own names
-    /// nothing. Every answer about a transfer therefore has to come from the
-    /// device the transfer is actually with. Without this, a second paired
-    /// device could accept a file offered to the first — and an `accept`
-    /// carries the address to send it to, so it would be handed the file — or
-    /// simply cancel a transfer it had nothing to do with.
+    /// Whether this outgoing transfer is the one we have with `peer`. A bare
+    /// id names nothing, since every device numbers its own transfers from
+    /// one, so an answer about a transfer must be checked against the peer.
     fn is_sending_to(&self, peer: &DeviceId, transfer: TransferId) -> bool {
         self.sending.get(&transfer).is_some_and(|o| &o.peer == peer)
     }
 
-    /// Our number for a transfer a peer is naming by its own.
-    ///
-    /// Answered against the peer as well as the number, for the reason
-    /// [`Self::is_sending_to`] exists: a bare id names nothing, and every device
-    /// hands out the same small ones.
+    /// Our number for a transfer a peer is naming by its own. Checked against
+    /// the peer too, for the same reason as [`Self::is_sending_to`].
     fn incoming_from(&self, peer: &DeviceId, offered_as: u64) -> Option<TransferId> {
         self.offered
             .iter()
@@ -149,11 +109,8 @@ impl SharePlugin {
             .map(|(t, _)| *t)
     }
 
-    /// What to call a transfer when speaking to the peer it is with.
-    ///
-    /// Ours for something we offered, and theirs for something they did. Every
-    /// message that leaves this plugin goes through here, because a number that
-    /// is right locally is wrong on the wire exactly half the time.
+    /// What to call a transfer when speaking to the peer it is with: ours for
+    /// something we offered, theirs for something they did.
     fn as_the_peer_numbers_it(&self, transfer: TransferId) -> u64 {
         self.offered
             .get(&transfer)
@@ -192,11 +149,8 @@ impl Plugin for SharePlugin {
     ) -> Result<(), PluginError> {
         match env.ty {
             "offer" => {
-                // A device with nowhere to put a file says so now, while the
-                // sender is still listening. It cannot wait for a person to
-                // decide, because there is no way for one to say yes: a phone
-                // has no download directory and the capability is advertised
-                // only so this refusal can be sent at all.
+                // A device with nowhere to put a file refuses now rather than
+                // waiting on a person: a phone has no download directory to offer.
                 if !cx.serves(EffectKind::Share) {
                     return Err(PluginError::NotAllowed);
                 }
@@ -207,20 +161,9 @@ impl Plugin for SharePlugin {
                 if offer.name.is_empty() {
                     return Err(PluginError::BadBody);
                 }
-                // Renumbered on arrival, and this is the only place it happens.
-                //
-                // The id in an offer was minted from the sender's counter,
-                // which starts at one exactly like ours and like every other
-                // device's. Keying anything by it meant two peers offering at
-                // the same moment both called it transfer 1: this map, the
-                // daemon's and the phone's all had one entry where they needed
-                // two, the second offer replaced the first, and one device's
-                // bytes could be written into the file another device had been
-                // promised. Refusing the second was the stopgap; a number that
-                // means something here is the fix.
-                //
-                // The sender's number is kept rather than discarded, because
-                // every reply has to use it — see `Incoming::offered_as`.
+                // Renumbered on arrival: the sender's id starts from one like
+                // everyone else's, so two peers offering at once would collide
+                // under it. Kept as `offered_as`, since every reply must use it.
                 let transfer = cx.new_transfer();
                 let offered_as = offer.transfer;
                 self.offered.insert(
@@ -232,9 +175,8 @@ impl Plugin for SharePlugin {
                         offered_as,
                     },
                 );
-                // Announced under our number, so that a host — and the person
-                // answering — only ever handles ids that mean something on this
-                // device. Nothing above this layer sees the sender's.
+                // Announced under our number: nothing above this layer ever
+                // sees the sender's.
                 Self::announce(
                     cx,
                     peer,
@@ -254,9 +196,8 @@ impl Plugin for SharePlugin {
                     minicbor::decode(env.body).map_err(|_| PluginError::BadBody)?;
                 let transfer = TransferId(accept.transfer);
                 if !self.is_sending_to(peer, transfer) {
-                    // An endpoint for a transfer we never offered *to this
-                    // peer*. Refused rather than dialled: it is somewhere to
-                    // connect chosen by someone else.
+                    // An endpoint for a transfer never offered to this peer:
+                    // somewhere to connect chosen by someone else.
                     return Err(PluginError::NotAllowed);
                 }
                 cx.bulk_send(peer, transfer, &accept.endpoint);
@@ -276,9 +217,8 @@ impl Plugin for SharePlugin {
 
             "finished" => {
                 let f: Finished = minicbor::decode(env.body).map_err(|_| PluginError::BadBody)?;
-                // Either direction may be finishing, and the number means
-                // different things in the two: a transfer we offered comes back
-                // under our id, and one offered to us under the sender's.
+                // Either direction may be finishing: a transfer we offered
+                // comes back under our id, one offered to us under the sender's.
                 let transfer = if self.is_sending_to(peer, TransferId(f.transfer)) {
                     TransferId(f.transfer)
                 } else {
@@ -319,13 +259,9 @@ impl Plugin for SharePlugin {
                 if offer.size > MAX_BYTES {
                     return Err(PluginError::TooLarge);
                 }
-                // Refused here, before the offer goes out, because here is the
-                // only place a person will ever see it. A file moves over a
-                // side channel, not over the session, so a link that carries
-                // no bulk — Bluetooth — cannot finish this however willing
-                // both ends are. The far end discovers that only when someone
-                // there accepts, and its refusal is local to it: the sender
-                // would sit on "offered" until the session ended.
+                // Refused here, before the offer goes out: a link with no bulk
+                // support (Bluetooth) can never finish a transfer, and the far
+                // end would only discover that after accepting.
                 if !cx.peer_can_carry_bulk() {
                     cx.ui(UiEvent::Error {
                         peer: Some(peer.clone()),
@@ -335,12 +271,9 @@ impl Plugin for SharePlugin {
                              network for that."
                         ),
                     });
-                    // And say the transfer is over, in the words a host already
-                    // understands. A refusal here produces no traffic, so the
-                    // "reject" that normally comes back from the far end never
-                    // will — and a host that only learns of an ending from the
-                    // wire would leave this file listed as sending for as long
-                    // as it ran. It is a rejection; it just happens to be ours.
+                    // Reported as an ordinary rejection: refusing here makes no
+                    // wire traffic, so a host that learns endings from the wire
+                    // would otherwise show this as sending forever.
                     Self::announce(
                         cx,
                         peer,
@@ -371,13 +304,9 @@ impl Plugin for SharePlugin {
                 let Some(incoming) = self.offered.get(&transfer) else {
                     return Err(PluginError::NotAllowed);
                 };
-                // Ask the host for somewhere to listen. The endpoint goes to
-                // the peer only once the host has one, because a peer told to
-                // connect to nothing has no way to tell that from a refusal.
-                //
-                // Both numbers: ours is what the host and everything above it
-                // works in, and the sender's is what the bulk key is derived
-                // from, which neither end may get wrong and neither end sends.
+                // The endpoint reaches the peer only once the host has one; a
+                // peer told to connect to nothing couldn't tell that from a
+                // refusal. `offered_as` (the sender's number) drives the bulk key.
                 cx.bulk_listen(
                     &incoming.peer.clone(),
                     transfer,
@@ -393,9 +322,8 @@ impl Plugin for SharePlugin {
                 let Some(incoming) = self.offered.remove(&transfer) else {
                     return Err(PluginError::NotAllowed);
                 };
-                // Re-encoded rather than forwarded: the body a host hands down
-                // names the transfer the way this device does, and the sender
-                // would not recognise it.
+                // Re-encoded rather than forwarded: the sender wouldn't
+                // recognise the id this device uses.
                 let body = minicbor::to_vec(Finished {
                     transfer: incoming.offered_as,
                     ..f
@@ -463,10 +391,9 @@ impl Plugin for SharePlugin {
             detail: detail.to_string(),
         };
         if let Some(peer) = peer {
-            // Both ends say how it went. Each knows only its own half: a sender
-            // that finished writing does not know whether the receiver kept the
-            // file, and a receiver cannot tell a cancelled send from a dropped
-            // connection.
+            // Both ends say how it went; each knows only its own half (a sender
+            // can't know if the receiver kept the file, a receiver can't tell a
+            // cancel from a dropped connection).
             if let Ok(body) = minicbor::to_vec(Finished {
                 transfer: theirs,
                 ..f.clone()
@@ -500,10 +427,8 @@ mod tests {
         .unwrap()
     }
 
-    /// The number this device gave an offer that arrived.
-    ///
-    /// Never the number in the offer: that one was the sender's. A host learns
-    /// ours from the announcement and answers with it, and so does a test.
+    /// The number this device gave an offer that arrived; never the number in
+    /// the offer itself, which is the sender's.
     fn ours(r: &crate::plugin::harness::Ran) -> u64 {
         r.ui.iter()
             .find_map(|e| match e {
@@ -601,14 +526,8 @@ mod tests {
 
     #[test]
     fn two_devices_offering_the_same_id_each_get_one_of_their_own() {
-        // Every device numbers its transfers from one, so "transfer 1" exists
-        // for all of them at once. Keyed by that number alone, the second offer
-        // replaced the first: the wrong offer was answered, and the accept —
-        // which carries somewhere to send the file — went to the wrong device.
-        //
-        // Refusing the second was the stopgap. Numbering them here is the fix,
-        // and it is the difference between two people being able to send you a
-        // photo at the same time and not.
+        // Every device numbers transfers from one, so two offers landing at
+        // once would collide on "transfer 1" without renumbering on arrival.
         let mut p = SharePlugin::default();
         let first = peer();
         let second = DeviceId::of(&[6u8; 32]);
@@ -645,10 +564,8 @@ mod tests {
 
     #[test]
     fn another_paired_device_cannot_accept_a_file_offered_to_someone_else() {
-        // Pairing a second phone must not make it able to read what you send to
-        // the first. The id check alone was not enough: every device numbers its
-        // own transfers from one, so "transfer 1" exists for all of them, and an
-        // `accept` carries the address to deliver to.
+        // Pairing a second phone must not make it able to read what you send
+        // to the first, even though both number their transfers from one.
         let mut p = SharePlugin::default();
         let intended = peer();
         let eavesdropper = DeviceId::of(&[8u8; 32]);
@@ -709,9 +626,8 @@ mod tests {
 
     #[test]
     fn only_the_device_a_transfer_is_with_may_finish_it() {
-        // Both directions of `finished`, and a stranger refused in each. A
-        // transfer id alone names nothing, so without the peer check any paired
-        // device could close out somebody else's transfer.
+        // Both directions of `finished`, and a stranger refused in each: a
+        // transfer id alone names nothing without the peer check.
         let mut p = SharePlugin::default();
         let mine = peer();
         let stranger = DeviceId::of(&[7u8; 32]);
@@ -737,9 +653,8 @@ mod tests {
         });
         assert!(p.sending.is_empty(), "the right device closed it out");
 
-        // Incoming. `offer(n)` sets the *size*; the id it carries is 1, which is
-        // exactly why ids collide across devices. Naming any other id here would
-        // be refused for the wrong reason and prove nothing.
+        // Incoming. `offer(n)` sets the *size*; the id it carries is always 1,
+        // which is why ids collide across devices.
         let body = offer(11);
         run(0, |cx| {
             p.on_message(cx, &mine, &envelope(11, CAP, "offer", &body))
@@ -764,9 +679,8 @@ mod tests {
 
     #[test]
     fn an_offer_of_exactly_the_largest_size_is_taken() {
-        // A bound, not the first value outside it. Nothing pinned that, so the
-        // check could quietly become `>=` and refuse a transfer that is exactly
-        // allowed — with an error naming a size it does not exceed.
+        // A bound, not the first value outside it: guards against the check
+        // quietly becoming `>=`.
         let mut p = SharePlugin::default();
         let body = minicbor::to_vec(Offer {
             transfer: 5,
@@ -796,9 +710,8 @@ mod tests {
             );
         });
 
-        // The same bound on the way out, which is a separate check in a separate
-        // function and needs saying separately. This is the one a person meets:
-        // it is refused here, before anything is sent.
+        // The same bound on the way out, a separate check in a separate
+        // function: refused here, before anything is sent.
         let mut q = SharePlugin::default();
         run(0, |cx| {
             q.on_local(cx, &peer(), "offer", &body).unwrap();

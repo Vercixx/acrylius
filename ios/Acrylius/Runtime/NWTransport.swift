@@ -1,14 +1,8 @@
 //
-//  TCP over Network.framework. iOS and macOS only.
-//
-//  Network.framework rather than raw sockets, and not by preference: it is what
-//  drives the Local Network permission prompt correctly, picks the right
-//  interface, and tells us when the path changes. A BSD socket from Rust would
-//  work on Linux and behave badly here.
-//
-//  Framing matches the daemon: u32 big-endian length, then that many bytes,
-//  capped at 1 MiB. The cap is enforced before allocating, so a peer cannot name
-//  a length and make us reserve it before sending anything.
+//  TCP over Network.framework (iOS/macOS only) — it drives the Local Network
+//  permission prompt correctly and picks the right interface, which a raw BSD
+//  socket wouldn't. Framing: u32 BE length + payload, capped at 1 MiB, checked
+//  before allocating.
 //
 
 #if canImport(Network)
@@ -33,9 +27,8 @@ public final class NWTransport: Transport, @unchecked Sendable {
     /// Whether the last path we were told about was a local network, so that
     /// only changes are acted on rather than every interface update.
     private var onLan = false
-    /// Addresses this transport has told the core about, so that it can take
-    /// them back. Only what we actually announced: withdrawing something never
-    /// mentioned would be noise, and the core would have nothing to remove.
+    /// Addresses announced to the core, so they can be withdrawn later — only
+    /// what we actually announced, or withdrawal would be noise.
     private var announced: Set<String> = []
     private let queue = DispatchQueue(label: "org.acrylius.transport")
 
@@ -56,9 +49,8 @@ public final class NWTransport: Transport, @unchecked Sendable {
         lock.lock(); let f = emit; lock.unlock()
         f?(e)
     }
-    /// The counter is ours; the id is not. `linkId` namespaces it by transport,
-    /// because the core keys every link in one table and a second transport
-    /// counting from 1 would otherwise mint ids this one already handed out.
+    /// The counter is ours; the id is not. `linkId` namespaces it by transport
+    /// so two transports counting from 1 can't collide in the core's link table.
     private func claimLink(_ c: NWConnection) -> UInt64 {
         lock.lock(); defer { lock.unlock() }
         let id = linkId(transport: transportId, counter: nextLink)
@@ -80,17 +72,8 @@ public final class NWTransport: Transport, @unchecked Sendable {
 
     /// Claim the dial this link was opened for, if it is still unanswered.
     ///
-    /// A dial is answered once, by whichever comes first: the connection going
-    /// `.ready`, or it failing before it ever did. Removing the token is the
-    /// claim, the same trick `retire` uses, so the two cannot both report.
-    ///
-    /// This exists because the token used to be captured for the connection's
-    /// whole life. A link that came up and *then* died still had one, so it
-    /// reported `dialFailed` for a dial that had already succeeded — and the
-    /// core, which had recorded `LinkUp` and was routing over it, never heard
-    /// `LinkDown`. The link stayed up forever, the peer stayed reachable over a
-    /// route that carried nothing, and no plugin was ever told the peer had
-    /// gone. Wi-Fi outranks Bluetooth, so everything went into the dead one.
+    /// A dial is answered once, whichever comes first: `.ready`, or failing
+    /// before it ever came up. Removing the token from the map is the claim.
     private func answerDial(_ link: UInt64) -> UInt64? {
         lock.lock(); defer { lock.unlock() }
         return dialled.removeValue(forKey: link)
@@ -103,14 +86,8 @@ public final class NWTransport: Transport, @unchecked Sendable {
 
     /// Tell the core a link died, exactly once.
     ///
-    /// One dropped connection is noticed by several things at once — a read
-    /// that errors, a state change to `.failed`, then `.cancelled` behind it,
-    /// and the viability handler — and the core must hear about it once.
-    /// Removing it from the table is the claim, and only the caller who
-    /// succeeds in removing it gets to report.
-    /// Returns the connection it removed, so a caller that also wants to hang
-    /// up can do so without capturing it — a handler stored *on* a connection
-    /// that captures that connection never lets it go.
+    /// Several signals can report the same drop; removing the link from the
+    /// table is the claim, so only one caller ever reports it.
     @discardableResult
     private func retire(_ link: UInt64, _ reason: FfiLinkDown) -> NWConnection? {
         guard let dead = release(link) else { return nil }
@@ -124,13 +101,9 @@ public final class NWTransport: Transport, @unchecked Sendable {
         setEmit(events)
     }
 
-    /// Addresses are opaque to the core and are produced by this transport, so
-    /// only these two shapes ever come back:
-    ///
-    /// - `bonjour:<instance>` for something discovery found. Resolution is left
-    ///   to Network.framework, which is the point: `NWBrowser` will not resolve
-    ///   SRV while browsing, and synthesising `<name>.<type>.local.` instead
-    ///   would depend on unicast DNS resolving a multicast name.
+    /// Addresses are opaque to the core; only these two shapes come back:
+    /// - `bonjour:<instance>` — resolved by Network.framework, not synthesized,
+    ///   since `NWBrowser` won't resolve SRV while browsing.
     /// - `host:port` for an address a human supplied.
     public func dial(addr: String, token: UInt64) async {
         let endpoint: NWEndpoint
@@ -150,16 +123,10 @@ public final class NWTransport: Transport, @unchecked Sendable {
 
     /// Give up on a dial that is going nowhere, and hang up behind it.
     ///
-    /// Network.framework waits for connectivity rather than failing: a
-    /// connection with no viable path sits in `.waiting` for as long as it
-    /// takes, which with Wi-Fi switched off is forever. `stateUpdateHandler`
-    /// answers a dial on `.ready`, `.failed` and `.cancelled`, and none of
-    /// those arrive — so the core was left holding a route walk that could not
-    /// continue, and never tried the Bluetooth route behind it.
-    ///
-    /// The core bounds this too, but later and on purpose. Only this end holds
-    /// the connection, so only this end can stop it, and a backstop that fired
-    /// first would take the answer away from the half that can clean up.
+    /// Network.framework sits in `.waiting` forever with no viable path (Wi-Fi
+    /// off, say) and never calls `stateUpdateHandler`. The core has its own,
+    /// longer timeout for this, so this one must fire first — only this end
+    /// holds the connection and can clean it up.
     private func boundDial(_ link: UInt64, _ c: NWConnection) {
         queue.asyncAfter(deadline: .now() + .milliseconds(Int(dialTimeoutMs()))) {
             [weak self] in
@@ -170,25 +137,12 @@ public final class NWTransport: Transport, @unchecked Sendable {
         }
     }
 
-    /// TCP with the same dead-peer budget the desktop uses.
-    ///
-    /// `.tcp` on its own is the default, and the default never questions an
-    /// idle connection at all: a computer that goes to sleep closes nothing, so
-    /// the phone went on holding an ESTABLISHED socket and reporting the peer
-    /// as connected indefinitely. The Linux runtime has bounded this since M2;
-    /// this is the same number, read from the core so the two cannot drift.
-    ///
-    /// `connectionDropTime` is the half `TCP_USER_TIMEOUT` covers on Linux —
-    /// bytes already in the send queue to a peer that has stopped answering,
-    /// which keepalive alone does not notice because the connection is not
-    /// idle.
+    /// TCP with the same dead-peer budget the desktop uses, read from the core
+    /// so the two numbers can't drift. Plain `.tcp` never questions an idle
+    /// connection, so a sleeping peer's socket would sit ESTABLISHED forever.
     private static var tcp: NWParameters {
-        // `NWParameters.tcp` and then reach into its stack, rather than
-        // building parameters from scratch. Constructing them fresh means
-        // opting out of every default the convenience carries — interface
-        // selection, path policy, how a Bonjour endpoint is resolved — and
-        // those defaults are why dialling worked. Losing them stopped the app
-        // connecting over Wi-Fi at all.
+        // Start from `NWParameters.tcp` rather than building fresh — that
+        // carries interface selection and path policy dialling needs.
         let params = NWParameters.tcp
         guard let options = params.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options
         else {
@@ -216,28 +170,20 @@ public final class NWTransport: Transport, @unchecked Sendable {
 
     /// Report every connection that is no longer usable.
     ///
-    /// `.ready` is the only state that can carry a frame. Anything else here is
-    /// a link the core still believes in and would go on choosing — and TCP
-    /// outranks Bluetooth, so a dead Wi-Fi socket does not merely fail, it
-    /// keeps a working Bluetooth link from ever being picked.
+    /// TCP outranks Bluetooth, so a dead Wi-Fi socket doesn't just fail — it
+    /// keeps a working Bluetooth link from ever being chosen.
     public func revalidate() async {
         let held: [(UInt64, NWConnection)] = {
             lock.lock(); defer { lock.unlock() }
             return connections.map { ($0.key, $0.value) }
         }()
         for (link, c) in held {
-            // Only the states that are over.
-            //
-            // `!= .ready` was too much: `.preparing` is a dial in flight and
-            // `.waiting` is one the system intends to retry, and retiring
-            // those killed connections that were about to work — including,
-            // at launch, the very first one. A connection that is still trying
-            // is not a link that died while the app was away.
+            // Only the states that are over. `.preparing`/`.waiting` are still
+            // trying and must not be retired, or a connection about to work dies.
             switch c.state {
             case .failed, .cancelled:
-                // `retire` is the claim: only the caller who removes it
-                // reports, so this cannot race the state handler into
-                // reporting the same link twice.
+                // `retire` is the claim: only the caller that removes the link
+                // reports, so this can't race the state handler.
                 retire(link, .transport(detail: "the connection did not survive the background"))?
                     .cancel()
             default:
@@ -247,14 +193,8 @@ public final class NWTransport: Transport, @unchecked Sendable {
     }
 
     public func advertise(enable: Bool, txt: [FfiTxt]) async {
-        // Advertising is deliberately unimplemented on iOS.
-        //
-        // The phone never listens: it always dials, and the PC never dials the
-        // phone. That is what lets a session exist at all on a free developer
-        // account, where there is no background push and no way to accept an
-        // inbound connection while the app is closed. Symmetry lives at the
-        // packet layer, where once a session is up either side may send, not at
-        // the connection layer.
+        // Deliberately unimplemented: the phone always dials, never listens —
+        // there's no way to accept an inbound connection while the app is closed.
     }
 
     public func discover(enable: Bool) async {
@@ -274,19 +214,9 @@ public final class NWTransport: Transport, @unchecked Sendable {
 
     /// Notice when this phone is back on a network, and act on it.
     ///
-    /// The moment Wi-Fi returns is knowable — iOS reports the path becoming
-    /// satisfied — and it is the only signal there is for going *back up* to
-    /// the better transport. Losing Wi-Fi announces itself: the socket dies and
-    /// the peer becomes unreachable, which every retry path already watches.
-    /// Regaining it announces nothing at all, because from the core's point of
-    /// view nothing broke — the peer is reachable, just over a radio that
-    /// cannot carry a file.
-    ///
-    /// So both halves happen here: the browse is replaced, because a browse
-    /// that lived through the outage may have failed and a failed one stays
-    /// failed; and the core is asked to look again, because the address it
-    /// needs is already on file and waiting for a sighting that mDNS has no
-    /// reason to send.
+    /// Regaining Wi-Fi announces nothing on its own — nothing broke, from the
+    /// core's view. So this replaces the browse (one that lived through the
+    /// outage may have failed and stays failed) and asks the core to look again.
     private func watchPath() {
         lock.lock()
         guard pathWatch == nil else { lock.unlock(); return }
@@ -300,10 +230,8 @@ public final class NWTransport: Transport, @unchecked Sendable {
             // satisfies a path and reaches nothing on this one.
             let lan = path.status == .satisfied
                 && (path.usesInterfaceType(.wifi) || path.usesInterfaceType(.wiredEthernet))
-            // Edges only. This fires on every interface change, and dialling
-            // every peer each time would be a radio a phone in a pocket cannot
-            // afford. The first callback after launch counts as an edge, which
-            // costs one browse restart and buys a route check at start-up.
+            // Edges only — dialling on every interface change would burn a
+            // pocketed phone's radio.
             guard self.noteLan(lan), lan else { return }
             self.stopBrowse()
             self.startBrowse()
@@ -349,22 +277,16 @@ public final class NWTransport: Transport, @unchecked Sendable {
 
         b.stateUpdateHandler = { [weak self] state in
             switch state {
-            // `.waiting` on a Bonjour browse almost always means Local Network
-            // permission was declined. There is no API to query it, so this is
-            // the signal we have. Say so plainly rather than reporting a
-            // generic failure the user cannot act on.
+            // `.waiting` on a Bonjour browse almost always means Local
+            // Network permission was declined; there's no API to query it directly.
             case let .waiting(error):
                 self?.fire(.dialFailed(
                     dial: 0,
                     reason: "local network permission appears to be denied (\(error))"
                 ))
             case .failed:
-                // Dropped, not restarted here. A browse that failed because
-                // there is no network will fail again immediately, and a
-                // handler that reacts to its own failure by trying again is a
-                // spin. Letting go is enough: the path watch above builds a new
-                // one when there is a network to build it on, and so does
-                // coming back to the foreground.
+                // Dropped, not restarted here — retrying immediately would
+                // spin. The path watch rebuilds it once there's a network.
                 self?.stopBrowse()
             default:
                 break
@@ -391,13 +313,8 @@ public final class NWTransport: Transport, @unchecked Sendable {
                     )
                 ))
             }
-            // Whatever we used to say was there and is not in this set.
-            //
-            // From the difference rather than from the `changes` argument, and
-            // deliberately: `results` is the complete current set, so this is
-            // also right the first time a replacement browse reports — a browse
-            // that failed and was rebuilt never delivers removals for what the
-            // dead one had found, and those would otherwise be offered forever.
+            // Diffed against the last set, not the `changes` argument: `results`
+            // is the full current set, so a rebuilt browse's removals aren't lost.
             for addr in self.withdraw(keeping: present) {
                 self.fire(.undiscovered(transport: self.transportId, addr: addr))
             }
@@ -417,9 +334,8 @@ public final class NWTransport: Transport, @unchecked Sendable {
             guard let self else { return }
             switch state {
             case .ready:
-                // The dial is answered here and nowhere else. After this the
-                // connection is a link, and anything that happens to it is a
-                // link going down — never a dial that failed.
+                // The dial is answered here and nowhere else; after this,
+                // anything that happens to the connection is a link going down.
                 self.fire(.linkUp(link: link, attrs: tcpLanAttrs(transport: self.transportId),
                                   dial: self.answerDial(link)))
                 self.receiveHeader(c, link: link)
@@ -443,22 +359,9 @@ public final class NWTransport: Transport, @unchecked Sendable {
                 break
             }
         }
-        // The direct answer to "Wi-Fi was switched off".
-        //
-        // Turning Wi-Fi off does not fail an established connection — nothing
-        // is closed, the peer simply stops answering, and the socket sits
-        // `.ready` and silent while the kernel retransmits. The core ranks
-        // transports by id and Wi-Fi outranks Bluetooth, so until this link is
-        // retired every message is routed into a connection that cannot carry
-        // it, past a Bluetooth link that is up and working. The app says
-        // "connected", and nothing happens.
-        //
-        // iOS knows the moment it happens and will say so, which is far better
-        // than any timeout: viability going false means the path this
-        // connection runs over can no longer carry traffic. There is no waiting
-        // to see whether it recovers — the core re-dials when discovery finds
-        // the desktop again, and being wrong for a second costs a redial, while
-        // being right and slow costs every message in between.
+        // Turning Wi-Fi off doesn't fail the connection — it sits `.ready` and
+        // silent while the kernel retransmits. Viability going false is the
+        // signal; no waiting to see if it recovers, since redialing is cheap.
         c.viabilityUpdateHandler = { [weak self] viable in
             guard let self, !viable else { return }
             self.retire(link, .transport(detail: "the network went away"))?.cancel()

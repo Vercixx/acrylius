@@ -1,19 +1,8 @@
 //! Desktop notifications, with buttons.
 //!
-//! A file offered to this machine has to be answered by a person, and until now
-//! the only way was a terminal — which means the answer arrives when somebody
-//! next thinks to look, and the sender waits. A notification with Accept and
-//! Deny on it is where an answer of that kind belongs.
-//!
-//! Two things are deliberate:
-//!
-//! * Actions are checked for, not assumed. `GetCapabilities` says whether this
-//!   desktop's notification daemon draws buttons at all; several do not, and one
-//!   that does not would show a notification nobody can answer. Where they are
-//!   missing the notification still appears and says to use `acryliusctl`.
-//! * Nothing here decides anything. An invoked action is reported to whoever
-//!   asked, and it is the caller that turns it into a request — the same shape
-//!   as every other effector in this crate.
+//! Buttons are only added when `GetCapabilities` reports `actions` support;
+//! otherwise the notification falls back to naming `acryliusctl`. An invoked
+//! action is only reported here, never acted on.
 
 use std::collections::HashMap;
 
@@ -66,26 +55,17 @@ pub struct Button<'a> {
 
 pub struct Notifier {
     proxy: NotificationsProxy<'static>,
-    /// Whether this desktop draws buttons. A notification with actions on a
-    /// daemon that ignores them is a question with no way to answer it.
+    /// Whether this desktop draws buttons on notifications.
     buttons: bool,
-    /// Whether this desktop renders the small HTML subset in a body.
-    ///
-    /// Read so that peer-chosen text can be escaped where it would be parsed
-    /// and left alone where it would not — escaping unconditionally would turn
-    /// an ordinary `Q&A.pdf` into `Q&amp;A.pdf` on a server that shows the body
-    /// literally.
+    /// Whether this desktop renders markup in a body; escaping unconditionally
+    /// would turn `Q&A.pdf` into `Q&amp;A.pdf` on a server that shows it literally.
     markup: bool,
 }
 
 /// Escape the markup subset a notification body may be parsed for.
 ///
-/// A file offer's name and a peer's own name are chosen by the peer, and they
-/// are put in front of somebody who is being asked to say yes. The freedesktop
-/// spec has bodies carrying `<b>`, `<i>`, `<u>` and `<a href>`, which GNOME and
-/// KDE both render — so an unescaped name could underline itself, hide the rest
-/// of the question, or draw a link. The three characters that start any of that
-/// are the three escaped here.
+/// GNOME/KDE render `<b>`/`<i>`/`<u>`/`<a href>` in bodies, so a peer-chosen
+/// name left unescaped could draw a link or hide the question.
 #[must_use]
 pub fn escape_markup(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
@@ -101,10 +81,8 @@ pub fn escape_markup(text: &str) -> String {
 }
 
 impl Notifier {
-    /// Connect, and start reporting pressed buttons.
-    ///
-    /// Returns `None` where there is no notification daemon at all, which is a
-    /// normal state on a headless machine and not an error.
+    /// Connect and start reporting pressed buttons. `None` if there's no
+    /// daemon (normal on a headless machine).
     pub async fn connect() -> Option<(Self, mpsc::UnboundedReceiver<Pressed>)> {
         let connection = zbus::Connection::session().await.ok()?;
         let proxy = NotificationsProxy::new(&connection).await.ok()?;
@@ -151,11 +129,7 @@ impl Notifier {
         self.buttons
     }
 
-    /// Put a notification up, and say which one it is.
-    ///
-    /// `timeout_ms` of 0 means it stays until answered, which is what a question
-    /// wants: an offer that expired off the screen while somebody was in another
-    /// room is one the sender is still waiting on.
+    /// Put a notification up. `timeout_ms` of 0 keeps it until answered.
     pub async fn show(
         &self,
         summary: &str,
@@ -163,8 +137,7 @@ impl Notifier {
         buttons: &[Button<'_>],
         timeout_ms: i32,
     ) -> Option<u32> {
-        // "key", "Label", "key", "Label", … which is how this interface takes
-        // them.
+        // "key", "Label", "key", "Label", ...: the shape this interface expects.
         let mut actions: Vec<&str> = Vec::with_capacity(buttons.len() * 2);
         if self.buttons {
             for b in buttons {
@@ -176,8 +149,7 @@ impl Notifier {
         let mut hints: HashMap<&str, &Value<'_>> = HashMap::new();
         hints.insert("urgency", &urgency);
 
-        // The body is the half a server parses, and the half carrying a name a
-        // peer chose. See `escape_markup`.
+        // The body carries peer-chosen text and may be parsed; see `escape_markup`.
         let body = if self.markup {
             escape_markup(body)
         } else {
@@ -198,10 +170,7 @@ impl Notifier {
             .ok()
     }
 
-    /// Take one down, because it has been answered somewhere else.
-    ///
-    /// A question left on screen after `acryliusctl file accept` answered it is a
-    /// question that will be answered twice.
+    /// Take a notification down once it's answered elsewhere (e.g. via `acryliusctl`).
     pub async fn close(&self, id: u32) {
         let _ = self.proxy.close_notification(id).await;
     }
@@ -213,9 +182,7 @@ mod tests {
 
     #[test]
     fn a_file_name_cannot_bring_its_own_markup() {
-        // The name is the peer's, and it is shown to somebody who is deciding
-        // whether to accept a file. A link or a hidden rest-of-sentence in that
-        // position is worth more to an attacker than it looks.
+        // Peer-chosen name shown to someone deciding whether to accept a file.
         assert_eq!(
             escape_markup("<b>invoice.pdf</b>"),
             "&lt;b&gt;invoice.pdf&lt;/b&gt;"
@@ -224,8 +191,7 @@ mod tests {
             escape_markup(r#"a<a href="http://x">click</a>"#),
             "a&lt;a href=\"http://x\"&gt;click&lt;/a&gt;"
         );
-        // Ampersands first, or escaping the angle brackets would be undone by
-        // an escape of the ampersand it just wrote.
+        // Ampersands must escape first, or escaping `<`/`>` would re-escape via the `&` it wrote.
         assert_eq!(escape_markup("Q&A <notes>"), "Q&amp;A &lt;notes&gt;");
     }
 

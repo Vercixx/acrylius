@@ -1,32 +1,18 @@
 #!/usr/bin/env bash
 #
-# M1 acceptance. Two daemons on one machine pair, then exercise every feature:
-# session query, clipboard, run-a-command, media, file transfer, and a relayed
-# wake.
-#
-# Both daemons share this machine's real desktop, so "the peer's session" and
-# "our session" are the same one. That is fine for checking the wire and the
-# effectors; only a second physical machine can check that the right desktop was
-# affected.
-#
-# State lives under /tmp because a Unix socket path has a hard ~108 byte limit.
+# M1 acceptance: two daemons pair, then exercise session query, clipboard,
+# commands, media, file transfer, and a relayed wake. Both use this machine's
+# real desktop, so only a second machine can confirm which one was affected.
+# State lives under /tmp: a Unix socket path has a hard ~108-byte limit.
 set -u
 D=/tmp/acr-m1; BIN="$PWD/target/debug"
 
-# Not the default port. A developer running this has an installed daemon on
-# 1971, and the failure it caused — one instance quietly refusing to bind, then
-# a pairing that never completes — looks nothing like a port conflict.
+# Not the default port: an installed daemon holds 1971.
 PORT_A=19711
 PORT_B=19721
 
-# Wait for a previous run's daemons to actually be gone. pkill returns as
-# soon as the signal is sent, and a daemon that still holds the listening
-# port, or the Wayland selection, makes the next run fail in a way that looks
-# like a flake.
-#
-# The pattern matches this run's state directory rather than the binary: one
-# naming the binary also matches the shell running this script, which then kills
-# itself, and it would take an installed daemon with it.
+# pkill returns before the port/Wayland selection is released, so poll until the process is gone.
+# Matched by state dir, not binary name: a name pattern would also match this shell's own pgrep/pkill.
 mine() { pgrep -f "acryliusd --state $D/" 2>/dev/null; }
 cleanup() { mine | xargs -r kill 2>/dev/null || true; }
 trap cleanup EXIT
@@ -62,9 +48,8 @@ directory = "$D/b-dl"
 advertise_host = "127.0.0.1"
 CFG
 
-# Alpha stands in for a phone: it reads the peer's clipboard but never pushes
-# or owns one. Without this, two daemons on one desktop fight over selection
-# ownership, which no real deployment does.
+# Alpha stands in for a phone: clipboard off, or two daemons on one desktop
+# fight over selection ownership.
 cat > $D/a/config.toml <<ACFG
 name = "alpha"
 
@@ -86,10 +71,7 @@ ready $D/b || { echo "bravo never came up"; cat $D/b.log; exit 1; }
 fail=0
 check() { if [ "$1" = 0 ]; then echo "  ok   $2"; else echo "  FAIL $2"; fail=1; fi; }
 
-# Built here rather than assumed, because nothing else in this script would
-# notice it was stale. A run against a binary from an earlier day reported a
-# failure that had been fixed hours before, and would just as happily report a
-# pass for a fix that is not in it.
+# Build here: nothing else in this script would notice a stale binary.
 if ! cargo build --quiet; then
   echo "  FAIL the workspace does not build; nothing to accept"
   exit 1
@@ -102,8 +84,6 @@ B_ID=$("$BIN/acryliusctl" --state $D/b status | head -1 | awk '{print $2}')
 
 echo
 echo "### pair"
-# Nothing is armed and nothing is typed. Bravo only watches for the question;
-# alpha asks it by dialling, and the six digits are what both ends compare.
 "$BIN/acryliusctl" --state $D/b pair > $D/b.pair 2>&1 &
 sleep 0.5
 "$BIN/acryliusctl" --state $D/a pair with 127.0.0.1:$PORT_B > $D/a.pair 2>&1 &
@@ -147,44 +127,22 @@ echo "$OUT" | grep -q "refused"; check $? "an unlisted command is refused"
 echo
 echo "### media"
 OUT=$("$BIN/acryliusctl" --state $D/a play status "$B_ID" 2>&1); echo "  $OUT" | head -3
-# A machine with nothing open is a normal state and not a failure, so the check
-# is that the question was answered rather than that something was playing.
+# Nothing playing is a normal state; check the question was answered.
 echo "$OUT" | grep -qE 'nothing is playing|[a-z]'; check $? "bravo answered about its players"
 
 OUT=$("$BIN/acryliusctl" --state $D/a play volume "$B_ID" 500 2>&1); echo "  $OUT"
 echo "$OUT" | grep -q "refused"; check $? "a volume out of range is refused, and promptly"
 
-# Seeking, which nothing exercised until a phone tried it in M3 and found that
-# `mpris:trackid` had only ever been read as a string. Every player that types
-# it as an object path — which is what the specification asks for — was
-# answered "reports no track id", and the verb had been unusable since M2
-# without anything noticing.
-#
-# Only when something is actually playing and says it can seek: a machine with
-# nothing open is a normal state, not a failure.
-# Pinned to one player by id, not to whichever is active. "Active" is a
-# property of the machine and it moves: a notification sound or a video
-# starting mid-run changes it, and the seek then lands somewhere the check is
-# not looking.
+# Only when something is playing and seekable. Pinned to one player by id:
+# "active" moves mid-run, and the seek then lands where the check is not looking.
 SEEKABLE=$("$BIN/acryliusctl" --state $D/a play status "$B_ID" 2>&1 \
   | grep -E '^\*' | awk '{print $2}' || true)
 if [ -z "$SEEKABLE" ]; then
   echo "  skip  nothing is playing; open a player to test seeking"
 else
   echo "  seeking $SEEKABLE"
-  # The position *afterwards*, not the reply. `landed` returns None for a
-  # seek — there is nothing to compare a position against, since it moves on
-  # its own — so the confirm loop has nothing to wait for and answers with a
-  # reading taken before the player acted. Asserting on that reply would be
-  # asserting the announcement rather than the state, which is the mistake
-  # this project keeps relearning.
-  # Which track a position is a position *in*.
-  #
-  # A seek names `mpris:trackid`, so one that arrives after the track has
-  # changed is meant to be ignored — that is the whole reason the id is in the
-  # call. A real player left running through this script does change track, and
-  # when it did, this failed for exactly the right reason at the wrong moment.
-  # The track's length stands in for its identity: it is on the line already.
+  # Checked after the fact, not from the reply, which returns before the seek lands.
+  # If the track changes mid-check the stale seek is ignored on purpose; matched by trackid.
   status_line() {
     "$BIN/acryliusctl" --state $D/a play status "$B_ID" 2>&1 | grep -F "$SEEKABLE"
   }
@@ -200,33 +158,18 @@ else
       continue
     fi
     AT=$(printf '%s' "$LINE" | grep -oE '\[[0-9]+:[0-9]{2}/' | tr -d '[/')
-    # Seconds, with room to move. A playing track advances while this is being
-    # read, so an exact match would be a test of how fast the machine is.
+    # Allow drift: a playing track advances while this is read.
     NOW=$(( $(echo "${AT:-0:00}" | cut -d: -f1) * 60 + $(echo "${AT:-0:00}" | cut -d: -f2 | sed 's/^0//;s/^$/0/') ))
     WANT=$((MS / 1000))
     DRIFT=$((NOW - WANT)); [ $DRIFT -lt 0 ] && DRIFT=$((-DRIFT))
     echo "  asked for ${WANT}s, player is at ${NOW}s"
-    # Zero is in this list on purpose: it is the one a phone could not reach,
-    # and "back to the start" is the most ordinary thing to ask for.
-    # Chromium ignores SetPosition(track, 0) outright — see media.rs.
+    # Zero on purpose: Chromium ignores SetPosition(track, 0) outright; see media.rs.
     [ $DRIFT -le 3 ]; check $? "a seek to ${MS}ms moves the track there"
   done
 fi
 
-# A volume command with no player named moves the machine, not a player. MPRIS
-# gives every player a writable `Volume` that a great many ignore — Chromium
-# accepts the write and does nothing, while reporting CanControl true — so the
-# slider people actually reach for has to move something that always moves.
-#
-# `output volume`, not `vol`: the latter is a player's own, and reading it here
-# is what left this desktop at full volume once.
-#
-# Off unless asked for. Everything else in this script is invisible from across
-# the room; this one is not, and a restore step that read the wrong number once
-# left a desktop at full volume with music playing. Run it deliberately:
-#
-#     ACRYLIUS_TOUCH_AUDIO=1 ./scripts/m1-acceptance.sh
-#
+# With no player named, this moves the machine's volume (many players ignore MPRIS Volume); reads "output volume."
+# Audible: gated behind ACRYLIUS_TOUCH_AUDIO=1.
 sysvol() {
   "$BIN/acryliusctl" --state $D/a play status "$B_ID" 2>&1 \
     | grep -oE 'output volume [0-9]+%' | head -1 | tr -dc '0-9'
@@ -242,8 +185,7 @@ else
   GOT=$(sysvol); echo "  asked for $WANT%, machine reports $GOT%"
   [ -n "$GOT" ] && [ "$GOT" -ge $((WANT - 5)) ] && [ "$GOT" -le $((WANT + 5)) ]
   check $? "a volume with no player named moves the machine"
-  # Put it back. This runs against a real desktop and has no business leaving
-  # it louder or quieter than it found it.
+  # Put the real desktop's volume back.
   "$BIN/acryliusctl" --state $D/a play volume "$B_ID" "$WAS" >/dev/null 2>&1
   BACK=$(sysvol)
   [ "$BACK" = "$WAS" ]; check $? "and it was put back to $WAS%"
@@ -254,15 +196,13 @@ echo "$OUT" | grep -q "refused"; check $? "a player that does not exist is refus
 
 echo
 echo "### file transfer"
-# Bigger than one 64 KiB chunk, so the sequence numbering and the final short
-# chunk are both exercised rather than a single frame that happens to work.
+# Bigger than one 64 KiB chunk: exercises sequencing and the final short chunk.
 head -c 200000 /dev/urandom > $D/photo.bin
 
 OUT=$("$BIN/acryliusctl" --state $D/b file offers 2>&1); echo "  $OUT"
 echo "$OUT" | grep -q "nothing offered"; check $? "an unoffered transfer is not waiting"
 
-# Backgrounded: the sender blocks until the receiver has answered, and nobody
-# has yet.
+# Backgrounded: the sender blocks until the receiver answers.
 "$BIN/acryliusctl" --state $D/a file send "$B_ID" $D/photo.bin > $D/send.out 2>&1 &
 SENDER=$!
 for i in $(seq 1 50); do
@@ -280,8 +220,7 @@ wait $SENDER 2>/dev/null || true
 cmp -s $D/photo.bin $D/b-dl/photo.bin
 check $? "every byte arrived, unchanged"
 
-# A peer is told a name, a size and an id. Where the file sits on the sending
-# machine is never part of that, so it cannot appear in what bravo reports.
+# The sender's local path must never reach the peer.
 if echo "$OUT" | grep -q "$D/photo.bin"; then R=1; else R=0; fi
 check $R "the sending machine's path stayed on the sending machine"
 
@@ -291,8 +230,7 @@ echo "$OUT" | grep -q "no offer numbered"; check $? "a transfer nobody offered c
 OUT=$("$BIN/acryliusctl" --state $D/b file offers 2>&1); echo "  $OUT"
 echo "$OUT" | grep -q "nothing offered"; check $? "a transfer that is over is no longer waiting"
 
-# A second copy under the same name must not replace the first: two photos
-# called the same thing is ordinary, losing one is not.
+# A second copy under the same name must not replace the first.
 "$BIN/acryliusctl" --state $D/a file send "$B_ID" $D/photo.bin > $D/send2.out 2>&1 &
 SENDER=$!
 for i in $(seq 1 50); do

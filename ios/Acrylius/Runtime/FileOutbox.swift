@@ -1,17 +1,7 @@
 //
-//  Files this phone has offered, and where they actually are.
-//
-//  The mirror of the daemon's `FileBulk`, and it exists for the same reason:
-//  something has to know both which transfer is which and where the bytes are,
-//  and nothing above this is allowed to. What crosses the session is a name, a
-//  size and an id — a peer never learns a path, and neither does the core.
-//
-//  Picking a file on iOS is not the same as having one. A document comes back
-//  as a security-scoped URL that is only readable between
-//  `startAccessingSecurityScopedResource()` and its stop, and a photo is not a
-//  file at all until it is written out. Both are resolved to a plain readable
-//  file here, before an offer is made, so a transfer cannot fail halfway
-//  through for a reason the person who chose the file would never guess at.
+//  Files this phone has offered, and where they actually are. Mirrors the
+//  daemon's `FileBulk`; a peer only ever learns a name, size and id, never a
+//  path. Picked documents/photos are copied to a plain file up front.
 //
 
 import Foundation
@@ -49,10 +39,8 @@ public actor FileOutbox {
 
     public init() {}
 
-    /// Note a file to send, and give the transfer its id.
-    ///
-    /// Ids are unique within this process. They are scoped to a session by the
-    /// key derivation, so they need be no cleverer than a counter.
+    /// Note a file to send, and give the transfer its id. Ids only need be
+    /// unique within this process; the session's key derivation scopes them.
     public func offer(_ file: Outgoing) -> FfiOffer {
         next += 1
         byTransfer[next] = file
@@ -68,10 +56,8 @@ public actor FileOutbox {
         byTransfer[transfer]?.name
     }
 
-    /// Done with a transfer, however it ended.
-    ///
-    /// A copy this made is removed. A file the user chose is left exactly where
-    /// it was: it is theirs, and sending it is not a reason to touch it.
+    /// Done with a transfer, however it ended. Removes a copy this made;
+    /// leaves a user-chosen file untouched.
     public func forget(_ transfer: UInt64) {
         guard let file = byTransfer.removeValue(forKey: transfer) else { return }
         if file.temporary {
@@ -80,10 +66,7 @@ public actor FileOutbox {
     }
 
     /// Take a security-scoped URL from a document picker and make it readable.
-    ///
-    /// Copied rather than held open. A scoped URL stops being readable the
-    /// moment the picker's grant lapses, and a transfer outlives the tap that
-    /// started it — a large file over a slow network by minutes.
+    /// Copied rather than held open — the scoped grant lapses before a slow transfer finishes.
     public nonisolated static func fromPicked(_ url: URL) throws -> Outgoing {
         #if canImport(Darwin)
         let scoped = url.startAccessingSecurityScopedResource()
@@ -97,14 +80,8 @@ public actor FileOutbox {
         let destination = copy.appendingPathComponent(name.isEmpty ? "file" : name)
         try FileManager.default.copyItem(at: url, to: destination)
 
-        // A directory is not a file, and refusing one here is the difference
-        // between saying so and sending nothing.
-        //
-        // Not hypothetical: a Live Photo is a `.pvt` bundle — a directory
-        // holding a still and a movie — and `copyItem` copies it happily.
-        // `fileSizeKey` is absent for a directory, so it became an offer of
-        // zero bytes, and the far end got a zero-byte `.pvt`. Whatever else is
-        // wrong, an offer whose size was never read is not one to make.
+        // A Live Photo is a `.pvt` bundle (a directory), which `copyItem`
+        // copies without complaint; guard against a directory explicitly.
         let values = try destination.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])
         guard values.isRegularFile == true, let size = values.fileSize else {
             throw OutboxError.notAFile(destination.lastPathComponent)
@@ -117,18 +94,10 @@ public actor FileOutbox {
             temporary: true)
     }
 
-    // `fromData` used to live here, taking bytes and a name made up by the
-    // caller because the photo picker had handed over one and not the other.
-    // Every photo went out as `photo.<ext>`. A picker item can be loaded as a
-    // file instead, which arrives with its own name, so there is nothing left
-    // that needs to invent one — and a function that takes a name on trust is
-    // an invitation to invent one again.
 }
 
-/// A content type for the offer, from the file's own extension.
-///
-/// Advisory. The receiver decides what to do with what arrives and is not
-/// entitled to trust this; it is here so a computer can show a sensible icon.
+/// A content type for the offer, guessed from the file's extension. Advisory
+/// only — the receiver decides what to do with what arrives.
 private func mimeType(for url: URL) -> String {
     #if canImport(UniformTypeIdentifiers)
     if let type = UTType(filenameExtension: url.pathExtension),

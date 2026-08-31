@@ -1,16 +1,8 @@
 //! Locking and unlocking a desktop session, through logind.
 //!
-//! `zbus` rather than shelling out to `loginctl`, which the previous project did
-//! only because Python had no comfortable D-Bus story. Speaking the bus directly
-//! also gets `PropertiesChanged` on `LockedHint`, which turns a polling loop into
-//! events.
-//!
-//! Two things here look like duplication and are not:
-//!
-//! * [`rank_for_lock`] and [`rank_for_unlock`] are near-identical and must not
-//!   be merged. See their documentation.
-//! * The lock state is resolved twice, once before acting and once after. The
-//!   second read is the result. An exit status is not.
+//! [`rank_for_lock`] and [`rank_for_unlock`] look near-identical; do not merge
+//! them (see their docs). State is re-read after acting; an exit status is
+//! never trusted as the result.
 
 use std::time::Duration;
 
@@ -20,11 +12,8 @@ use crate::compositor;
 
 /// How long to wait for a session to actually report unlocked.
 ///
-/// Both numbers live in the core, next to the budgets a client waits against
-/// them. They were a pair of bare literals here, and the phone had its own pair
-/// in Swift; the two happened to be equal for locking, so the reply could not
-/// arrive before the phone had stopped listening and a lock that worked was
-/// reported as a failure.
+/// Lives in core next to the client's own wait budget; a mismatch here
+/// previously reported a working lock as failed.
 const UNLOCK_CONFIRM: Duration =
     Duration::from_millis(acrylius_core::plugins::session::UNLOCK_CONFIRM_MS);
 /// Longer, because a locker has more to do on the way in.
@@ -74,16 +63,12 @@ pub struct Candidate {
     pub locked: bool,
 }
 
-/// Which session an unlock should target.
+/// Which session an unlock should target: locked first, then active, then
+/// lowest id.
 ///
-/// Locked sessions first, then active ones, then the lowest id.
-///
-/// This must not be shared with [`rank_for_lock`], and the reason is written out
-/// because the bug it prevents is invisible on a normal desktop. Ranking locked
-/// sessions first is right for unlock and wrong for lock: a lock request would
-/// pick a session that is already locked, do nothing, and report success. With
-/// one session both rankings choose the same thing, so the mistake only appears
-/// on a machine that has two.
+/// Must not be shared with [`rank_for_lock`]: ranking locked-first for a lock
+/// request would pick an already-locked session and report false success. One
+/// session hides the bug, since both rankings agree there.
 #[must_use]
 pub fn rank_for_unlock(candidates: &[Candidate]) -> Option<&Candidate> {
     candidates
@@ -91,9 +76,8 @@ pub fn rank_for_unlock(candidates: &[Candidate]) -> Option<&Candidate> {
         .min_by_key(|c| (!c.locked, !c.active, c.id.clone()))
 }
 
-/// Which session a lock should target. Unlocked sessions first.
-///
-/// The inverse of [`rank_for_unlock`], deliberately.
+/// Which session a lock should target: unlocked sessions first, the
+/// deliberate inverse of [`rank_for_unlock`].
 #[must_use]
 pub fn rank_for_lock(candidates: &[Candidate]) -> Option<&Candidate> {
     candidates
@@ -101,12 +85,8 @@ pub fn rank_for_lock(candidates: &[Candidate]) -> Option<&Candidate> {
         .min_by_key(|c| (c.locked, !c.active, c.id.clone()))
 }
 
-/// Decide whether a session is locked.
-///
-/// A hint of `yes` is trusted. A hint of `no` is only believed once the
-/// compositor agrees, and only on an active Wayland session where a probe means
-/// anything. A compositor with no opinion leaves the hint standing, so a failed
-/// probe never turns into "unlocked".
+/// Decide whether a session is locked. A `yes` hint is trusted; a `no` hint is
+/// only believed once the compositor agrees, on an active Wayland session.
 pub async fn resolve_locked(hint: bool, kind: &str, active: bool) -> bool {
     if hint {
         return true;
@@ -117,15 +97,9 @@ pub async fn resolve_locked(hint: bool, kind: &str, active: bool) -> bool {
     compositor::locked().await.unwrap_or(false)
 }
 
-/// How to lock and unlock, when logind's signal is not enough.
-///
-/// `loginctl unlock-session` only emits a signal; whether anything acts on it
-/// is the screen locker's choice, and plenty do not. A lock implemented inside
-/// a Wayland shell, for instance, may offer no way in at all from outside. When
-/// that is the case the answer is not to pretend the unlock worked, it is to
-/// let the person who runs the machine say how it is done.
-///
-/// Each is an argv vector, run directly with no shell.
+/// How to lock and unlock, when logind's signal alone isn't enough: many
+/// screen lockers ignore it, so a configured command can override it. Each is
+/// an argv vector, run directly with no shell.
 #[derive(Clone, Debug, Default)]
 pub struct Commands {
     pub lock: Vec<String>,
@@ -147,11 +121,8 @@ impl SessionEffector {
         })
     }
 
-    /// Run a configured command, if there is one for this direction.
-    ///
-    /// Returns whether one ran, not whether it worked: what a command claims is
-    /// no more trustworthy than what logind claims, and the answer comes from
-    /// re-reading the session either way.
+    /// Run a configured command if set for this direction. Returns whether
+    /// one ran, not whether it worked; the session is re-read either way.
     async fn run_command(&self, want_locked: bool) -> bool {
         let argv = if want_locked {
             &self.commands.lock
@@ -176,10 +147,8 @@ impl SessionEffector {
         true
     }
 
-    /// Sessions owned by this user that a person could actually be sitting at.
-    ///
-    /// `Class == user` drops systemd's own `manager` session, which otherwise
-    /// looks like a candidate and can never be locked.
+    /// Sessions this user could be sitting at. `Class == user` drops
+    /// systemd's own `manager` session.
     async fn candidates(&self) -> anyhow::Result<Vec<Candidate>> {
         let manager = ManagerProxy::new(&self.connection).await?;
         let mut out = Vec::new();
@@ -266,8 +235,7 @@ impl SessionEffector {
 
         let was_locked = chosen.locked;
         if was_locked == want_locked {
-            // Already where it should be. Idempotent, and cheap: no signal is
-            // sent and nothing is waited for.
+            // Already where it should be; idempotent, nothing sent or waited on.
             return Ok(SessionOutcome {
                 was_locked,
                 locked: was_locked,
@@ -275,9 +243,8 @@ impl SessionEffector {
             });
         }
 
-        // A configured command replaces the logind call rather than joining it.
-        // Someone who has told us how this machine locks knows better than a
-        // signal that the locker has already been observed to ignore.
+        // A configured command replaces the logind call, not joins it: it's
+        // known to work where the signal is ignored.
         if !self.run_command(want_locked).await {
             let proxy = self.proxy_for(&chosen.id).await?;
             if want_locked {
@@ -287,9 +254,8 @@ impl SessionEffector {
             }
         }
 
-        // logind only emits a signal. Whether anything acts on it is up to the
-        // screen locker, and several do not. So the answer comes from reading
-        // the state back, never from the call returning Ok.
+        // Never trust the call's return; read the state back, since acting on
+        // the signal is optional for the locker.
         let deadline = if want_locked {
             LOCK_CONFIRM
         } else {
@@ -337,8 +303,7 @@ mod tests {
 
     #[test]
     fn the_two_rankings_disagree_and_that_is_the_point() {
-        // The bug this prevents: sharing one ranking makes a lock request
-        // target the already-locked session, do nothing, and report success.
+        // Sharing one ranking would make lock target an already-locked session.
         let sessions = vec![c("1", true, true), c("2", false, true)];
         assert_eq!(
             rank_for_unlock(&sessions).unwrap().id,
@@ -354,8 +319,7 @@ mod tests {
 
     #[test]
     fn one_session_hides_the_difference() {
-        // Why the comment on those two functions has to exist: with a single
-        // session both rankings agree, so the mistake is invisible here.
+        // With one session both rankings agree; the bug above is invisible here.
         let sessions = vec![c("1", false, true)];
         assert_eq!(rank_for_unlock(&sessions).unwrap().id, "1");
         assert_eq!(rank_for_lock(&sessions).unwrap().id, "1");
@@ -382,16 +346,14 @@ mod tests {
 
     #[tokio::test]
     async fn a_hint_of_yes_is_never_second_guessed() {
-        // Trusting `yes` costs nothing: a locker that maintains the hint at all
-        // is telling the truth when it says locked.
+        // A locker that maintains the hint at all tells the truth when it says locked.
         assert!(resolve_locked(true, "wayland", true).await);
         assert!(resolve_locked(true, "x11", false).await);
     }
 
     #[tokio::test]
     async fn a_hint_of_no_on_x11_is_taken_at_face_value() {
-        // The probe only knows about Wayland compositors, so there is nothing
-        // to escalate to.
+        // The probe only knows about Wayland; there's nothing to escalate to on x11.
         assert!(!resolve_locked(false, "x11", true).await);
     }
 

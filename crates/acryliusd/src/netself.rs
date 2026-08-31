@@ -1,28 +1,18 @@
-//! What this machine looks like from the network.
-//!
-//! Wake-on-LAN needs two facts about the computer that will be asleep: a MAC
-//! address to put in the packet, and somewhere to aim it. Both are things the
-//! machine knows about itself and neither is a secret, so leaving them for a
-//! person to fill in by hand is a step that is easy to get wrong and, when it
-//! is left blank, fails invisibly — the phone shows no wake button, and nothing
-//! anywhere says why.
-//!
-//! Anything found here is a default. A value in the config always wins.
+//! What this machine looks like from the network, for Wake-on-LAN: a MAC
+//! address and somewhere to aim it. Anything found here is a default; a config value always wins.
 
 use std::net::{IpAddr, UdpSocket};
 use std::path::Path;
 
 /// This machine's address on the network it routes over.
 ///
-/// Found by asking the kernel which source address it would use to reach a
-/// documentation address, which sends nothing and needs no reply. Picking the
-/// first non-loopback interface instead gets it wrong on any machine with a
-/// VPN, a container bridge, or a second card.
+/// Asks the kernel which source address it'd use to reach a documentation
+/// address (sends nothing); picking the first non-loopback interface instead
+/// breaks on a VPN, bridge, or second NIC.
 #[must_use]
 pub fn routed_ipv4() -> Option<String> {
     let socket = UdpSocket::bind("0.0.0.0:0").ok()?;
-    // TEST-NET-1. Routable enough for the kernel to choose an interface, and
-    // not somewhere a packet would ever go.
+    // TEST-NET-1: routable enough to pick an interface, never actually reachable.
     socket.connect("192.0.2.1:9").ok()?;
     match socket.local_addr().ok()?.ip() {
         IpAddr::V4(v4) if !v4.is_loopback() => Some(v4.to_string()),
@@ -30,18 +20,12 @@ pub fn routed_ipv4() -> Option<String> {
     }
 }
 
-/// Every MAC address worth putting in a wake packet.
+/// Every MAC address worth putting in a wake packet — all of them, not just
+/// the routed one, since the routed interface (often Wi-Fi) may not be the
+/// card that's actually plugged in and listening for WoL.
 ///
-/// All of them, not the best one. The interface that carries the route is
-/// usually Wi-Fi on a laptop, and Wake-on-Wireless is rarely enabled even where
-/// it exists; the ethernet card that would actually answer may be sitting there
-/// with no route on it at all because nothing is currently plugged in. A phone
-/// sends one small datagram per address and whichever card is listening wakes
-/// the machine, so choosing between them is a guess with no upside.
-///
-/// Routed interfaces come first, cheapest metric first, so the most likely one
-/// is tried first. Anything without real hardware behind it is skipped: a VPN
-/// often holds the default route and is never wakeable.
+/// Routed interfaces come first, cheapest metric first; interfaces with no
+/// real hardware behind them (a VPN, say) are skipped.
 #[must_use]
 pub fn wakeable_macs() -> Vec<String> {
     let sys = Path::new("/sys/class/net");
@@ -82,8 +66,7 @@ fn default_route_interfaces() -> Vec<String> {
             let mut cols = line.split_whitespace();
             let iface = cols.next()?;
             let destination = cols.next()?;
-            // A destination of all zeroes is the default route. Hexadecimal,
-            // little-endian, which does not matter when comparing to zero.
+            // All-zero destination = default route (hex, little-endian, irrelevant when comparing to zero).
             if !destination.chars().all(|c| c == '0') {
                 return None;
             }
@@ -97,9 +80,8 @@ fn default_route_interfaces() -> Vec<String> {
 
 /// The MAC of an interface, if it has real hardware behind it.
 ///
-/// The `device` link is the test. A bridge, a tunnel, a container veth and a
-/// WireGuard interface all report an address of some kind, and none of them is
-/// woken by a packet; only something with a driver under it is.
+/// Tested via the `device` link: a bridge, tunnel, veth, or WireGuard
+/// interface all report an address but none is woken by a packet.
 fn hardware_mac(sys: &Path, iface: &str) -> Option<String> {
     if iface == "lo" || !sys.join(iface).join("device").exists() {
         return None;
@@ -115,9 +97,8 @@ fn hardware_mac(sys: &Path, iface: &str) -> Option<String> {
 
 /// The broadcast address for a `/24` around an address.
 ///
-/// A guess, and a deliberately conservative one: it is only ever the second
-/// place a phone aims, after the unicast address, and iOS cannot send to a
-/// broadcast address at all without an entitlement a free account does not get.
+/// A conservative guess: it's only the second place a phone aims, after
+/// unicast, since iOS can't send broadcast without an entitlement free accounts lack.
 #[must_use]
 pub fn broadcast_for(ipv4: &str) -> String {
     let mut parts: Vec<&str> = ipv4.split('.').collect();
@@ -173,10 +154,7 @@ mod tests {
 
     #[test]
     fn this_machine_can_describe_itself() {
-        // Not asserting a value: a build machine may have no route and no card
-        // at all, and a test that demands one fails in CI for the wrong reason.
-        // The shape is what matters, because a malformed MAC in a packet is
-        // worse than no packet.
+        // Not asserting a value: CI may have no route/card. Only the shape matters.
         for mac in wakeable_macs() {
             assert_eq!(mac.len(), 17, "aa:bb:cc:dd:ee:ff");
             assert_eq!(mac.matches(':').count(), 5);

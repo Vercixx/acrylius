@@ -1,8 +1,5 @@
-//! Where a transferred file comes from and goes to.
-//!
-//! The core never learns what a file is and the transport never decides where
-//! one lands. This is the only place that knows both, which is why it is here
-//! and not in either of them.
+//! Where a transferred file comes from and goes to — the only place that knows
+//! both the path and the peer.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -24,13 +21,11 @@ struct Incoming {
     dest: PathBuf,
     expect_bytes: u64,
     key: Vec<u8>,
-    /// Waiting for a sender. Taken by `accept`, which leaves `connected` in its
-    /// place: the two are never both here, and both being gone means this
-    /// transfer is already being read.
+    /// Taken by `accept`, which leaves `connected` in its place; both gone
+    /// means the transfer is already being read.
     listening: Option<Listening>,
     connected: Option<Accepted>,
-    /// The number the sender greets us with, which is not the one this map is
-    /// keyed by. See `Action::BulkListen`.
+    /// The number the sender greets us with, not the one this map is keyed by.
     offered_as: u64,
 }
 
@@ -38,8 +33,7 @@ pub struct FileBulk {
     dir: PathBuf,
     /// What to tell a peer to connect to. See [`local_address`].
     host: String,
-    /// Offers made to us, with who made them: answering one means sending
-    /// a reply, and by then the event that carried the peer is long gone.
+    /// Offers made to us, with who made them.
     offers: Mutex<BTreeMap<TransferId, (String, Offer)>>,
     outgoing: Mutex<BTreeMap<TransferId, Outgoing>>,
     incoming: Mutex<BTreeMap<TransferId, Incoming>>,
@@ -67,13 +61,8 @@ impl FileBulk {
         &self.dir
     }
 
-    /// Whether a file could actually be written here.
-    ///
-    /// Asked at startup, by writing something and removing it, because the
-    /// alternative is finding out during a transfer. The systemd unit runs
-    /// under `ProtectHome=read-only`, so a directory outside its
-    /// `ReadWritePaths=` exists, is listable, has the right owner and mode, and
-    /// still refuses every write — nothing short of trying reveals that.
+    /// Probed by writing: under `ProtectHome=read-only` a directory can have
+    /// the right owner and mode and still refuse every write.
     pub fn writable(&self) -> Result<(), std::io::Error> {
         let probe = self.dir.join(".acrylius-write-test");
         std::fs::write(&probe, b"")?;
@@ -81,10 +70,8 @@ impl FileBulk {
         Ok(())
     }
 
-    /// Note a file to send, and give the transfer its id.
-    ///
-    /// The path stays here. Nothing above this ever sees one, so no plugin and
-    /// no peer can name a file on this machine.
+    /// Note a file to send, and give the transfer its id. The path stays here:
+    /// no plugin or peer can name a file on this machine.
     pub fn offer(&self, path: PathBuf, size: u64, name: String, mime: String) -> Offer {
         let id = self.next.fetch_add(1, Ordering::Relaxed) + 1;
         self.outgoing
@@ -117,10 +104,8 @@ impl FileBulk {
 
     /// The transfer a person meant, from the number they typed.
     ///
-    /// An offer is listed under `TransferId::short`, so what comes back is
-    /// usually not the id this map is keyed by. Matched against the offers
-    /// actually waiting rather than by reconstructing one, so a number naming
-    /// nothing is refused rather than turned into something else.
+    /// Matched against offers actually waiting, rather than reconstructed from
+    /// `TransferId::short`, so a number naming nothing is refused rather than misread as something else.
     pub fn resolve(&self, typed: u64) -> Option<TransferId> {
         self.offers
             .lock()
@@ -170,14 +155,8 @@ impl FileBulk {
 
     /// Where a transfer's bytes actually ended up.
     ///
-    /// Taken, not read: it is asked once, to tell somebody where their file
-    /// went. Keeping every path a machine has ever received would be a list of
-    /// what somebody has been sent, which is nobody's business and is not worth
-    /// holding to answer a question once.
-    ///
-    /// This is the only route by which a path leaves this type, it goes to a
-    /// notification on this machine's own screen, and it goes nowhere near a
-    /// peer.
+    /// Taken, not read, since it's asked once. This is the only route by which
+    /// a path leaves this type, and it goes to a notification on this machine's own screen, never to a peer.
     pub fn landed(&self, transfer: TransferId) -> Option<PathBuf> {
         self.landed.lock().expect("poisoned").remove(&transfer)
     }
@@ -196,11 +175,8 @@ impl BulkHost for FileBulk {
             .offered(transfer)
             .ok_or_else(|| anyhow::anyhow!("no offer for transfer {}", transfer.0))?;
 
-        // The peer chose a name and nothing else. It is made safe here, and a
-        // file already there is never replaced: two photos with the same name
-        // is a normal thing to happen and losing the first one is not.
-        // Claimed here, not merely chosen. Two transfers of the same name
-        // accepted at once both used to be told the name was free.
+        // The peer only chose a name; made safe here, and never replaces an existing file.
+        // Claimed here, not just chosen, so two concurrent transfers with the same name can't both be told it's free.
         let dest = bulk::reserve_path(&self.dir, &bulk::safe_name(&offer.name))?;
         let listening = bulk::listen(&self.host).await?;
         let endpoint = listening.endpoint.clone();
@@ -220,8 +196,7 @@ impl BulkHost for FileBulk {
     }
 
     async fn accept(&self, transfer: TransferId) -> anyhow::Result<()> {
-        // Taken out of the map, because a listener can only be accepted on
-        // once and leaving it there would let a second call wait forever.
+        // Taken out of the map: a listener can only be accepted once.
         let (listening, offered_as) = {
             let mut map = self.incoming.lock().expect("poisoned");
             let entry = map
@@ -234,10 +209,8 @@ impl BulkHost for FileBulk {
                 .ok_or_else(|| anyhow::anyhow!("already accepted {}", transfer.0))?;
             (listening, offered_as)
         };
-        // Awaited with nothing locked. This is the wait that lasts, and holding
-        // the map across it would stop every other transfer on the machine.
-        // Against the sender's number, never ours: the greeting is written by
-        // the dialer, and a dialer knows only its own numbering.
+        // Awaited with nothing locked: this wait can last, and holding the map would stall every other transfer.
+        // Matched against the sender's number, not ours: the dialer writes the greeting and only knows its own numbering.
         let accepted = listening.accept(offered_as).await?;
         let mut map = self.incoming.lock().expect("poisoned");
         map.get_mut(&transfer)
@@ -265,9 +238,8 @@ impl BulkHost for FileBulk {
         };
 
         let result = connected.receive(&key, expect, &dest).await;
-        // Answered, either way. An offer left here would keep showing up as
-        // waiting for a decision that was already made, and the next transfer
-        // of a file by the same name would find the old id first.
+        // Answered either way: leaving the offer here would look like an
+        // undecided transfer and shadow the next one with the same name.
         self.forget(transfer);
         match result {
             Ok(bytes) => {
@@ -279,19 +251,13 @@ impl BulkHost for FileBulk {
                 Ok(())
             }
             Err(e) => {
-                // The empty file that reserved this name goes with it. It was
-                // created to stop a second transfer of the same name landing on
-                // top of this one; leaving it behind would fill the download
-                // directory with nothing, and make the next file of that name
-                // arrive as "photo (2).jpg" for no reason a person can see.
-                //
-                // Only if it is still empty: a rename may have already put the
-                // received bytes there and failed afterwards.
+                // Remove the empty placeholder file too (only if still empty —
+                // a rename may have placed the bytes and failed after), so a
+                // failed transfer doesn't push the next same-named file to "photo (2).jpg".
                 if std::fs::metadata(&dest).is_ok_and(|m| m.len() == 0) {
                     let _ = std::fs::remove_file(&dest);
                 }
-                // Loud, because until now a transfer that failed said nothing
-                // anywhere and looked exactly like one that had not happened.
+                // Loud: a failed transfer used to look exactly like one that never happened.
                 tracing::warn!(path = %dest.display(), error = %e, "a file did not arrive");
                 Err(e)
             }
@@ -324,16 +290,14 @@ impl BulkHost for FileBulk {
 
 /// This machine's address on the network it routes over.
 ///
-/// Found by asking the kernel which source address it would use to reach a
-/// documentation address, which sends nothing and needs no reply. The
-/// alternative — picking the first non-loopback interface — gets it wrong on
-/// any machine with a VPN, a container bridge, or a second card.
+/// Asks the kernel which source address it'd use to reach a documentation
+/// address (sends nothing); picking the first non-loopback interface instead
+/// breaks with a VPN, bridge, or second NIC.
 fn local_address() -> String {
     use std::net::UdpSocket;
     UdpSocket::bind("0.0.0.0:0")
         .and_then(|s| {
-            // TEST-NET-1. Routable enough for the kernel to choose an
-            // interface, and not somewhere a packet would ever go.
+            // TEST-NET-1: routable enough to pick an interface, never actually reachable.
             s.connect("192.0.2.1:9")?;
             s.local_addr()
         })
@@ -353,8 +317,7 @@ mod tests {
 
     #[test]
     fn a_path_never_leaves_this_type() {
-        // What goes to a peer is a name, a size and an id. If a path could
-        // reach an offer, a peer would learn where files live on this machine.
+        // A peer only ever gets name/size/id — never the path, which would leak this machine's filesystem layout.
         let b = bulk_in("acr-files-a");
         let offer = b.offer(
             PathBuf::from("/home/someone/secret/report.pdf"),
@@ -377,10 +340,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(b.dir());
     }
 
-    /// The systemd unit runs under `ProtectHome=read-only`, and a directory
-    /// outside its `ReadWritePaths=` exists, lists, and has the right owner and
-    /// mode while refusing every write. Nothing short of trying reveals it, and
-    /// finding out halfway through receiving a file is how it was found.
+    /// Under `ProtectHome=read-only`, a directory outside `ReadWritePaths=`
+    /// looks entirely normal (right owner, mode, lists fine) and only fails when something actually writes to it.
     #[test]
     fn a_directory_that_cannot_be_written_to_says_so_before_a_transfer() {
         let b = bulk_in("acr-files-w");
@@ -406,9 +367,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_offer_is_answered_by_the_number_a_person_was_shown() {
-        // Listed short and typed back short. The marker saying which half of
-        // the range an id came from is not information anyone needs, and with
-        // it an offer is nineteen digits to retype off a screen.
+        // Listed short, typed back short: the id's range-marker bit isn't something a person should have to retype.
         let b = bulk_in("acr-files-f");
         let id = TransferId(acrylius_core::vocab::MINTED_HERE | 3);
         b.note_offer(
@@ -448,9 +407,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_transfer_that_is_over_stops_waiting_for_an_answer() {
-        // It sat in the list forever, so `offers` showed decisions already
-        // made, and a second file of the same name matched the finished id
-        // first — accepting which waited on a transfer that no longer existed.
+        // Previously sat in the list forever, so a same-named file's new offer could match the old, finished id.
         let b = bulk_in("acr-files-e");
         b.note_offer(
             "peer",
@@ -461,12 +418,9 @@ mod tests {
                 mime: String::new(),
             },
         );
-        // Numbered 7 here and 3 by the sender, which is the ordinary case: a
-        // receiver mints its own id, and the greeting on the socket carries the
-        // sender's. Checking the greeting against ours instead rejected the one
-        // connection this listener was waiting for, and the sender saw the
-        // socket close on it — every file, both directions. Under matching
-        // numbers this test passes either way, which is how it got out.
+        // Numbered 7 here, 3 by the sender — the ordinary case, since each side
+        // mints its own id. Checking the greeting against ours instead of the
+        // sender's number broke every transfer; matching numbers would hide the bug.
         let key = vec![7u8; 32];
         let endpoint = b.listen(TransferId(7), 3, key.clone(), 4).await.unwrap();
         assert_eq!(b.pending().len(), 1, "waiting on a decision");

@@ -1,13 +1,6 @@
 //! Decoding plugin bodies, for hosts.
 //!
-//! The core keeps message bodies opaque, which is right for routing and useless
-//! for a user interface. Rather than have Swift learn CBOR and grow a second
-//! definition of every body shape, the decoders live here and hand back plain
-//! records.
-//!
-//! This is the same argument as the rest of the project: the previous one ended
-//! up with five implementations of its protocol because each surface parsed the
-//! wire for itself. A view that wants a command list gets a `[FfiCommand]`.
+//! Message bodies are opaque CBOR in the core; these decoders turn them into plain records so hosts don't reimplement the wire format.
 
 use acrylius_core::plugins::{clipboard, command, media, session, share, wol};
 
@@ -78,7 +71,7 @@ pub fn decode_command_list(body: Vec<u8>) -> Result<Vec<FfiCommand>, FfiError> {
         .collect())
 }
 
-/// The body of a `run`. An id from the peer's own list, never a command string.
+/// An id from the peer's own list, never a raw command string.
 #[uniffi::export]
 pub fn encode_run_request(id: String) -> Vec<u8> {
     minicbor::to_vec(command::RunRequest { id }).unwrap_or_default()
@@ -121,14 +114,8 @@ pub struct FfiWolConfig {
     pub macs: Vec<String>,
     pub broadcast: String,
     pub port: u16,
-    /// Aim here first.
-    ///
-    /// A network interface matches a magic packet by its payload and ignores
-    /// the destination address, so unicast wakes a machine just as well as
-    /// broadcast. iOS cannot broadcast without an entitlement a free developer
-    /// account cannot get, which makes this the primary path rather than a
-    /// fallback. It needs the router to still hold an ARP entry for the
-    /// sleeping machine.
+    /// Try this first: iOS can't broadcast, and unicast wakes a machine just as
+    /// well since only the packet payload matters. Needs a live ARP entry for it.
     pub last_ipv4: String,
 }
 
@@ -143,7 +130,6 @@ pub fn decode_wol_config(body: Vec<u8>) -> Result<FfiWolConfig, FfiError> {
     })
 }
 
-/// One player, for a screen to show.
 #[derive(uniffi::Record, Clone, Debug)]
 pub struct FfiMediaPlayer {
     pub id: String,
@@ -166,9 +152,8 @@ pub struct FfiMediaState {
     pub players: Vec<FfiMediaPlayer>,
     /// Which one a command with no player named goes to.
     pub active: String,
-    /// The machine's own output volume, 0 to 100. `None` where there is no
-    /// mixer, which is every phone: iOS gives an app no way to set the system
-    /// volume, and no way to read it that is not deprecated.
+    /// 0-100, the machine's own output volume. `None` where there is no mixer
+    /// (every phone: iOS has no non-deprecated way to read or set it).
     pub system_volume: Option<u8>,
 }
 
@@ -200,11 +185,8 @@ pub fn decode_media_state(body: Vec<u8>) -> Result<FfiMediaState, FfiError> {
     })
 }
 
-/// The body of a media command.
-///
 /// `player` empty means whichever is active; `value` is milliseconds for a seek
-/// or position and a whole percent for a volume. Encoded here so a screen never
-/// has to know the wire shape.
+/// or position and a whole percent for a volume.
 #[uniffi::export]
 #[must_use]
 pub fn encode_media_command(player: String, value: i64) -> Vec<u8> {
@@ -217,10 +199,7 @@ pub fn cap_media() -> String {
     media::CAP.to_string()
 }
 
-/// The bytes a host sends to wake a machine.
-///
-/// Built here rather than in Swift so there is one definition of the packet.
-/// `ff` six times, then the MAC sixteen times: 102 bytes.
+/// Wake-on-LAN magic packet: six `0xff` bytes, then the MAC sixteen times (102 bytes).
 #[uniffi::export]
 pub fn magic_packet(mac: String) -> Result<Vec<u8>, FfiError> {
     let hex: Vec<u8> = mac
@@ -245,11 +224,6 @@ pub fn magic_packet(mac: String) -> Result<Vec<u8>, FfiError> {
     Ok(packet)
 }
 
-// The encoders below are the other half of the pair. A phone never sends a
-// session state or a command catalogue, but a host that serves those verbs does,
-// and if one is ever written in Swift it must not reimplement the format to do
-// it. They are also what lets the Swift tests build a body without knowing CBOR.
-
 #[uniffi::export]
 #[must_use]
 pub fn encode_session_state(state: FfiSessionState) -> Vec<u8> {
@@ -262,10 +236,7 @@ pub fn encode_session_state(state: FfiSessionState) -> Vec<u8> {
     .unwrap_or_default()
 }
 
-/// An offer of a file, as this device would send one.
-///
-/// A name, a size and an id. Never a path: where the file sits on the device
-/// that owns it is not the peer's business and does not appear on the wire.
+/// An offer of a file. Never a path — where it sits on disk isn't the peer's business.
 #[derive(uniffi::Record, Clone, Debug)]
 pub struct FfiOffer {
     pub transfer: u64,
@@ -297,7 +268,6 @@ pub fn decode_share_offer(body: Vec<u8>) -> Result<FfiOffer, FfiError> {
     })
 }
 
-/// How a transfer ended, from either end.
 #[derive(uniffi::Record, Clone, Debug)]
 pub struct FfiTransferEnd {
     pub transfer: u64,
@@ -305,11 +275,8 @@ pub struct FfiTransferEnd {
     pub detail: String,
 }
 
-/// The body of an answer to an offer, and of a report that one ended.
-///
-/// `accept` and `reject` carry the same shape as `finished`, because all three
-/// are the same sentence about the same transfer: only the id is read on the
-/// way in, so an acceptance is a `Finished` that has not happened yet.
+/// Also used to encode `accept`/`reject`: only the id is read on the way in,
+/// so an acceptance is just a `Finished` that hasn't happened yet.
 #[uniffi::export]
 #[must_use]
 pub fn encode_share_end(end: FfiTransferEnd) -> Vec<u8> {
@@ -331,8 +298,7 @@ pub fn decode_share_finished(body: Vec<u8>) -> Result<FfiTransferEnd, FfiError> 
     })
 }
 
-/// The field list lives once. Two copies of it is how one of them quietly stops
-/// carrying `can_control` and a screen grows a dead button.
+/// Field list kept in one place; a second copy risks drifting (e.g. losing `can_control`).
 impl From<FfiMediaState> for media::MediaState {
     fn from(state: FfiMediaState) -> Self {
         Self {
@@ -524,8 +490,6 @@ mod tests {
         let back = decode_wol_config(encode_wol_config(wake)).unwrap();
         assert_eq!(back.last_ipv4, "192.168.1.50");
 
-        // The answer to an offer, which a phone now has to be able to write and
-        // not only read.
         let end = FfiTransferEnd {
             transfer: 42,
             ok: true,

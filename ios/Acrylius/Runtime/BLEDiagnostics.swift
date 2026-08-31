@@ -1,34 +1,20 @@
 //
-//  What CoreBluetooth is doing, in a form a person can read.
-//
-//  This app reaches a device through a CI build and a sideload. There is no
-//  Xcode console, no breakpoint and no `print` anyone will ever see, so an app
-//  that cannot say what it is doing costs a full build cycle per question. That
-//  is the whole reason this file exists, and it is why it is written before the
-//  transport rather than after it.
-//
-//  Deliberately free of CoreBluetooth. It is a plain state holder, so it
-//  compiles on Linux and `scripts/swift-test.sh` keeps covering it — the probe
-//  that fills it in is the part that cannot.
+//  CoreBluetooth state in readable form, for a sideloaded app with no console.
+//  Free of CoreBluetooth so it compiles on Linux under scripts/swift-test.sh.
 //
 
 import Foundation
-// Explicit rather than leaning on SwiftUI to re-export it: this file is compiled
-// on Linux by `scripts/swift-test.sh`, where there is no SwiftUI.
+// Explicit import: compiled on Linux, where there is no SwiftUI to re-export it.
 import Observation
 
-/// One peripheral the scan has seen.
 public struct BLESighting: Identifiable, Sendable, Equatable {
-    /// CoreBluetooth's per-app, per-device UUID for the peer. Not a MAC: iOS
-    /// never exposes one, and the desktop's address rotates anyway.
+    /// CoreBluetooth's per-app UUID, not a MAC: iOS never exposes one and the
+    /// desktop's rotates anyway.
     public let id: String
     public let name: String
     public var rssi: Int
-    /// Whether the advertisement carried our service UUID.
-    ///
-    /// Worth showing on its own, because a service that is in the peripheral's
-    /// GATT database but absent from its advertisement is invisible to a
-    /// filtered scan — the single most likely cause of finding nothing.
+    /// A service only in the GATT database, not the advertisement, is invisible
+    /// to a filtered scan — the most likely cause of finding nothing.
     public var advertisedOurService: Bool
     public var lastSeen: Date
 
@@ -44,9 +30,7 @@ public struct BLESighting: Identifiable, Sendable, Equatable {
     }
 }
 
-/// A timestamped line. The ring buffer is the useful part: what matters when
-/// something goes wrong is the *order* things happened in, and a single "last
-/// error" field throws that away.
+/// A timestamped line; the ring buffer preserves the order things happened in.
 public struct BLENote: Identifiable, Sendable, Equatable {
     public let id: UUID
     public let at: Date
@@ -59,13 +43,7 @@ public struct BLENote: Identifiable, Sendable, Equatable {
     }
 }
 
-/// One thing the radio did.
-///
-/// A plain `Sendable` value rather than a closure the transport hands over. The
-/// transport runs on CoreBluetooth's queue and the diagnostics live on the main
-/// actor, so whatever crosses between them has to be sendable — and a value the
-/// compiler can check is worth more than a closure whose annotations have to be
-/// right, on a file no compiler here can see inside.
+/// A Sendable value crossing from CoreBluetooth's queue to the main actor.
 public enum BLEUpdate: Sendable {
     case state(String, auth: String)
     case scanning(Bool)
@@ -73,59 +51,35 @@ public enum BLEUpdate: Sendable {
     case link(String)
     case fragment(Int)
     case note(String)
-    /// Something is wrong *and* there is something a person can do about it.
-    /// `nil` clears it, which is what connecting successfully does.
+    /// An actionable failure; `nil` clears it.
     case trouble(String?)
 }
 
 @Observable @MainActor
 public final class BLEDiagnostics {
-    /// `CBManagerState`, spelled out. `.unsupported` on a simulator,
-    /// `.unauthorized` when the permission was refused, `.poweredOff` when
-    /// Bluetooth is off in Control Centre — three very different problems that
-    /// look identical from the outside.
+    /// `CBManagerState`, spelled out.
     public var managerState: String = "not started"
-    /// `CBManagerAuthorization`. Separate from the state because a user who
-    /// denied the prompt can only fix it in Settings, and nothing else will.
+    /// Separate from state: a denied prompt is undone only in Settings.
     public var authorization: String = "unknown"
 
-    /// What the transport reports when it refused to build a
-    /// `CBCentralManager` because nobody has allowed Bluetooth yet.
-    ///
-    /// Spelled once. Two places compare against it — the transport that pushes
-    /// it and the screen that offers the button — and a literal in both is a
-    /// rename waiting to go wrong silently, since the only symptom would be a
-    /// button that never appears.
-    /// `nonisolated` because the transport reads it, and the transport is not
-    /// on the main actor — it answers CoreBluetooth on its own queue. An
-    /// immutable `String` is Sendable, so there is nothing to protect; without
-    /// this the constant is main-actor isolated purely by living on an
-    /// `@Observable @MainActor` class, and the only compiler that would ever
-    /// say so is the macOS one.
+    /// Compared by the transport and the Devices screen; a literal in both
+    /// would drift silently. `nonisolated` because the transport reads it off
+    /// the main actor, and only the macOS compiler would flag that.
     public nonisolated static let waitingForPermission = "waiting for permission"
 
-    /// Bluetooth is unusable and asking would still fix it.
-    ///
-    /// Not the same as a refusal: that shows in `authorization` and is undone
-    /// only in Settings. This is the state where a button still means
-    /// something.
+    /// Unusable, but asking would still fix it — unlike a denial.
     public var awaitingPermission: Bool { managerState == Self.waitingForPermission }
     public var scanning: Bool = false
     public var sightings: [BLESighting] = []
-    /// Whether a link is up, and to whom.
     public var link: String = "none"
-    /// The negotiated ATT payload, once known. Asked for, never assumed.
+    /// The negotiated ATT payload, once known.
     public var fragmentBytes: Int?
-    /// The one line worth putting in front of someone.
-    ///
-    /// Separate from the notes, because a transcript is where a thing goes to
-    /// be scrolled past. This is for a failure that will not clear itself and
-    /// names the step that clears it.
+    /// A failure that won't clear itself plus the step that clears it, kept
+    /// apart from the scrolling notes.
     public var trouble: String?
     public var notes: [BLENote] = []
 
-    /// Kept short on purpose: this is read on a phone screen, and an unbounded
-    /// log on a device with no console is a memory leak nobody can see.
+    /// Bounded: an unbounded log on a device with no console is an invisible leak.
     static let maxNotes = 60
 
     public init() {}
@@ -169,11 +123,8 @@ public final class BLEDiagnostics {
         sightings.sort { $0.rssi > $1.rssi }
     }
 
-    /// Everything, as text to copy out of the app. A screenshot of a scrolling
-    /// list is a poor bug report; this is the thing worth pasting.
+    /// Everything, as copyable text for a bug report.
     public func transcript() -> String {
-        // First line, because a transcript that does not say which build
-        // produced it is a report nobody can act on.
         var out = "build: \(BuildInfo.current.summary)\n"
         out += "state: \(managerState)\nauth: \(authorization)\n"
         out += "scanning: \(scanning)\nlink: \(link)\n"

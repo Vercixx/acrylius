@@ -1,10 +1,5 @@
-//
-//  The phrases Siri and the Shortcuts app know about.
-//
-//  Split from the intents themselves because those are compiled into the widget
-//  extension as well, and two targets in one app may not each declare an
-//  `AppShortcutsProvider`. The intents are shared; the shortcuts are the app's.
-//
+//  Siri/Shortcuts phrases. Split from the intents: those also compile into the
+//  widget extension, and only one target may declare an AppShortcutsProvider.
 
 #if canImport(AppIntents)
 

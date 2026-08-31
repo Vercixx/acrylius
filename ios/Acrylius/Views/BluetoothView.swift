@@ -1,13 +1,5 @@
-//
-//  What Bluetooth is doing, on the phone that is doing it.
-//
-//  This screen is not a feature. It exists because the app reaches a device
-//  through a CI build and a sideload, with no console attached — so every
-//  question that would be answered by a `print` costs a full build cycle
-//  instead. What is on this screen is exactly the set of things worth a build
-//  cycle: the manager's state, whether permission was ever granted, what the
-//  scan can see, and whether the advertisement carried the service we filter on.
-//
+//  Bluetooth diagnostics. Sideloaded builds have no console, so this screen
+//  answers what a `print` would.
 
 import SwiftUI
 
@@ -16,9 +8,6 @@ struct BluetoothView: View {
 
     var body: some View {
         List {
-            // First, and unmissable. Everything else on this screen describes a
-            // state; this one names the step that changes it, and it is no use
-            // to anybody buried under the notes.
             if let trouble = model.ble.trouble {
                 Section {
                     Label {
@@ -62,10 +51,8 @@ struct BluetoothView: View {
                                 Text("\(s.rssi) dBm").font(.caption.monospaced())
                                     .foregroundStyle(.secondary)
                             }
-                            // The distinction that matters most: a service in a
-                            // peripheral's GATT database but missing from its
-                            // advertisement is invisible to a filtered scan, and
-                            // that is the likeliest reason to find nothing.
+                            // A service in the GATT database but not the
+                            // advertisement is invisible to a filtered scan.
                             Text(
                                 s.advertisedOurService
                                     ? "advertises acrylius"
@@ -92,7 +79,6 @@ struct BluetoothView: View {
             } header: {
                 Text("CoreBluetooth log")
             } footer: {
-                // A screenshot of a scrolling list is a poor bug report.
                 Text("You can copy this by pressing the copy button on top.")
             }
         }

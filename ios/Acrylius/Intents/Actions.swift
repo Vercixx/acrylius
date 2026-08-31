@@ -3,22 +3,11 @@
 import AppIntents
 import Foundation
 
-/// Shared plumbing for an intent that has to reach a computer.
-///
-/// An App Intent gets a few seconds of process life, which is the reason
-/// sessions use a one-round-trip handshake. Everything here is
-/// connect, do one thing, and stop.
-/// What the core said while an intent was running.
-///
-/// An intent has no screen and no `AppModel`, but it needs the same answer they
-/// use: what the machine reported after reading its own state back. Without one
-/// of these an intent could only ever know that a request had been handed to a
-/// socket, which is not the question Siri is about to answer out loud.
+/// Collects what the core reported during an intent run; intents have no
+/// screen or `AppModel` but must answer with machine-reported state.
 final class IntentSink: UiSink, @unchecked Sendable {
     private let lock = NSLock()
     private var catalog = PeerCatalog()
-    /// How a `run` ended, which the catalogue does not keep because no screen
-    /// shows it.
     private var exited: [String: FfiExited] = [:]
 
     public func emit(_ event: FfiUiEvent) {
@@ -88,16 +77,8 @@ enum IntentRunner {
         return false
     }
 
-    /// Wait for the peer to report its screen in the state we asked for.
-    ///
-    /// The same rule the app's own button uses, and for the same reason: the
-    /// answer is what the machine reported after re-reading its own state, never
-    /// that the request reached a socket. Sleeping two seconds and saying
-    /// "Locked" had Siri confirm a lock that may not have happened — and often
-    /// had not, since the desktop is allowed rather longer than that to watch
-    /// its screen locker and be sure.
-    ///
-    /// The budget comes from the core, which is where both halves of it live.
+    /// Wait for the peer to report its screen in the requested state; the
+    /// answer must be machine-reported, never "the request reached a socket".
     static func awaitScreen(
         _ sink: IntentSink, _ peer: String, locked: Bool
     ) async -> Bool {
@@ -116,12 +97,8 @@ struct LockPCIntent: AppIntent {
     static var description: IntentDescription { IntentDescription("Lock your computer's screen.") }
     static var openAppWhenRun: Bool { false }
 
-    // Deliberately no `authenticationPolicy`.
-    //
-    // Locking a screen costs whoever is at the machine a password and gives
-    // nothing away, so requiring Face ID to lock would be friction with no
-    // safety behind it. Unlocking is the opposite, and asks. Do not make these
-    // consistent with each other.
+    // Deliberately no `authenticationPolicy`: locking gives nothing away.
+    // Unlocking asks. Do not make these consistent.
 
     @Parameter(title: "PC") var pc: PCEntity
 
@@ -154,8 +131,8 @@ struct UnlockPCIntent: AppIntent {
                                                 ty: "unlock", body: Data()))
             return await IntentRunner.awaitScreen(sink, peer, locked: false)
         }
-        // Several screen lockers act on the signal and several do not, so this
-        // one really can fail on a machine that is working perfectly.
+        // Some screen lockers ignore the unlock signal, so this can fail on a
+        // healthy machine.
         let dialog: IntentDialog =
             ok == true ? "Unlocked \(pc.name)." : "\(pc.name) did not unlock."
         return .result(dialog: dialog)
@@ -171,35 +148,20 @@ struct WakePCIntent: AppIntent {
 
     init() {}
 
-    /// A widget button knows which machine it is for, so it says so rather than
-    /// going through the entity query — which in a widget process would mean
-    /// reading a snapshot to find what the widget had already read.
+    /// Widget buttons pass the entity directly; the widget process would
+    /// otherwise re-read a snapshot it already has via the entity query.
     init(pc: PCEntity) {
         self.pc = pc
     }
 
     func perform() async throws -> some IntentResult & ProvidesDialog {
-        // Waking needs no session, no reachable peer, and no identity, which is
-        // the point: the machine is asleep. It needs only what that machine told
-        // us while it was awake, which is on disk.
-        //
-        // Nor does it build a core to check the peer is paired. A saved wake
-        // target already is that check — the daemon only sends one over an open
-        // session — and standing up a core would need the Keychain, which the
-        // widget process this also runs in cannot read.
-        // Every MAC, not the first.
-        //
-        // The daemon sends the list in the order it believes in, and a machine
-        // with wired and wireless interfaces has more than one — only some of
-        // which are the one wake-on-LAN is actually enabled for. Taking the
-        // first meant a machine that would wake perfectly well over its other
-        // interface simply did not, with nothing to say why.
+        // No core here: the widget process cannot read the Keychain, and a
+        // saved wake target already proves pairing. Try every MAC — only some
+        // interfaces have wake-on-LAN enabled.
         guard let config = WakeTargets.load(for: pc.id),
               case let packets = config.macs.compactMap({ try? magicPacket(mac: $0) }),
               !packets.isEmpty
         else {
-            // A concatenation is a String, not a literal, so it needs an
-            // explicit IntentDialog like every other branch here.
             let dialog: IntentDialog = "\(pc.name) has not told this phone how to wake it. Open it in the app once while it is awake."
             return .result(dialog: dialog)
         }
@@ -226,14 +188,11 @@ struct RunCommandIntent: AppIntent {
     func perform() async throws -> some IntentResult & ProvidesDialog {
         let outcome = try await IntentRunner.withPeer(pc) { runtime, peer, sink -> FfiExited? in
             guard await IntentRunner.awaitReachable(runtime, peer) else { return nil }
-            // An id from the computer's own list. There is no way to send a
-            // command string, here or anywhere.
+            // Only an id from the computer's own list; command strings cannot
+            // be sent, here or anywhere.
             await runtime.submit(.pluginCommand(peer: peer, cap: capCommand(), ty: "run",
                                                 body: encodeRunRequest(id: command)))
-            // The computer says how it ended, and waiting for that is the only
-            // way to know. Sleeping three seconds and saying "Ran it" reported a
-            // success for a command that may not have started, may still be
-            // running, and may have failed.
+            // Wait for the computer to report the exit, not for the send.
             let deadline = ContinuousClock.now.advanced(by: .seconds(15))
             while ContinuousClock.now < deadline {
                 if let e = sink.commandOutcome(peer) { return e }

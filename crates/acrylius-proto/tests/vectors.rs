@@ -1,13 +1,5 @@
-//! Golden vectors, asserted against `docs/PROTOCOL.md`.
-//!
-//! There is only one implementation of this protocol, so these are not here to
-//! keep two codebases in step. They are here to keep the document in step with
-//! the code: a spec nothing checks is a spec that quietly becomes fiction, and
-//! this one has to be good enough for a second implementation to be written from
-//! years later.
-//!
-//! Every value below also appears in `docs/PROTOCOL.md`. Changing one without
-//! the other fails here.
+//! Golden vectors. Every value below also appears in `docs/PROTOCOL.md`;
+//! changing one without the other fails here.
 
 use acrylius_proto::{b64, envelope::Envelope, handshake::Hello, ids, pairing};
 
@@ -63,9 +55,7 @@ fn envelope_vector() {
         hex(&bytes),
         "870107f6736f72672e616372796c6975732e70696e672f316470696e6742686900"
     );
-    // A CBOR array of seven, not eight: `bulk` is nil and minicbor omits a
-    // trailing nil. That is the same mechanism that lets a later version append
-    // field 8 without breaking this reader.
+    // An array of seven, not eight: minicbor omits a trailing nil `bulk`.
     assert_eq!(bytes[0], 0x87);
     assert_eq!(bytes.len(), 33);
     assert_eq!(Envelope::decode(&bytes).unwrap(), e);

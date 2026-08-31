@@ -1,23 +1,8 @@
 //! The UniFFI facade, the only crate iOS sees.
 //!
-//! It is deliberately thin. Because the core is sans-IO, this boundary is
-//! synchronous: Swift calls [`AcryliusCore::handle`] and gets a list of actions
-//! back. There is no async across the FFI and, more importantly, no Rust to
-//! Swift call anywhere: no foreign traits, no callback interfaces. Swift only
-//! ever calls into Rust.
-//!
-//! That is not a small detail. Foreign traits would put a Rust to Swift call in
-//! the hot path and reintroduce exactly the reentrancy surface the sans-IO design
-//! was chosen to avoid, and it is a surface UniFFI's own documentation declines
-//! to give advice about.
-//!
-//! ## The rule the host must follow
-//!
-//! Actions are executed by a single serial executor, results come back as
-//! events, and `handle()` is never called from inside an action handler. On iOS
-//! that is one `actor` draining an `AsyncStream`. The `Mutex` below makes
-//! breaking the rule safe rather than corrupting, but a host that breaks it will
-//! still deadlock itself, so do not.
+//! Synchronous only: no async, no Rust-to-Swift calls cross this boundary. Run
+//! actions through one serial executor; never call `handle()` from inside an
+//! action handler, or the host deadlocks itself.
 
 pub mod ble;
 pub mod bodies;
@@ -70,15 +55,10 @@ pub fn default_config(name: String, platform: String) -> FfiConfig {
 
 /// A fresh static identity, as raw private key bytes.
 ///
-/// The host stores these in the Keychain with `WhenUnlockedThisDeviceOnly` and
-/// no biometric ACL: an item behind `.biometryCurrentSet` cannot be read while
-/// the phone is locked, which would break every short-lived extension.
-/// Biometrics belong on the action, as a `LAContext` check before sending an
-/// unlock, not on the key. The old project learned that one the hard way.
-/// Fallible, because the empty vector it used to return on failure was stored
-/// as the identity. A caller reads "first run", writes what it is given, and a
-/// key that is not a key is then on disk for good — every launch after it loads
-/// the same empty bytes and fails the same way, with no path back but reinstall.
+/// Store in Keychain with `WhenUnlockedThisDeviceOnly`, no biometric ACL —
+/// biometrics belong on the action, not the key. Fallible rather than
+/// returning empty bytes on failure, which would get persisted as a
+/// permanent bad identity.
 #[uniffi::export]
 pub fn generate_identity() -> Result<Vec<u8>, FfiError> {
     Identity::generate()
@@ -88,8 +68,8 @@ pub fn generate_identity() -> Result<Vec<u8>, FfiError> {
         })
 }
 
-/// A device's public fingerprint, from its private key. Lets a host show its own
-/// identity before building a core.
+/// A device's public fingerprint, from its private key. Lets a host show its
+/// own identity before building a core.
 #[uniffi::export]
 pub fn fingerprint_of(identity_key: Vec<u8>) -> Result<String, FfiError> {
     Ok(identity(&identity_key)?.fingerprint().to_string())
@@ -111,22 +91,16 @@ pub struct FfiPeer {
     pub fingerprint: String,
     /// Reachable, being reached, or not.
     ///
-    /// Three states rather than a bool, because nothing presses Connect any
-    /// more: a peer that is mid-handshake and a peer that has given up look
-    /// identical through `reachable`, and only one of them is worth explaining
-    /// to the person holding the phone.
+    /// Three states rather than a bool: a peer mid-handshake and a peer that
+    /// gave up look identical through `reachable` alone.
     pub state: FfiPeerState,
-    /// What is carrying the session, when one is up.
-    ///
-    /// `None` means unreachable, not unknown. Worth showing because the whole
-    /// point of a second transport is that it takes over silently, and silence
-    /// is indistinguishable from a thing not working.
+    /// What is carrying the session, when one is up. `None` means
+    /// unreachable, not unknown.
     pub transport: Option<FfiTransportKind>,
     /// Why the last attempt to reach it ended without a session.
     ///
-    /// Only ever set alongside `Unreachable`; a peer still being dialled has
-    /// nothing to explain yet. Read at draw time rather than delivered as an
-    /// event, so a device coming up normally does not flicker an error.
+    /// Only set alongside `Unreachable`. Read at draw time, not delivered as
+    /// an event, so a peer reconnecting normally doesn't flicker an error.
     pub trouble: Option<String>,
 }
 
@@ -139,17 +113,11 @@ pub struct AcryliusCore {
 impl AcryliusCore {
     /// Build a core.
     ///
-    /// `effects` is what this host can actually carry out. A plugin whose
-    /// effects are missing still loads and can still send — being unable to
-    /// serve a capability says nothing about being able to use one — so a
-    /// phone that cannot lock its own screen can still ask a computer to lock
-    /// theirs.
+    /// `effects` is what this host can actually carry out; a plugin with a
+    /// missing effect still loads and can still send.
     ///
-    /// `peers` are the raw blobs the host stored from earlier `Persist` actions,
-    /// in any order. One that fails to decode is skipped and reported by
-    /// [`Self::restored_peers`] being smaller than what was handed in. The host
-    /// should treat that as a corrupted record worth telling someone about,
-    /// because "absent" means "this device is a stranger".
+    /// `peers` are raw blobs from earlier `Persist` actions, in any order.
+    /// One that fails to decode is skipped — see [`Self::restored_peers`].
     #[uniffi::constructor]
     pub fn new(
         config: FfiConfig,
@@ -169,57 +137,32 @@ impl AcryliusCore {
                 platform: config.platform,
                 pairing_window_ms: config.pairing_window_ms,
                 handshake_timeout_ms: config.handshake_timeout_ms,
-                // Not exposed through `FfiCoreConfig`. A phone is the device
-                // this matters most on and the one least able to choose a
-                // sensible number for itself, and nothing on that side has any
-                // reason to want a different one.
+                // Not exposed to hosts: only a sensible default for a phone.
                 reconnect_every_ms: CoreConfig::default().reconnect_every_ms,
-                // Likewise, and more so: this one is a backstop for a transport
-                // that fails to bound its own dial, so it is the core's business
-                // and not the host's. See [`dial_timeout_ms`].
+                // Backstop for a transport's own dial bound. See [`dial_timeout_ms`].
                 dial_timeout_ms: CoreConfig::default().dial_timeout_ms,
-                // A phone is never dialled — `NWTransport::advertise` is
-                // deliberately unimplemented — so nothing can raise a pairing
-                // prompt on it uninvited and there is no door here to shut.
-                // These bound the phone's own attempts instead.
+                // A phone is never dialled (`NWTransport::advertise` is
+                // unimplemented), so these just bound its own pairing attempts.
                 accept_pair_requests: CoreConfig::default().accept_pair_requests,
                 pair_cooldown_ms: CoreConfig::default().pair_cooldown_ms,
                 pair_denied_cooldown_ms: CoreConfig::default().pair_denied_cooldown_ms,
             },
         )
-        // The same plugin list every device registers, which is the point of
-        // the plugin set being platform-independent. This was left at ping
-        // alone from the skeleton, so a phone advertised no capabilities and a
-        // computer would not send it a clipboard — the failure looked like a
-        // missing clipboard implementation, and was a missing registration.
-        //
-        // What this device can *serve* is what `effects` names; the rest it can
-        // still ask other devices for.
         .effects(effects.into_iter().map(Into::into))
         .plugin(ping::PingPlugin::default())
         .plugin(session::SessionPlugin::default())
-        // A phone relays a wake for nobody: it sends magic packets itself, and
-        // an empty allowlist is what refuses to be used as a relay.
+        // Relays for nobody: sends magic packets itself; empty allowlist refuses relay use.
         .plugin(wol::WolPlugin::new(wol::WolConfig::default(), Vec::new()))
         .plugin(clipboard::ClipboardPlugin::new(clipboard::Directions {
-            // Never volunteers what is on the pasteboard. Since iOS 16 reading
-            // it raises a system "Allow Paste?" alert for anything another app
-            // put there, so a phone that mirrored every change would prompt
-            // constantly. Sending is a deliberate act; receiving is not.
+            // Never volunteers pasteboard contents — iOS 16+ prompts "Allow Paste?" per read.
             send: false,
             receive: true,
         }))
-        // Runs nothing on request. It can still list and run what a computer
-        // offers.
+        // Runs nothing on request; can still list/run what a peer offers.
         .plugin(command::CommandPlugin::new(Vec::new()))
-        // A phone plays its own audio through its own controls. It registers
-        // this to drive a computer's players, not to offer its own.
+        // Drives a peer's players; doesn't offer its own.
         .plugin(media::MediaPlugin::default())
-        // Registered without an `EffectKind::Share` to serve it, which is the
-        // difference between "cannot" and "does not answer". A computer that
-        // offers this phone a file gets a refusal it can show a person; without
-        // the registration it would get silence and a capability the phone
-        // never admitted to knowing about.
+        // No Share effect registered: an offer gets an explicit refusal, not silence.
         .plugin(share::SharePlugin::default())
         .restore(records)
         .build();
@@ -230,14 +173,10 @@ impl AcryliusCore {
 
     /// The single entry point.
     ///
-    /// Two clocks, and they are not interchangeable. `monotonic_ms` counts from
-    /// an arbitrary origin and only ever moves forward; it drives deadlines, so
-    /// that changing the system clock cannot extend a pairing window. `wall_ms`
-    /// is milliseconds since the Unix epoch, and is used for one thing only:
-    /// the handshake timestamp the other device compares against its own clock.
-    ///
-    /// Passing the monotonic clock for both means sending your *uptime* as a
-    /// timestamp, which every peer reads as wildly stale and refuses.
+    /// `monotonic_ms` drives deadlines and only moves forward. `wall_ms` is
+    /// Unix-epoch millis, used only for the handshake timestamp peers compare
+    /// against their own clock — don't pass the same value for both, or it
+    /// reads as a stale timestamp and gets refused.
     pub fn handle(
         &self,
         monotonic_ms: u64,
@@ -277,9 +216,8 @@ impl AcryliusCore {
             .to_string()
     }
 
-    /// The code currently awaiting confirmation, if any. A view that was
-    /// backgrounded and came back reads this rather than relying on having
-    /// caught the `PairingSas` event.
+    /// The code currently awaiting confirmation, if any — for a view that
+    /// missed the `PairingSas` event.
     #[must_use]
     pub fn pending_sas(&self) -> Option<String> {
         self.inner
@@ -302,8 +240,7 @@ impl AcryliusCore {
                     fingerprint: p.fingerprint()?.to_string(),
                     state: core.peer_state(&id).into(),
                     transport: core.transport_for(&id).map(Into::into),
-                    // Paired with the state deliberately: a reason kept past
-                    // the reconnection it explains is worse than none.
+                    // Only surfaced while Unreachable — a stale reason is worse than none.
                     trouble: (core.peer_state(&id) == PeerState::Unreachable)
                         .then(|| core.dial_trouble(&id).map(str::to_string))
                         .flatten(),
@@ -333,8 +270,8 @@ impl AcryliusCore {
             .to_vec()
     }
 
-    /// What this device can carry out itself. Anything in `caps_in` but absent
-    /// here it can ask a peer for and will refuse if asked.
+    /// What this device can carry out itself; anything in `caps_in` but absent
+    /// here it asks a peer for and refuses if asked.
     #[must_use]
     pub fn caps_served(&self) -> Vec<String> {
         self.inner
@@ -362,11 +299,6 @@ pub fn service_type() -> String {
 }
 
 /// The BLE service the daemon advertises, for `scanForPeripherals(withServices:)`.
-///
-/// Exported for the same reason `service_type()` is: a UUID spelled out twice is
-/// a UUID that can differ by one hex digit, and the failure that produces is a
-/// phone which never finds a desktop with no error anywhere to say why. That is
-/// the exact shape of the bug this project's predecessor died on.
 #[uniffi::export]
 #[must_use]
 pub fn ble_service_uuid() -> String {
@@ -403,10 +335,8 @@ pub fn default_port() -> u16 {
 
 /// How long to wait for a lock to be answered before calling it a failure.
 ///
-/// Exported rather than written down again on this side. A host spends up to its
-/// own confirm budget watching the screen locker before it answers, so a client
-/// that waits any less reports a failure that did not happen — which is what a
-/// pair of eight-second timeouts, one here and one in Swift, used to do.
+/// Must match what the host actually waits before answering, or a client
+/// times out before a real failure occurs.
 #[uniffi::export]
 #[must_use]
 pub fn session_lock_budget_ms() -> u64 {
@@ -438,10 +368,8 @@ pub fn dead_peer_ms() -> u64 {
 /// How long a dial may go unanswered before the route it was trying is spent.
 /// See [`acrylius_core::link::DIAL_TIMEOUT_MS`].
 ///
-/// Exported because the transport that opened the connection is the only thing
-/// that can hang it up, so it has to bound the dial itself — and it must use
-/// this number rather than one of its own, or the core's backstop and the
-/// host's timeout drift into the order where the backstop fires first.
+/// The transport must use this exact number for its own dial bound, or the
+/// core's backstop and the host's timeout drift out of order.
 #[uniffi::export]
 #[must_use]
 pub fn dial_timeout_ms() -> u64 {
@@ -472,15 +400,9 @@ pub fn media_idle_interval_ms() -> u64 {
 
 /// Whether a reading taken after a command shows the player having acted on it.
 ///
-/// The same rule the desktop waits on, so the two ends cannot disagree about
-/// what "it worked" means. `None` — surfaced here as a null — means a reading
-/// cannot answer the question and the caller should stop waiting rather than
-/// guess: a seek moves a position that also moves on its own.
-///
-/// Comparing whole states instead is what this replaces, and it was wrong in
-/// both directions: a playing track's position moves between any two readings,
-/// so every command looked like it landed, while a paused one looked like
-/// nothing ever did.
+/// Same rule the desktop uses. `None` means a reading can't answer the
+/// question (e.g. a seek moves a position that also moves on its own),
+/// and the caller should stop waiting rather than guess.
 #[uniffi::export]
 #[must_use]
 pub fn media_command_landed(
@@ -506,13 +428,7 @@ pub fn media_command_landed(
 mod tests {
     use super::*;
 
-    /// The budgets a host is told to use are the core's, not copies of them.
-    ///
-    /// These accessors exist so that a number lives in exactly one place and
-    /// both ends read it. That only holds while each really returns the
-    /// constant it names — an accessor quietly answering something else is
-    /// indistinguishable from the drift they were added to prevent, and it
-    /// would be read on a phone, where nothing else here can see it.
+    /// The budgets a host reads are the core's own constants, not copies.
     #[test]
     fn the_exported_budgets_are_the_ones_the_core_holds() {
         assert_eq!(dead_peer_ms(), acrylius_core::link::DEAD_PEER_MS);
@@ -521,8 +437,7 @@ mod tests {
             media_watch_interval_ms(),
             acrylius_core::plugins::media::WATCH_INTERVAL_MS
         );
-        // And the order between the two halves of a bounded dial: the host
-        // gives up first, because only the host can hang up the connection.
+        // Host must give up before the core's backstop; only the host can hang up.
         assert!(dial_timeout_ms() < CoreConfig::default().dial_timeout_ms);
     }
 }

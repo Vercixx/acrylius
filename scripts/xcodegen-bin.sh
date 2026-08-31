@@ -1,21 +1,7 @@
 #!/usr/bin/env bash
 #
-# Print the path to a pinned XcodeGen, building it once if it is not cached.
-#
-# Both callers need the same generator. `scripts/xcodegen-check.sh` validates the
-# manifest on Linux; the macOS job generates the project it actually builds. If
-# those two ran different XcodeGens, the check would stop meaning anything about
-# the thing CI ships, and the difference would only ever show up as a macOS-only
-# failure.
-#
-# `brew install xcodegen` was what the workflow used, and it is not a version:
-# it is whatever bottle that runner image happens to carry, which changes under
-# you when the image is refreshed. The clone below is pinned to a tag and then
-# checked against the commit that tag pointed at, because a tag is a name
-# somebody else can repoint.
-#
-# Progress goes to stderr. Stdout is the path and nothing else, so callers can
-# capture it.
+# Print the path to a pinned XcodeGen, building it once if not cached; the tag is checked against its commit since tags can be repointed.
+# Progress goes to stderr; stdout is only the path.
 set -euo pipefail
 
 VERSION=${XCODEGEN_VERSION:-2.44.1}
@@ -39,9 +25,8 @@ if [ ! -x "$BIN" ]; then
     (cd "$CACHE" && swift build -c release) >&2
 fi
 
-# Absolute, because callers run it from directories other than this one.
-# XCODEGEN_CACHE may already be absolute: CI puts it outside target/, which
-# Swatinem/rust-cache treats as its own and prunes.
+# Absolute: callers run it from other directories. XCODEGEN_CACHE may already
+# be absolute — CI puts it outside target/, which rust-cache prunes.
 case "$BIN" in
     /*) printf '%s\n' "$BIN" ;;
     *)  printf '%s\n' "$PWD/$BIN" ;;

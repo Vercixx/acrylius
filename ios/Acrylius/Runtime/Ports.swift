@@ -1,19 +1,13 @@
 //
-//  The host-side seams, all platform-free.
-//
-//  These are Swift protocols the *host* implements. Nothing here crosses the
-//  FFI: the Rust core never calls Swift. It hands back actions, and CoreRuntime
-//  routes them to one of these. That is what keeps the boundary one-directional
-//  and reentrancy structurally impossible rather than merely discouraged.
+//  The host-side seams the *host* implements, all platform-free. Nothing here
+//  crosses the FFI: the core hands back actions and CoreRuntime routes them
+//  to one of these, keeping the boundary one-directional.
 //
 
 import Foundation
 
-/// Moves bytes between two devices. On iOS this is Network.framework; on Linux
-/// it is whatever a test needs.
-///
-/// A transport must never call into the core. It reports what happened by
-/// yielding events, and the runtime's single consumer picks them up.
+/// Moves bytes between two devices. Must never call into the core — it
+/// reports by yielding events, which the runtime's single consumer picks up.
 public protocol Transport: AnyObject, Sendable {
     var transportId: UInt16 { get }
 
@@ -25,32 +19,12 @@ public protocol Transport: AnyObject, Sendable {
     func discover(enable: Bool) async
 
     /// Check the links this transport is holding, and report any that have
-    /// died without saying so.
-    ///
-    /// iOS suspends an app that is not on screen. Its sockets do not survive
-    /// that in any dependable way, and nothing runs to notice: the state
-    /// handler that would have reported the failure fires in a process that is
-    /// stopped. The app came back believing it still had a session, sent into a
-    /// socket that was not there, and — when the far end had meanwhile been
-    /// re-dialled — met a frame it could not decrypt, which is a hostile
-    /// handshake as far as the core is concerned.
-    ///
-    /// So the app asks, on the way back to the foreground. A transport that
-    /// cannot be asked answers by doing nothing, which is why this has a
-    /// default.
+    /// died silently. iOS suspends a backgrounded app, so sockets can die with
+    /// no handler running to notice; called on the way back to foreground.
     func revalidate() async
 
-    /// Start discovery over, whatever state it was in.
-    ///
-    /// Discovery is set up once and then left alone, which assumes it survives
-    /// everything that happens to a phone. It does not: a browse whose network
-    /// went away can fail outright, and a failed browse stays failed. Nothing
-    /// is reported after that — so the desktop is never seen again, and since
-    /// a sighting is the only thing that moves a session from Bluetooth up to
-    /// Wi-Fi, the app sits on the slower radio with a working network in the
-    /// room.
-    ///
-    /// A transport with nothing to restart answers by doing nothing.
+    /// Start discovery over, whatever state it was in. A browse can fail
+    /// outright and stay failed, silently blocking the Bluetooth-to-Wi-Fi upgrade.
     func rediscover() async
 }
 
@@ -61,9 +35,8 @@ public extension Transport {
 
 /// The platform half of a plugin.
 public protocol Effector: AnyObject, Sendable {
-    /// Effects this host can actually carry out. The core drops plugins whose
-    /// requirements are unmet and never advertises their capabilities, so this
-    /// is what decides the device's feature set.
+    /// Effects this host can actually carry out; decides the device's feature
+    /// set, since the core drops plugins whose requirements go unmet.
     func run(_ effect: FfiEffect) async -> FfiEffectResult
 }
 
@@ -72,10 +45,8 @@ public protocol Store: AnyObject, Sendable {
     func put(key: String, value: Data?, sensitivity: FfiSensitivity) throws
     func loadPeers() -> [Data]
     /// The stored identity, or `nil` only when this device has never had one.
-    ///
-    /// An implementation that cannot answer right now must throw rather than
-    /// return `nil`. A caller reads `nil` as "first run" and writes a fresh
-    /// identity over whatever was there.
+    /// Must throw rather than return `nil` if it can't answer right now — a
+    /// caller reads `nil` as "first run" and overwrites the real identity.
     func identityKey() throws -> Data?
     func setIdentityKey(_ key: Data) throws
 }

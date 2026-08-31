@@ -1,20 +1,9 @@
 //
 //  The Home Screen widget.
 //
-//  It asks nothing and connects to nothing. A widget extension has no Local
-//  Network permission of its own, gets a sliver of runtime, and is drawn at
-//  moments the app is not running — and on a free Apple account the daemon
-//  cannot reach a phone whose app is closed anyway. So this renders the
-//  snapshot the app left behind and is honest about its age.
-//
-//  The one thing it does do is wake a machine. That needs no session, no
-//  identity and no reply: a magic packet is a datagram sent into the void, and
-//  everything it takes is a MAC address already on disk. It is also the action
-//  most worth having on a Home Screen, because the machine it is aimed at is
-//  by definition not running anything that could offer a button.
-//
-//  Everything else is a tap that opens the app, which is where the permission,
-//  the identity and the session live.
+//  Renders the snapshot the app left behind (a widget extension has no Local
+//  Network permission and gets a sliver of runtime). The one live action is
+//  wake, since a magic packet needs no session or reply. Everything else opens the app.
 //
 
 #if canImport(WidgetKit) && canImport(SwiftUI) && canImport(AppIntents)
@@ -43,13 +32,12 @@ struct SelectPCIntent: WidgetConfigurationIntent {
 struct PCEntry: TimelineEntry {
     let date: Date
     let peer: PeerSnapshot?
-    /// Nil when a snapshot was found. A reason, when one was not.
+    /// Nil when a snapshot was found; a reason, when one wasn't.
     let missing: Missing?
 
     enum Missing {
-        /// The App Group did not resolve, so the app's snapshot is somewhere
-        /// this process cannot see. Distinguished from "no data yet" because
-        /// waiting will not fix it and the wording must not suggest it will.
+        /// The App Group didn't resolve. Distinct from "no data yet" since
+        /// waiting won't fix it.
         case noSharedContainer
         case notPairedYet
     }
@@ -70,10 +58,8 @@ struct Provider: AppIntentTimelineProvider {
     }
 
     func timeline(for configuration: SelectPCIntent, in context: Context) async -> Timeline<PCEntry> {
-        // Ages are drawn with a relative style that updates itself, so a
-        // reload is only needed when the facts change — which is when the app
-        // runs, and the app asks for one then. The hourly entry is a backstop
-        // for the case where it never does.
+        // Ages render with a self-updating relative style; the app requests a
+        // reload when facts change, so this hourly entry is only a backstop.
         Timeline(
             entries: [entry(for: configuration)],
             policy: .after(Date().addingTimeInterval(3600)))
@@ -81,8 +67,8 @@ struct Provider: AppIntentTimelineProvider {
 
     private func entry(for configuration: SelectPCIntent) -> PCEntry {
         guard let snapshot = SnapshotStore.load() else {
-            // No file at all. Either the app has never run, or it ran and wrote
-            // into a container this process cannot reach.
+            // No file at all: either the app never ran, or it wrote into an
+            // unreachable container.
             return PCEntry(
                 date: Date(), peer: nil,
                 missing: SharedContainer.isShared ? .notPairedYet : .noSharedContainer)
@@ -128,11 +114,7 @@ struct AcryliusWidgetView: View {
     }
 }
 
-/// A lock screen circle, which is one glyph and nothing else.
-///
-/// No name and no timestamp: at this size there is room for a single fact, so
-/// it is the one the machine is actually in — locked, unlocked, or never
-/// having said. A tap opens the app, where all three have detail behind them.
+/// A lock screen circle: one glyph, no name or timestamp — room for a single fact.
 private struct CircularView: View {
     let peer: PeerSnapshot
 
@@ -148,9 +130,7 @@ private struct CircularView: View {
         switch peer.locked {
         case .some(true): "lock.fill"
         case .some(false): "lock.open.fill"
-        // Never described a session. `desktopcomputer` rather than a question
-        // mark: not knowing is the ordinary state before the first connection,
-        // not a fault worth drawing as one.
+        // Not a question mark: unknown is the normal pre-connection state, not a fault.
         case nil: "desktopcomputer"
         }
     }
@@ -174,10 +154,8 @@ private struct Heading: View {
     }
 }
 
-/// When the app last had this machine on the line.
-///
-/// Never a live indicator. The app is not running while this is on screen, so a
-/// dot claiming "connected" would be showing something nobody has checked.
+/// When the app last had this machine on the line. Never a live indicator —
+/// the app isn't running while this is on screen.
 private struct Seen: View {
     let at: Date?
     var body: some View {
@@ -244,10 +222,6 @@ private struct AccessoryView: View {
 }
 
 /// The only button here that does its own work.
-///
-/// If a widget extension turns out to need a Local Network permission the app
-/// was granted separately, this is where that shows up — as a wake that never
-/// lands. The intent says so rather than reporting success it cannot know.
 private struct WakeButton: View {
     let peer: PeerSnapshot
     var body: some View {
@@ -276,9 +250,7 @@ private struct EmptyStateView: View {
     }
 
     private var detail: String {
-        // The two cases need different words because they need different
-        // actions. Opening the app will not fix a container that does not
-        // exist, and telling someone it will is worse than saying nothing.
+        // Different actions per case: opening the app won't fix a missing container.
         missing == .noSharedContainer
             ? "This build cannot share data with the app."
             : "Pair a computer in Acrylius."
@@ -310,16 +282,9 @@ struct StatusWidget: Widget {
 
 /// Wake, from Control Centre or the lock screen's own buttons.
 ///
-/// Wake and only wake. It is the one thing this app does that a separate
-/// process can genuinely finish: a magic packet needs no session, no identity
-/// and no Keychain, and everything it takes is already on disk — which is
-/// exactly why the Home Screen widget has been allowed to send one since M2.
-///
-/// Lock deliberately has no control. It needs a live Noise session, and a
-/// control runs where the widget runs: no Local Network permission of its own
-/// and a sliver of runtime. A control that silently does nothing is worse than
-/// no control, and the honest alternative — opening the app to do it — is not
-/// a control, it is a shortcut to the app with extra steps.
+/// Wake only: a magic packet needs no session, identity, or Keychain access.
+/// Lock has no control here — it needs a live Noise session, which a control
+/// (running with the widget's sliver of runtime) can't hold.
 @available(iOS 18.0, *)
 struct WakeControl: ControlWidget {
     var body: some ControlWidgetConfiguration {
@@ -340,13 +305,8 @@ struct WakeControl: ControlWidget {
     }
 }
 
-/// The first computer that has told this phone how to wake it.
-///
-/// Not simply the first peer: a machine with no wake target on file produces a
-/// button that can only ever apologise. Nil when there is none, which the
-/// button renders as a generic label rather than refusing to exist — a control
-/// that vanishes from the gallery is harder to explain than one that says it
-/// has nothing to aim at yet.
+/// The first computer that has told this phone how to wake it, not simply
+/// the first peer — nil renders as a generic label rather than the control vanishing.
 @available(iOS 18.0, *)
 struct WakeTargetProvider: ControlValueProvider {
     var previewValue: PeerSnapshot? { nil }
@@ -360,7 +320,7 @@ struct WakeTargetProvider: ControlValueProvider {
 struct AcryliusWidgets: WidgetBundle {
     var body: some Widget {
         StatusWidget()
-        // Controls arrived in iOS 18 and the app's floor is 17.
+        // Controls arrived in iOS 18; the app's floor is 17.
         if #available(iOS 18.0, *) {
             WakeControl()
         }

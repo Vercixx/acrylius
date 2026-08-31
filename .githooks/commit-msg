@@ -1,11 +1,6 @@
 #!/usr/bin/env bash
 #
-# Reject attribution footers.
-#
-# These say nothing a reader needs and nothing `git log --format` cannot
-# already tell you, and once a few are in the history they are expensive to
-# remove: rewriting them means a force-push, which is disruptive for anyone
-# who has already pulled. Cheaper to refuse them at the door.
+# Reject attribution footers before they enter history.
 set -euo pipefail
 
 msg_file="$1"

@@ -1,15 +1,7 @@
 //! The FFI mirror of the core's vocabulary.
 //!
-//! These types exist only to cross the language boundary. They carry no logic,
-//! and every conversion below is a mechanical, exhaustively-matched mapping, so
-//! adding a variant to the core is a compile error here rather than a silent
-//! omission. That is what keeps this a translation layer and not a second
-//! implementation of the protocol.
-//!
-//! They are mirrored rather than derived directly on the core's types so that
-//! `acrylius-core` keeps no dependency on `uniffi`: the core is the crate that
-//! must stay trivially testable on a Linux box, and it should not carry a
-//! bindings generator to do it.
+//! Exhaustively-matched, logic-free conversions, kept separate so
+//! `acrylius-core` has no dependency on `uniffi`.
 
 use acrylius_core::link as cl;
 use acrylius_core::vocab as cv;
@@ -27,12 +19,6 @@ pub enum FfiTransportKind {
 // ----------------------------------------------------------------- peer state
 
 /// Whether a peer can be reached, is being reached, or cannot be.
-///
-/// The core has modelled all three since M0; the FFI used to flatten them to
-/// `reachable: bool` and throw `Connecting` away. That was survivable while a
-/// Connect button existed, because a person who pressed it knew an attempt was
-/// running. With dialling entirely automatic, the difference between "trying"
-/// and "gave up" is the whole of what a screen has to say.
 #[derive(uniffi::Enum, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum FfiPeerState {
     Unreachable,
@@ -51,8 +37,7 @@ impl From<acrylius_core::peer::PeerState> for FfiPeerState {
     }
 }
 
-/// The direction the core does not need but a UI does: what is carrying a
-/// session, so a person can see which one took over.
+/// What is carrying a session, so a UI can show which transport took over.
 impl From<cl::TransportKind> for FfiTransportKind {
     fn from(k: cl::TransportKind) -> Self {
         match k {
@@ -99,9 +84,8 @@ impl From<FfiLinkAttrs> for cl::LinkAttrs {
                 FfiTransportKind::TcpLan => cl::TransportKind::TcpLan,
                 FfiTransportKind::UnixLoopback => cl::TransportKind::UnixLoopback,
                 FfiTransportKind::BleGatt => cl::TransportKind::BleGatt,
-                // Leaked deliberately: the core's variant is `&'static str`, and
-                // a host-supplied name cannot be one. Hosts define a bounded set
-                // of transports at startup, so this does not grow without bound.
+                // Leaked deliberately: core's variant needs &'static str; bounded
+                // by the fixed set of transports a host defines at startup.
                 FfiTransportKind::Custom { name } => {
                     cl::TransportKind::Custom(Box::leak(name.into_boxed_str()))
                 }
@@ -123,10 +107,8 @@ impl From<FfiLinkAttrs> for cl::LinkAttrs {
     }
 }
 
-/// The attributes of a Bluetooth LE link, so a Swift transport does not spell
-/// them out and get one wrong — `max_message` and `bulk` especially, since a
-/// BLE link that claimed a side channel would offer file transfers it cannot
-/// carry out.
+/// Attributes of a BLE link, so Swift doesn't get `max_message`/`bulk` wrong
+/// (a BLE link cannot carry a side channel).
 #[uniffi::export]
 #[must_use]
 pub fn ble_attrs(transport: u16) -> FfiLinkAttrs {
@@ -142,21 +124,16 @@ pub fn ble_attrs(transport: u16) -> FfiLinkAttrs {
     }
 }
 
-/// Mint a link id for a transport's own counter.
-///
-/// Exported rather than reimplemented in Swift for the same reason the bulk
-/// sealing lives in `acrylius-proto`: two hosts each carrying their own idea of
-/// how an id is built is two implementations of a rule the core depends on. A
-/// Swift transport calls this with `1, 2, 3…` and cannot collide with the Rust
-/// one, which is doing exactly the same thing.
+/// Mint a link id for a transport's own counter, so a Swift transport calling
+/// this with `1, 2, 3…` can't collide with the Rust side doing the same.
 #[uniffi::export]
 #[must_use]
 pub fn link_id(transport: u16, counter: u64) -> u64 {
     cl::LinkId::new(cl::TransportId(transport), counter).0
 }
 
-/// The attributes of an ordinary LAN TCP link, so a host does not have to spell
-/// them out and get one wrong.
+/// Attributes of an ordinary LAN TCP link, so a host doesn't spell them out
+/// and get one wrong.
 #[uniffi::export]
 #[must_use]
 pub fn tcp_lan_attrs(transport: u16) -> FfiLinkAttrs {
@@ -220,9 +197,6 @@ pub enum FfiEvent {
     },
     Tick,
     /// Dial `addr` and try to pair with whatever answers.
-    ///
-    /// What a person tapping a machine in the list turns into. There is nothing
-    /// to type: the six digits that come back are what settles who answered.
     RequestPairing {
         transport: u16,
         addr: String,
@@ -261,8 +235,8 @@ pub enum FfiEvent {
         transfer: u64,
         endpoint: String,
     },
-    /// The far end connected. Sent between `BulkListener.accept` and its
-    /// `receive`, which is the only moment either is known.
+    /// The far end connected — sent between `accept` and `receive`, the only
+    /// moment either is known.
     BulkStarted {
         transfer: u64,
     },
@@ -290,16 +264,14 @@ impl From<FfiEffectResult> for cv::EffectResult {
     }
 }
 
-/// A device id that failed to parse is refused here rather than turned into a
-/// lookup that quietly matches nothing.
+/// Malformed input (e.g. a device id) is refused here, not turned into a
+/// silent no-match lookup.
 #[derive(uniffi::Error, Debug, thiserror::Error)]
 pub enum FfiError {
     #[error("{detail}")]
     BadInput { detail: String },
-    /// Something the host was asked to carry out and could not. Separate from
-    /// `BadInput` because it is not the caller's fault and not worth fixing by
-    /// calling differently: a file went missing, a socket refused, a disk
-    /// filled.
+    /// Something the host attempted and couldn't do — not the caller's fault:
+    /// a missing file, a refused socket, a full disk.
     #[error("{detail}")]
     Effect { detail: String },
 }
@@ -409,8 +381,8 @@ impl TryFrom<FfiEvent> for cv::Event {
 
 // --------------------------------------------------------------------- actions
 
-/// What a host can carry out. Declared at construction; a plugin whose effects
-/// are missing still loads and can still send, it simply cannot serve.
+/// What a host can carry out. A plugin whose effect is missing still loads
+/// and can still send; it just can't serve.
 #[derive(uniffi::Enum, Clone, Copy, Debug)]
 pub enum FfiEffectKind {
     Session,
@@ -451,9 +423,8 @@ pub enum FfiEffect {
         id: String,
     },
     MediaQuery,
-    /// An empty `player` means whichever is active. `value` is milliseconds for
-    /// a seek or a position and a whole percent for a volume, already
-    /// range-checked by the plugin.
+    /// Empty `player` means active; `value` is ms for seek/position, percent
+    /// for volume (already range-checked).
     MediaControl {
         player: String,
         verb: String,
@@ -481,10 +452,8 @@ impl From<cv::Effect> for FfiEffect {
             cv::Effect::ClipboardWrite { mime, data } => Self::ClipboardWrite { mime, data },
             cv::Effect::ListCommands => Self::ListCommands,
             cv::Effect::RunCommand { id } => Self::RunCommand { id },
-            // Flattened to a verb and one number rather than mirroring the
-            // nested enum. A host acting on this switches on a string either
-            // way, and a second enum across the boundary would be a second
-            // thing to keep in step for no gain.
+            // Flattened to a verb + value rather than mirroring the nested
+            // enum — one enum to keep in sync, not two.
             cv::Effect::MediaQuery => Self::MediaQuery,
             cv::Effect::MediaControl { player, action } => {
                 use cv::MediaAction as A;
@@ -543,6 +512,7 @@ pub enum FfiUiEvent {
         /// whichever transport saw the machine, so this is handed straight back
         /// as `FfiEvent::RequestPairing`'s `transport` — and a type that did not
         /// match its only destination is a cast waiting to be written wrong.
+        /// `u16`, like every other transport id across this boundary.
         transport: u16,
         pairing: bool,
     },
@@ -636,10 +606,9 @@ impl From<cv::UiEvent> for FfiUiEvent {
     }
 }
 
-/// Where the host must put a persisted value.
-///
-/// `Secret` means the iOS Keychain with `WhenUnlockedThisDeviceOnly`, and a
-/// `0600` file on Linux. It must never reach a plain file, a log or a backup.
+/// Where the host must persist a value. `Secret` means the iOS Keychain
+/// (`WhenUnlockedThisDeviceOnly`) or a `0600` file on Linux — never a plain
+/// file, log, or backup.
 #[derive(uniffi::Enum, Clone, Copy, Debug)]
 pub enum FfiSensitivity {
     Secret,
@@ -681,30 +650,28 @@ pub enum FfiAction {
     Ui {
         event: FfiUiEvent,
     },
-    /// Send a file. The host looks the transfer up in whatever it offered from
-    /// and calls `bulk_send`; the key is the core's, derived from the session,
-    /// and is never something the host works out for itself.
+    /// Send a file: host looks up the transfer, calls `bulk_send`. Key comes
+    /// from the core (session-derived), never computed by the host.
     BulkSend {
         transfer: u64,
         endpoint: String,
         key: Vec<u8>,
     },
-    /// Accept a file. The host binds somewhere, answers with `BulkListening`
-    /// and the endpoint it bound, then writes what arrives.
+    /// Accept a file. The host binds, answers with `BulkListening` and its
+    /// endpoint, then writes what arrives.
     ///
-    /// `expect_bytes` is what the far end says it is sending, so a host can
-    /// decide whether it wants it before a byte of it exists on disk.
+    /// `expect_bytes` is what the far end claims to send, so the host can
+    /// decide before anything hits disk.
     BulkListen {
         transfer: u64,
-        /// What the sender calls this transfer, and the only number it will put
-        /// in its greeting. Keep the listener under `transfer`; check the
-        /// greeting against this.
+        /// The number the sender will put in its greeting; check the greeting
+        /// against this, but key the listener on `transfer`.
         offered_as: u64,
         key: Vec<u8>,
         expect_bytes: u64,
     },
-    /// A bulk transfer this host has no way to carry out. The host answers with
-    /// a failed `BulkFinished`, so the far end is told rather than left waiting.
+    /// A bulk transfer this host can't carry out; answers with a failed
+    /// `BulkFinished` rather than leaving the peer waiting.
     BulkUnsupported {
         transfer: u64,
     },
@@ -772,14 +739,8 @@ impl From<cv::Action> for FfiAction {
                 endpoint,
                 key,
             },
-            // Receiving crosses now. It used to be turned into "unsupported"
-            // here, because a phone had nowhere to put a file — and the note
-            // that stood in this place said that the day one could receive,
-            // this should be the thing that changes. It is.
-            //
-            // A host that still cannot receive does not reach this at all: the
-            // share plugin refuses an offer outright unless the host declares
-            // the effect, which is the check that keeps the two in step.
+            // Reached only if the host declared the Share effect — the plugin
+            // refuses an offer otherwise.
             cv::Action::BulkListen {
                 transfer,
                 offered_as,
@@ -802,7 +763,7 @@ impl From<cv::Action> for FfiAction {
 #[derive(uniffi::Record, Clone, Debug)]
 pub struct FfiOutcome {
     pub actions: Vec<FfiAction>,
-    /// Absolute monotonic milliseconds. The host arms exactly one timer and
-    /// re-arms it on every outcome.
+    /// Absolute monotonic milliseconds. The host arms one timer and re-arms
+    /// it on every outcome.
     pub next_deadline_ms: Option<u64>,
 }

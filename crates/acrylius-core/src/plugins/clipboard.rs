@@ -1,20 +1,8 @@
 //! `org.acrylius.clipboard/1`: share the clipboard.
 //!
-//! The whole difficulty is loops. Two peers that forward every change they see
-//! will echo a single paste at each other forever, and the failure is not
-//! obvious in testing because it needs two live devices to appear.
-//!
-//! The fix is to remember hashes. Each side keeps the hash of the last value it
-//! set locally and the last it received, and forwards a local change only when
-//! it matches neither. `clipboard_flapping_does_not_loop` pins this.
-//!
-//! The two directions are separately switchable, and that is not only a
-//! preference. iOS cannot read its own pasteboard silently: since iOS 16 a
-//! programmatic read of content that came from another app raises a system
-//! prompt, and only a paste button, the paste menu, or the keyboard shortcut
-//! are exempt. `changeCount` can be polled without a prompt, so an iOS host can
-//! notice a change and offer a button, but it cannot sync silently. Computer to
-//! phone is unaffected.
+//! Loop prevention: forward a local change only when its hash matches neither
+//! the last value set locally nor the last received. Directions are separately
+//! switchable because iOS cannot read its pasteboard without a system prompt.
 
 use std::collections::BTreeMap;
 
@@ -30,8 +18,7 @@ pub const CAP: &str = "org.acrylius.clipboard/1";
 /// The only type version 1 carries.
 pub const TEXT_PLAIN: &str = "text/plain;charset=utf-8";
 
-/// Anything larger is refused rather than truncated. A silently shortened
-/// clipboard is worse than one that did not sync.
+/// Anything larger is refused rather than truncated.
 pub const MAX_INLINE: usize = 128 * 1024;
 
 #[derive(Clone, PartialEq, Eq, Debug, Default, minicbor::Encode, minicbor::Decode)]
@@ -88,10 +75,8 @@ pub struct ClipboardPlugin {
 }
 
 impl ClipboardPlugin {
-    /// Offer `body` to every connected peer.
-    ///
-    /// `deliberate` is a person having asked, rather than the host noticing a
-    /// change on its own; only the latter is subject to the send switch.
+    /// Offer `body` to every connected peer. Only a host-noticed change
+    /// (`!deliberate`) is subject to the send switch.
     fn offer(&mut self, cx: &mut Cx, body: &[u8], deliberate: bool) -> Result<(), PluginError> {
         if !deliberate && !self.directions.send {
             return Ok(());
@@ -126,18 +111,8 @@ impl ClipboardPlugin {
         }
     }
 
-    /// Whether a locally observed value is the echo of one we just handled.
-    ///
-    /// The remote slot is one shot, and that is the point of it. It exists to
-    /// swallow the single change the clipboard watcher reports right after a
-    /// peer's value is put on this machine's clipboard — one observation, not
-    /// every future one. Kept, it meant anything that had *ever* arrived from a
-    /// peer could never be sent back: copy a link a colleague sent you an hour
-    /// ago and nothing happens, with no error and nothing to explain it.
-    ///
-    /// The local slot is not one shot and does not need to be, because every
-    /// offer that goes out overwrites it. Copying the same thing twice running
-    /// really is nothing to say.
+    /// Whether a locally observed value is an echo. The remote slot is one-shot:
+    /// it swallows only the watcher's report of a peer value just applied.
     fn take_echo(&mut self, h: &[u8]) -> bool {
         if self.last_remote.as_deref() == Some(h) {
             self.last_remote = None;
@@ -169,13 +144,8 @@ impl Plugin for ClipboardPlugin {
         env: &Envelope<'_>,
     ) -> Result<(), PluginError> {
         match env.ty {
-            // A `set` carrying `re` answers a `get` we sent. That is a different
-            // thing from an unsolicited push, and conflating the two was wrong
-            // in both directions: it let the receive switch suppress an answer
-            // the user had explicitly asked for, and it wrote a value onto the
-            // local clipboard when the caller only wanted to look at it. Taking
-            // ownership of a selection nobody asked us to hold is how two
-            // devices end up fighting over it.
+            // Answers our own `get`: delivered even with receive off, and
+            // never written to the local clipboard.
             "set" if env.re.is_some() => {
                 let msg: ClipboardSet =
                     minicbor::decode(env.body).map_err(|_| PluginError::BadBody)?;
@@ -209,12 +179,9 @@ impl Plugin for ClipboardPlugin {
                 if msg.hash != h {
                     return Err(PluginError::BadBody);
                 }
-                // Remember before applying. The host will observe this value on
-                // its own clipboard a moment later, and must not send it back.
+                // The host will observe this value on its own clipboard next;
+                // remember it so it is not sent back.
                 self.last_remote = Some(h);
-                // Surface it as well as applying it. A caller that asked for
-                // the peer's clipboard needs to see what came back, and a user
-                // interface wants to show it.
                 cx.ui(UiEvent::Plugin {
                     peer: peer.clone(),
                     cap: CAP.to_string(),
@@ -244,14 +211,8 @@ impl Plugin for ClipboardPlugin {
         body: &[u8],
     ) -> Result<(), PluginError> {
         match ty {
-            // The host noticed a local change by itself. Gated on the send
-            // switch, which exists to stop a device volunteering its clipboard.
             "changed" => self.offer(cx, body, false),
-            // Somebody pressed a button. Not gated: the switch is there to stop
-            // a device speaking unprompted, and it has no business vetoing a
-            // person who asked. Conflating the two is why a Paste button on a
-            // phone — where automatic sending is off, because reading the
-            // pasteboard raises a system alert — silently did nothing.
+            // The send switch stops a device volunteering, not a person asking.
             "push" => self.offer(cx, body, true),
             "get" => {
                 cx.send(peer, CAP, "get", Vec::new());
@@ -309,14 +270,11 @@ mod tests {
 
     #[test]
     fn a_value_a_peer_once_sent_can_still_be_sent_back_later() {
-        // The echo guard is for the one change the clipboard watcher reports
-        // straight after a peer's value lands here. Kept for good, it meant
-        // anything that had ever arrived from a peer was silently undeliverable
-        // for the rest of the process — copy it again and nothing happens.
+        // The echo guard must swallow only the watcher's immediate echo, not
+        // make a peer's value undeliverable forever.
         let mut p = ClipboardPlugin::default();
         run(0, |cx| p.on_peer_connected(cx, &peer()));
 
-        // A peer sends "hello"; the watcher reports it right back at us.
         let body = set_message("hello");
         let env = envelope(1, CAP, "set", &body);
         run(0, |cx| p.on_message(cx, &peer(), &env).unwrap());
@@ -328,7 +286,6 @@ mod tests {
             "the echo of what just arrived is swallowed"
         );
 
-        // Someone copies something else, then copies "hello" again on purpose.
         run(0, |cx| {
             p.on_local(cx, &peer(), "changed", b"world").unwrap()
         });
@@ -343,10 +300,8 @@ mod tests {
 
     #[test]
     fn an_offer_skips_the_peer_that_left_and_reaches_the_one_that_stayed() {
-        // See the twin of this in `plugins::session`. Mutation testing found the
-        // same untested `retain` in all three plugins that keep a peer list:
-        // `!=` could become `==`, dropping every peer except the one that had
-        // just gone, and nothing objected.
+        // Mutation testing found the same untested `retain` in every plugin
+        // that keeps a peer list.
         let mut p = ClipboardPlugin::default();
         let gone = peer();
         let stayed = DeviceId::of(&[9u8; 32]);
@@ -383,10 +338,8 @@ mod tests {
 
     #[test]
     fn the_send_switch_does_not_veto_a_person() {
-        // A phone keeps automatic sending off, because reading its pasteboard
-        // raises a system alert — so it must never volunteer a value. That is
-        // not a reason to discard one the user explicitly handed over, and
-        // conflating the two made a Paste button do nothing at all.
+        // The send switch stops a device volunteering a value, not a person
+        // pushing one.
         let mut p = ClipboardPlugin::new(Directions {
             send: false,
             receive: true,
@@ -409,9 +362,8 @@ mod tests {
 
     #[test]
     fn clipboard_flapping_does_not_loop() {
-        // The failure this prevents needs two live devices to show up, so it is
-        // pinned here instead: A tells B, B applies it, B's host then observes
-        // the very same value on its own clipboard. B must say nothing.
+        // A tells B, B applies it, B's host observes the same value locally;
+        // B must say nothing.
         let mut a = ClipboardPlugin::default();
         let mut b = ClipboardPlugin::default();
         run(0, |cx| a.on_peer_connected(cx, &peer()));
@@ -421,7 +373,6 @@ mod tests {
         let mut value = "first".to_string();
 
         for round in 0..50 {
-            // A's clipboard changed; it offers the value.
             let ra = run(0, |cx| {
                 a.on_local(cx, &peer(), "changed", value.as_bytes())
                     .unwrap()
@@ -429,12 +380,11 @@ mod tests {
             let Some(sent) = ra.sent("set") else { continue };
             messages += 1;
 
-            // B receives it and writes it to its own clipboard.
             let env = envelope(round, CAP, "set", &sent.body);
             let rb = run(0, |cx| b.on_message(cx, &peer(), &env).unwrap());
             assert!(matches!(rb.one_effect(), Effect::ClipboardWrite { .. }));
 
-            // B's host now observes that value locally. This is the echo.
+            // B's host now observes that value locally: the echo.
             let echo = run(0, |cx| {
                 b.on_local(cx, &peer(), "changed", value.as_bytes())
                     .unwrap()
@@ -444,7 +394,6 @@ mod tests {
                 "B echoed back a value it had just been given (round {round})"
             );
 
-            // And A observing its own value must not resend it either.
             let self_echo = run(0, |cx| {
                 a.on_local(cx, &peer(), "changed", value.as_bytes())
                     .unwrap()
@@ -454,7 +403,6 @@ mod tests {
             value = format!("value-{round}");
         }
 
-        // One message per genuinely new value, and nothing else.
         assert_eq!(
             messages, 50,
             "expected exactly one message per distinct value"
@@ -463,10 +411,8 @@ mod tests {
 
     #[test]
     fn an_answer_to_our_own_get_is_not_an_unsolicited_push() {
-        // Two differences, and both matter. An answer reaches a caller who
-        // asked for it even with receive switched off, and it does NOT touch
-        // the local clipboard: taking ownership of a selection nobody asked us
-        // to hold is how two devices end up fighting over one.
+        // An answer reaches the caller even with receive off, and must not
+        // touch the local clipboard.
         let mut p = ClipboardPlugin::new(Directions {
             send: false,
             receive: false,
@@ -534,8 +480,7 @@ mod tests {
 
     #[test]
     fn a_hash_that_does_not_match_the_data_is_refused() {
-        // Cheap, and it catches a peer whose own loop prevention is broken
-        // before its bad state becomes ours.
+        // Catches a peer whose own loop prevention is broken.
         let mut p = ClipboardPlugin::default();
         let body = minicbor::to_vec(ClipboardSet {
             mime: TEXT_PLAIN.to_string(),

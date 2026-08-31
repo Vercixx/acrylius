@@ -1,8 +1,5 @@
-//! What this machine offers, and to whom.
-//!
-//! Everything here is a decision the owner of the machine makes. Nothing in it
-//! can be changed from the network: a peer chooses from what this file allows
-//! and has no way to add to it.
+//! What this machine offers, and to whom. Nothing here can be changed from the
+//! network: a peer chooses from what this file allows.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -27,13 +24,7 @@ pub struct Config {
     pub commands: BTreeMap<String, CommandSpec>,
 }
 
-/// Pairing.
-///
-/// Pairing has no pre-shared key, so any device that can reach this one may
-/// start a handshake and put six digits on this screen. Nothing is stored
-/// without somebody here pressing a button, and a cooldown keeps a device that
-/// keeps asking to one notification — but a machine that is done pairing has no
-/// reason to answer at all, and this is how to say so.
+/// Whether this machine answers pairing attempts at all.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PairConfig {
@@ -42,19 +33,12 @@ pub struct PairConfig {
 
 impl Default for PairConfig {
     fn default() -> Self {
-        // On. A machine nobody can pair with is a machine nobody can use, and
-        // the first thing anyone does with this software is pair something.
         Self { enabled: true }
     }
 }
 
-/// Bluetooth LE.
-///
-/// Capability is detected, not configured: a machine with no adapter, or one
-/// whose controller cannot act as a peripheral, offers no BLE transport whatever
-/// this says. What this decides is whether a machine that *can* should — because
-/// advertising is a radio broadcasting this machine's presence continuously, and
-/// that is the owner's call to make rather than ours to assume.
+/// Bluetooth LE. Capability is detected, not configured; this decides whether
+/// a machine that can advertise should.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BleConfig {
@@ -63,8 +47,6 @@ pub struct BleConfig {
 
 impl Default for BleConfig {
     fn default() -> Self {
-        // On, because a transport nobody enables is a transport nobody tests,
-        // and the phone reaching the desktop with Wi-Fi off is the point of it.
         Self { enabled: true }
     }
 }
@@ -76,31 +58,16 @@ pub struct WolConfig {
     pub macs: Vec<String>,
     pub broadcast: String,
     pub port: u16,
-    /// Where a phone should aim first.
-    ///
-    /// Unicast wakes a machine just as well as broadcast, and iOS cannot
-    /// broadcast without an entitlement a free account cannot get. Left empty,
-    /// the daemon fills this in with the address it is currently reachable at.
+    /// Where a phone should aim first: iOS cannot broadcast without an
+    /// entitlement. Left empty, the daemon fills in its current address.
     pub last_ipv4: String,
     /// Other machines this one may be asked to wake. Empty means none.
     pub allowlist: Vec<String>,
 }
 
-/// How this machine locks and unlocks, when logind's signal is not enough.
-///
-/// `loginctl unlock-session` only emits a signal, and acting on it is the
-/// screen locker's choice. A lock implemented inside a Wayland shell may offer
-/// no way in from outside at all, in which case unlocking remotely is
-/// impossible until you say how it is done here. Each is an argv vector, run
-/// with no shell.
-///
-/// Quickshell, for example, needs a handler adding to its own config before
-/// there is anything to call:
-///
-/// ```toml
-/// [session]
-/// unlock_command = ["qs", "-c", "ii", "ipc", "call", "lock", "deactivate"]
-/// ```
+/// How this machine locks and unlocks when logind's signal is not enough:
+/// `loginctl unlock-session` only emits a signal, and some lockers ignore it.
+/// Each is an argv vector, run with no shell.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SessionConfig {
@@ -112,14 +79,12 @@ pub struct SessionConfig {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ShareConfig {
-    /// Where an accepted file is written. Every incoming file lands here and
-    /// nowhere else: a peer chooses a name, never a directory.
+    /// Where an accepted file is written; a peer chooses a name, never a directory.
     pub directory: String,
-    /// Accept without asking. Off, because a device that wrote whatever a peer
-    /// sent it would be a file drop for anything ever paired with it.
+    /// Accept without asking.
     pub auto_accept: bool,
-    /// What to tell a peer to connect to for a transfer. Empty means ask the
-    /// kernel which address it would use to reach the network.
+    /// What to tell a peer to connect to for a transfer; empty means ask the
+    /// kernel which address it would use.
     pub advertise_host: String,
 }
 
@@ -133,17 +98,9 @@ impl Default for ShareConfig {
     }
 }
 
-/// Where this desktop actually puts downloads.
-///
-/// Not `~/Downloads`. That folder is called `Загрузки` on a Russian system,
-/// `Téléchargements` on a French one, and so on; hardcoding the English name
-/// invents a second folder beside the real one and quietly fills it with files
-/// nobody will think to look in. That is not hypothetical — it is what this did
-/// before, and the files went somewhere their owner could not find.
-///
-/// The answer lives in `user-dirs.dirs`, which `xdg-user-dirs-update` writes and
-/// every desktop reads. The environment variable is checked first but is rarely
-/// set: it is exported into a session by some setups and not by most.
+/// Where this desktop actually puts downloads. The folder is localized
+/// (`Загрузки`, `Téléchargements`, ...), so read `user-dirs.dirs` rather than
+/// hardcoding the English name.
 fn default_download_dir() -> String {
     if let Some(dir) = std::env::var_os("XDG_DOWNLOAD_DIR") {
         return dir.to_string_lossy().into_owned();
@@ -155,14 +112,9 @@ fn default_download_dir() -> String {
         .into_owned()
 }
 
-/// Whether a configured download directory looks like one an earlier version
-/// wrote by mistake, and what to do about it.
-///
-/// A narrow check on purpose. Somebody who deliberately chose a folder is not
-/// to be second-guessed, so this fires only on the exact shape the bug left
-/// behind: literally `$HOME/Downloads`, on a desktop whose downloads folder is
-/// called something else, with nothing in the English one. That combination is
-/// not a choice anybody made.
+/// Deliberately narrow: fires only on the exact shape an earlier bug left
+/// behind — literally `$HOME/Downloads`, empty, on a desktop whose downloads
+/// folder is named something else.
 #[must_use]
 pub fn stale_download_dir(configured: &str) -> Option<String> {
     let home = PathBuf::from(std::env::var_os("HOME")?);
@@ -188,11 +140,7 @@ pub fn stale_download_dir(configured: &str) -> Option<String> {
     })
 }
 
-/// Read one entry out of `~/.config/user-dirs.dirs`.
-///
-/// The file is shell syntax, but only barely: a line per directory, always
-/// quoted, always either absolute or relative to `$HOME`. Parsing that much is
-/// a good deal less trouble than running a shell to do it.
+/// Read one entry out of `~/.config/user-dirs.dirs` without running a shell.
 fn xdg_user_dir(name: &str, home: &std::path::Path) -> Option<PathBuf> {
     let config = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
@@ -200,8 +148,6 @@ fn xdg_user_dir(name: &str, home: &std::path::Path) -> Option<PathBuf> {
     xdg_user_dir_in(&config, name, home)
 }
 
-/// The parsing, with nowhere to look already decided, so a test needs no
-/// environment of its own.
 fn xdg_user_dir_in(
     config: &std::path::Path,
     name: &str,
@@ -224,9 +170,7 @@ fn xdg_user_dir_in(
             None if value == "$HOME" => home.to_path_buf(),
             None => PathBuf::from(value),
         };
-        // A user dir pointing at $HOME itself means "I do not have one of
-        // these", and dropping files straight into a home directory is not what
-        // anybody wants.
+        // A user dir set to $HOME itself means "I do not have one of these".
         return (path != home).then_some(path);
     }
     None
@@ -279,11 +223,8 @@ impl Default for ClipboardConfig {
 }
 
 impl Config {
-    /// Read the config, or fall back to defaults when there is none.
-    ///
-    /// A missing file is normal: a fresh install has nothing to configure and
-    /// should still start. A malformed one is not, and refusing to start beats
-    /// running with a silently ignored allowlist.
+    /// Read the config, or fall back to defaults when there is none. A
+    /// malformed file refuses to start rather than silently ignoring settings.
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let text = match std::fs::read_to_string(path) {
             Ok(t) => t,
@@ -330,9 +271,6 @@ impl Config {
 mod tests {
     use super::*;
 
-    /// The bug this exists to prevent: a downloads folder called `Downloads` on
-    /// a desktop whose downloads folder is called something else, quietly
-    /// collecting files nobody can find.
     #[test]
     fn a_downloads_folder_is_whatever_this_desktop_calls_it() {
         let dir = std::env::temp_dir().join(format!("acr-xdg-{}", std::process::id()));
@@ -375,8 +313,6 @@ mod tests {
 
     #[test]
     fn a_command_with_a_relative_program_stops_startup() {
-        // Better to refuse to start than to run with a command that will fail
-        // in a surprising way the first time somebody taps it.
         let toml = r#"
             [commands.oops]
             name = "Oops"

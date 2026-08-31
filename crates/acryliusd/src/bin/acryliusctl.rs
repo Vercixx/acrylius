@@ -1,9 +1,5 @@
-//! The control CLI.
-//!
-//! Everything here goes over the `0600` Unix socket with a `SO_PEERCRED` uid
-//! check. There is no network equivalent, and `pair` in particular has no route
-//! from outside this machine, which is how "you must be at the PC" stays true
-//! even if a future plugin is careless.
+//! The control CLI. Talks to the daemon over its `0600` Unix socket with a
+//! `SO_PEERCRED` uid check; there is no network equivalent.
 
 use std::path::PathBuf;
 
@@ -24,30 +20,14 @@ struct Args {
     #[arg(long, env = "ACRYLIUS_STATE", global = true)]
     state: Option<PathBuf>,
     /// Print what came back as JSON instead of a table.
-    ///
-    /// The same value either way: the daemon answers with data, and the two
-    /// renderings are the only difference.
     #[arg(long, global = true)]
     json: bool,
     #[command(subcommand)]
     cmd: Top,
 }
 
-// Grouped by the noun each verb is about, rather than nineteen commands in one
-// flat list.
-//
-// Nothing was dropped to get here: the ones that looked redundant turned out to
-// be the fallbacks for the cases the obvious path does not cover — `file accept`
-// is what a desktop whose notifications have no buttons is told to run,
-// `pair approve` is the only answer available when `pair` is not on a terminal,
-// and `device connect --addr` is how you reach a machine on a network that
-// filters mDNS. A shorter list would have been a list with holes in it.
-//
-// Every `device` positional carries `allow_hyphen_values`. A device id is
-// strict base64url, whose alphabet includes '-', so roughly one id in
-// sixty-four begins with one, and clap would read that as a flag and refuse the
-// command. It is rare enough to look like a fluke in the field and is pinned by
-// a test below.
+// Every `device` positional carries `allow_hyphen_values`: a base64url id can
+// start with '-', which clap would otherwise read as a flag.
 #[derive(Subcommand, Debug)]
 enum Top {
     /// Daemon identity, port and negotiated capabilities.
@@ -86,10 +66,6 @@ struct Pair {
 #[derive(Subcommand, Debug)]
 enum PairCmd {
     /// Accept the device currently waiting, after checking the codes match.
-    ///
-    /// The answer for a `pair` that is not on a terminal — piped, or in a
-    /// script — which has nobody to ask and says so rather than blocking on a
-    /// read that will never return.
     Approve,
     /// Refuse it.
     Deny,
@@ -114,9 +90,6 @@ enum DeviceCmd {
     /// Paired devices.
     List,
     /// Machines on this network that are not paired with.
-    ///
-    /// The other half of `pair with`, which takes an address and had nothing
-    /// anywhere that would tell you one.
     Nearby,
     /// Forget one. Its next connection is a stranger's.
     Forget {
@@ -124,11 +97,6 @@ enum DeviceCmd {
         device: String,
     },
     /// Open a session, and say why if it will not open.
-    ///
-    /// Dialling is automatic on every sighting, so this is not how a session
-    /// normally starts. It is how you find out what is wrong with one that has
-    /// not: an attempt somebody asked for is the only one that reports its
-    /// failure out loud.
     Connect {
         #[arg(allow_hyphen_values = true)]
         device: String,
@@ -198,10 +166,8 @@ enum ClipCmd {
     },
 }
 
-/// Control what is playing on a peer.
-///
-/// A command naming no player goes to whichever one is active, which
-/// `play status` marks with a `*`.
+/// Control what is playing on a peer. A command naming no player goes to the
+/// active one, which `play status` marks with a `*`.
 #[derive(clap::Args, Debug)]
 struct Play {
     #[command(subcommand)]
@@ -256,11 +222,8 @@ enum PlayCmd {
         device: String,
         ms: i64,
     },
-    /// Set the volume, 0 to 100.
-    ///
-    /// With no `--player` this moves the machine's own output, not a player's:
-    /// most players accept a volume and ignore it while still reporting that
-    /// they take control.
+    /// Set the volume, 0 to 100. With no `--player` this moves the machine's
+    /// own output, not a player's.
     Volume {
         #[arg(allow_hyphen_values = true)]
         device: String,
@@ -269,7 +232,6 @@ enum PlayCmd {
 }
 
 impl PlayCmd {
-    /// The device, the verb the daemon knows, and a value if the verb takes one.
     fn parts(self) -> (String, &'static str, Option<i64>) {
         match self {
             Self::Status { device } => (device, "query", None),
@@ -323,28 +285,23 @@ enum FileCmd {
     },
     /// Files offered to this machine that nobody has answered yet.
     Offers,
-    /// Take one. This is what a desktop with no notification buttons is told
-    /// to run.
+    /// Take one.
     Accept { transfer: u64 },
     /// Refuse one.
     Reject { transfer: u64 },
 }
 
-// The wire types are `acryliusd::ipc`, shared with the daemon that answers.
-// They were a second hand-maintained copy in this file: same crate, same
-// build, and nothing making them agree.
 use acryliusd::ipc::{Request, Response};
 
-/// Mirrors the daemon's rule: an explicitly named state directory keeps its
-/// socket beside it, so two instances on one machine do not collide.
-/// `println!` panics when its pipe closes, because Rust ignores SIGPIPE. A
-/// tool that dies noisily when piped into `head` is not behaving like a Unix
-/// tool; dropping the write error ends output quietly instead.
+/// `println!` panics when its pipe closes (Rust ignores SIGPIPE); dropping the
+/// write error ends output quietly instead.
 macro_rules! outln {
     () => {{ let _ = writeln!(std::io::stdout()); }};
     ($($arg:tt)*) => {{ let _ = writeln!(std::io::stdout(), $($arg)*); }};
 }
 
+/// Mirrors the daemon's rule: an explicitly named state directory keeps its
+/// socket beside it.
 fn socket_path(state: Option<PathBuf>) -> PathBuf {
     if let Some(s) = state {
         return s.join("acrylius.sock");
@@ -423,18 +380,11 @@ async fn main() -> anyhow::Result<()> {
             CmdCmd::List { device } => (Request::Commands { device }, false),
             CmdCmd::Run { device, id } => (Request::Run { device, id }, false),
         },
-        // Not streaming, any of them: a transfer reports once, when it is over.
-        // Waiting for a second line means waiting for one the daemon has no
-        // reason to send.
         Top::File(f) => match f.what {
             FileCmd::Send { device, path } => (
                 Request::Send {
                     device,
-                    // Resolved here, and it has to be here. The daemon has a
-                    // working directory of its own — `/` under systemd — so a
-                    // relative path sent verbatim is resolved against somewhere
-                    // the person typing it has never been, and reports that
-                    // their file does not exist.
+                    // Resolved here: the daemon's working directory is `/` under systemd.
                     path: absolute(&path)?,
                 },
                 false,
@@ -465,15 +415,11 @@ async fn main() -> anyhow::Result<()> {
     let mut failed = false;
     while let Some(l) = lines.next_line().await? {
         let response: Response = serde_json::from_str(&l)?;
-        // One value, two renderings. `--json` prints what the daemon actually
-        // answered rather than a parse of the table below it, which is the
-        // whole reason the daemon stopped wording things itself.
         if args.json {
             outln!("{}", serde_json::to_string(&response)?);
             if let Response::Error { .. } = response {
                 failed = true;
             }
-            // A pairing stream keeps going; everything else answers once.
             if streaming {
                 continue;
             }
@@ -543,15 +489,13 @@ async fn main() -> anyhow::Result<()> {
                 } else if std::io::stdin().is_terminal() {
                     prompt("  Do the codes match? [Y/n] ").await?
                 } else {
-                    // Piped or backgrounded: there is nobody to ask. Say what to
-                    // run rather than blocking forever on a read that will never
-                    // return, which is what made this a two-terminal job.
+                    // Piped or backgrounded: nobody to ask, so say what to run
+                    // instead of blocking on a read that will never return.
                     outln!("  Not a terminal, so nothing to ask.");
                     outln!("  Run `acryliusctl pair approve` (or `pair deny`) to answer.");
                     continue;
                 };
-                // A second connection, because this one is busy streaming the
-                // pairing. The daemon holds the window open until answered.
+                // A fresh connection: this one is busy streaming the pairing.
                 answer(&path, accept).await?;
                 if !accept {
                     failed = true;
@@ -572,9 +516,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Ask a yes/no question. Anything but an explicit "n" is a yes, because the
-/// operator has already been shown both codes and the default is the case they
-/// are in when the codes match.
+/// Ask a yes/no question; anything but an explicit "n" is a yes.
 async fn prompt(question: &str) -> anyhow::Result<bool> {
     use tokio::io::AsyncBufReadExt;
     let mut stdout = std::io::stdout();
@@ -587,7 +529,6 @@ async fn prompt(question: &str) -> anyhow::Result<bool> {
     Ok(!(answer.starts_with('n')))
 }
 
-/// Send the answer over a fresh connection.
 async fn answer(path: &std::path::Path, accept: bool) -> anyhow::Result<()> {
     let stream = UnixStream::connect(path).await?;
     let (rd, mut wr) = stream.into_split();
@@ -605,13 +546,8 @@ async fn answer(path: &std::path::Path, accept: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Turn what someone typed into a path the daemon can open.
-///
-/// `~` first, because a shell only expands it unquoted and people quote paths
-/// with spaces in them. Then made absolute against *this* process's working
-/// directory, which is the only one that has anything to do with what they
-/// meant. Symlinks are left alone: following them would send the target of a
-/// link rather than the thing that was named.
+/// Expand `~` (shells only expand it unquoted), then make the path absolute
+/// against this process's working directory. Symlinks are left alone.
 fn absolute(path: &str) -> anyhow::Result<String> {
     let home = std::env::var_os("HOME").unwrap_or_default();
     Ok(resolve(path, home.as_ref(), &std::env::current_dir()?)
@@ -619,8 +555,6 @@ fn absolute(path: &str) -> anyhow::Result<String> {
         .into_owned())
 }
 
-/// The rule itself, asking the environment nothing, so a test can check it
-/// without changing the environment out from under everything else.
 fn resolve(path: &str, home: &std::ffi::OsStr, cwd: &std::path::Path) -> PathBuf {
     let expanded = match path.strip_prefix("~/") {
         Some(rest) => PathBuf::from(home).join(rest),
@@ -654,9 +588,6 @@ mod tests {
         )
     }
 
-    /// The daemon's working directory is `/` under systemd. A path relative to
-    /// it is relative to nothing the person typing it can see, so it has to be
-    /// resolved here, where the working directory is theirs.
     #[test]
     fn a_path_is_resolved_where_it_was_typed() {
         assert_eq!(
@@ -670,29 +601,21 @@ mod tests {
         assert_eq!(resolved("/etc/hostname"), PathBuf::from("/etc/hostname"));
     }
 
-    /// A shell expands `~` only when it is unquoted, and a path with a space in
-    /// it is usually quoted. Both are ordinary things to type.
     #[test]
     fn a_tilde_becomes_the_home_directory() {
         assert_eq!(
             resolved("~/Pictures/a b.png"),
             PathBuf::from("/home/someone/Pictures/a b.png")
         );
-        // `~other` is another user's home, which no shell expands here either,
-        // so it stays a literal rather than becoming a wrong guess.
+        // `~other` stays literal rather than becoming a wrong guess.
         assert_eq!(
             resolved("~other/file"),
             PathBuf::from("/home/someone/photos/~other/file")
         );
     }
 
-    /// A device id is strict base64url, and that alphabet contains `-`. Roughly
-    /// one identity in sixty-four therefore produces an id starting with one,
-    /// which clap reads as a flag unless the positional says otherwise.
-    ///
-    /// This was found by an M0 acceptance run that happened to generate
-    /// `-4IEPRyU7ZslU335_83cWw`, and it had passed on every earlier run. Without
-    /// this test it would go back to being a once-in-sixty-four mystery.
+    /// A base64url id can start with `-`, which clap reads as a flag unless the
+    /// positional says otherwise.
     const HYPHEN_ID: &str = "-4IEPRyU7ZslU335_83cWw";
 
     fn parse(args: &[&str]) -> Args {
@@ -702,9 +625,6 @@ mod tests {
     }
 
     /// The device this invocation names, whichever group it went through.
-    ///
-    /// One place, so the hyphen test below covers every device positional
-    /// rather than the handful somebody remembered to list.
     fn device_of(a: Args) -> Option<String> {
         Some(match a.cmd {
             Top::Device(d) => match d.what {
@@ -757,8 +677,6 @@ mod tests {
 
     #[test]
     fn a_negative_seek_is_an_offset_and_not_a_flag() {
-        // `seek` takes a signed millisecond count, so the value itself looks
-        // like a flag. Both positionals on this one need the relaxation.
         let a = parse(&["play", "seek", HYPHEN_ID, "-5000"]);
         let Top::Play(p) = a.cmd else {
             panic!("wrong subcommand")
@@ -768,7 +686,6 @@ mod tests {
 
     #[test]
     fn options_still_parse_alongside_such_an_id() {
-        // allow_hyphen_values must not swallow the flags that follow it.
         let a = parse(&["device", "connect", HYPHEN_ID, "--addr", "127.0.0.1:1971"]);
         let Top::Device(d) = a.cmd else {
             panic!("wrong subcommand")
@@ -782,8 +699,6 @@ mod tests {
 
     #[test]
     fn a_genuinely_unknown_flag_is_still_refused() {
-        // The relaxation is scoped to the positional; it must not turn the CLI
-        // into one that silently accepts anything.
         assert!(
             Args::try_parse_from(["acryliusctl", "device", "ping", HYPHEN_ID, "--nonsense"])
                 .is_err()

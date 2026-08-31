@@ -1,24 +1,9 @@
 //
-//  Files offered to this phone, and where they will land.
-//
-//  The mirror of `FileOutbox`, and the counterpart of the daemon's share
-//  directory. Something has to hold the name a peer chose between the offer
-//  arriving and the bytes being accepted, because the core carries neither: an
-//  offer is a name, a size and an id, and the `BulkListen` that follows an
-//  acceptance carries only the id, a key and a byte count.
-//
-//  Files go in the app's Documents directory, which is the one place iOS lets
-//  another app reach with the user's help. With `UIFileSharingEnabled` the
-//  Files app shows it as "Acrylius" under On My iPhone, so what arrives here
-//  can be opened, moved, or handed to something else — including a sideloader's
-//  import picker, which is the only way an `.ipa` on a phone ever becomes an
-//  app.
-//
-//  What it deliberately does not do is decide what a file may be called. That
-//  rule is `bulkSafeName`, which is `acrylius_proto::bulk::safe_name` — the
-//  same function the daemon uses. A peer picks a name and nothing else; a
-//  second implementation of "and nothing else" is how one of the two ends up
-//  writing outside its directory.
+//  Files offered to this phone, and where they will land. Mirrors `FileOutbox`;
+//  holds the name/size/id between an offer arriving and `BulkListen` accepting
+//  it, since the core tracks neither together. Lands in Documents
+//  (`UIFileSharingEnabled` exposes it to the Files app). Name safety is
+//  `bulkSafeName`, shared with the daemon's `safe_name`.
 //
 
 import Foundation
@@ -29,9 +14,8 @@ public actor FileInbox {
         public let peer: String
         public let name: String
         public let size: UInt64
-        /// Where it will be written, decided when the offer arrives so that a
-        /// name collision is resolved before anyone accepts rather than after
-        /// the bytes are already moving.
+        /// Where it will be written; decided at offer time so a name collision
+        /// resolves before the bytes start moving, not after.
         let destination: URL
     }
 
@@ -39,11 +23,8 @@ public actor FileInbox {
 
     public init() {}
 
-    /// Where received files live. Created on first use.
-    ///
-    /// `Documents` itself rather than a subdirectory of it: the Files app shows
-    /// this app as a folder already, and burying everything one level deeper
-    /// buys nothing but an extra tap.
+    /// Where received files live, created on first use. `Documents` itself,
+    /// not a subdirectory — the Files app already shows this app as a folder.
     public nonisolated static func directory() -> URL {
         let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)
         let dir = docs.first ?? FileManager.default.temporaryDirectory
@@ -73,12 +54,8 @@ public actor FileInbox {
         byTransfer.removeValue(forKey: transfer)
     }
 
-    /// A path in `dir` nothing is using yet.
-    ///
-    /// Two photos called the same thing is ordinary; losing one is not. The
-    /// daemon's `free_path` does the same, and for the same reason — it is not
-    /// shared because it is about a filesystem, and these two do not have one
-    /// in common.
+    /// A path in `dir` nothing is using yet. Mirrors the daemon's `free_path`
+    /// (not shared: filesystems aren't).
     nonisolated static func freePath(in dir: URL, named name: String) -> URL {
         let plain = dir.appendingPathComponent(name)
         guard FileManager.default.fileExists(atPath: plain.path) else { return plain }

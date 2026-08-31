@@ -1,12 +1,7 @@
 #!/usr/bin/env bash
 #
-# Build and run the Swift side of the FFI seam **on Linux**.
-#
-# This works, and it matters more than it looks: it means the Swift that talks
-# to the core can be written and tested here, with no Mac and no 15-minute CI
-# round trip. Only SwiftUI views and Network.framework genuinely need macOS.
-#
-# Run from the repo root.
+# Build and run the Swift side of the FFI seam on Linux; only SwiftUI views
+# and Network.framework need macOS. Run from the repo root.
 set -euo pipefail
 
 OUT=${OUT:-target/swift}

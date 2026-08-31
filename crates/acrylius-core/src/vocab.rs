@@ -1,41 +1,22 @@
-//! The Event / Action vocabulary. This is the normative host seam.
+//! The Event / Action vocabulary — the normative host seam. There is no trait
+//! to implement and nothing to link against.
 //!
-//! This is the part other implementations conform to. A host "implements a
-//! transport" by producing [`Event::LinkUp`] / [`Event::LinkRecv`] /
-//! [`Event::LinkDown`] and carrying out [`Action::Dial`] / [`Action::LinkSend`] /
-//! [`Action::Close`]. It "implements an effector" by carrying out
-//! [`Action::Effect`] and reporting [`Event::EffectDone`]. There is no trait to
-//! implement and nothing to link against, which is exactly why the iOS host can
-//! be Swift over Network.framework with no Rust to Swift call anywhere in it.
-//!
-//! Every host must follow one rule: actions are executed by a single serial
-//! executor, results come back as events, and `handle()` is never called from
-//! inside an action handler. Breaking it produces reentrancy bugs that are very
-//! hard to see and very easy to avoid.
+//! Host rule: actions run on a single serial executor, results come back as
+//! events, and `handle()` is never called from inside an action handler.
 
 use crate::link::{LinkAttrs, LinkDownReason, LinkId, TransportId};
 use crate::proto::envelope::ErrorCode;
 use crate::proto::ids::{DeviceId, Fingerprint};
 
-/// The two clocks the core needs. They are not interchangeable, and a struct
-/// rather than two arguments so they cannot be transposed by accident.
-///
-/// Conflating them is not a hypothetical mistake. When the handshake timestamp
-/// was taken from the monotonic clock, it carried each device's *uptime* — so a
-/// computer up for hours and a phone just unlocked disagreed by hours, every
-/// session was refused as stale, and the only reason no test caught it was that
-/// every test started both cores in the same instant.
+/// The two clocks the core needs; a struct rather than two arguments so they
+/// cannot be transposed.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Now {
-    /// Milliseconds from an arbitrary origin that only ever moves forward.
-    ///
-    /// Deadlines only. It must not jump when the system clock is corrected, or
-    /// a pairing window could be extended by changing the time.
+    /// Deadlines only. Must not jump when the system clock is corrected, or a
+    /// pairing window could be extended by changing the time.
     pub monotonic_ms: u64,
-    /// Milliseconds since the Unix epoch.
-    ///
-    /// Used for exactly one thing: the handshake timestamp two devices compare
-    /// against each other. Nothing local may depend on it.
+    /// Milliseconds since the Unix epoch. Only for the handshake timestamp two
+    /// devices compare against each other; nothing local may depend on it.
     pub wall_ms: u64,
 }
 
@@ -43,11 +24,8 @@ pub struct Now {
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct EffectToken(pub u64);
 
-/// One bulk transfer, for as long as it lasts.
-///
-/// Allocated by the host that starts it, and carried in the envelope so the
-/// other end can name it. Unique within a session, which is all the key
-/// derivation needs.
+/// One bulk transfer. Allocated by the host that starts it; unique within a
+/// session, which is all the key derivation needs.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct TransferId(pub u64);
 
@@ -56,26 +34,14 @@ pub struct TransferId(pub u64);
 pub const MINTED_HERE: u64 = 1 << 63;
 
 impl TransferId {
-    /// The number to show a person, and the one they will type back.
-    ///
-    /// [`MINTED_HERE`] is there so an id minted by the core cannot collide with
-    /// one a host numbered itself, which matters because a transfer is keyed by
-    /// this alone — a collision cancels the wrong one. It is also nineteen
-    /// digits, and `acryliusctl file accept` is a number a person reads off a screen
-    /// and retypes. Which half of the range an id came from is not something
-    /// they need to know, so it is not shown.
+    /// The number to show a person, without the [`MINTED_HERE`] marker they
+    /// would otherwise have to retype.
     #[must_use]
     pub fn short(self) -> u64 {
         self.0 & !MINTED_HERE
     }
 
-    /// Whether `typed` is a way of writing this id.
-    ///
-    /// Both forms: a script that captured the full one keeps working, and a
-    /// person reading the short one is understood. Matched against the
-    /// transfers actually waiting rather than by putting the marker back
-    /// blindly, so a number that names nothing is refused instead of quietly
-    /// becoming something else.
+    /// Whether `typed` is a way of writing this id, full or short form.
     #[must_use]
     pub fn written_as(self, typed: u64) -> bool {
         typed == self.0 || typed == self.short()
@@ -90,8 +56,7 @@ pub struct DialToken(pub u64);
 /// nothing more. Identity comes from the handshake, never from an advertisement.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct DiscoveredPeer {
-    /// Advertised fingerprint. A hint for matching against a known peer: a liar
-    /// can put anything here, and the handshake is what settles it.
+    /// A hint for matching against a known peer; the handshake settles it.
     pub fingerprint: Option<Fingerprint>,
     pub name: String,
     /// Transport-defined and opaque to the core: a `host:port`, a BLE address.
@@ -122,16 +87,8 @@ pub enum Event {
         transport: TransportId,
         peer: DiscoveredPeer,
     },
-    /// Something discovery had found is no longer there.
-    ///
-    /// By address, because that is the one thing a transport can be sure of
-    /// when a service goes away: mDNS withdraws an instance, not a fingerprint,
-    /// and the record it withdraws may carry no TXT at all.
-    ///
-    /// Sightings used to be one-way. Nothing was ever un-discovered, so the
-    /// list of machines on the network only grew: a computer that was switched
-    /// off went on being offered as something to pair with until the app was
-    /// restarted.
+    /// Something discovery had found is no longer there. By address, because
+    /// mDNS withdraws an instance, not a fingerprint.
     Undiscovered {
         transport: TransportId,
         addr: String,
@@ -139,24 +96,13 @@ pub enum Event {
     /// The single host timer fired. See [`Outcome::next_deadline_ms`].
     Tick,
     /// A host has somewhere for the other end to connect for a bulk transfer.
-    ///
-    /// Only the side that can accept connections sends this. A phone cannot,
-    /// which is why the endpoint is negotiated rather than assumed.
+    /// Only the side that can accept connections sends this.
     BulkListening {
         transfer: TransferId,
         endpoint: String,
     },
-    /// The far end has connected, and bytes are on their way.
-    ///
-    /// The one fact about a transfer that only a host can report, and the core
-    /// cannot do without it. Waiting for a sender that never dials has to be
-    /// bounded — an accepted offer otherwise holds a port and a reserved
-    /// filename for the life of the process — while a file arriving must not be,
-    /// because nothing here knows how long a gigabyte should take. From the
-    /// outside those two are the same silence. This is what tells them apart.
-    ///
-    /// A host that never sends it gets the old behaviour for the transfer
-    /// itself and keeps the bound wait, which is the safe way round.
+    /// The far end has connected and bytes are on their way. Ends the bounded
+    /// wait for a sender that never dials; the transfer itself is unbounded.
     BulkStarted { transfer: TransferId },
     /// A bulk transfer ended, one way or the other. `detail` is empty on
     /// success.
@@ -176,28 +122,18 @@ pub enum Event {
 /// Something a human asked for, locally.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum LocalCommand {
-    /// Dial `addr` and try to pair with whatever answers.
-    ///
-    /// Nothing is trusted about the address: it decides where to knock and
-    /// nothing else. Who answered is settled by the six digits both ends derive
-    /// from the handshake, and a person comparing them.
+    /// Dial `addr` and try to pair with whatever answers. The address decides
+    /// where to knock and nothing else; the SAS settles who answered.
     RequestPairing {
         transport: TransportId,
         addr: String,
     },
-    /// Answer the SAS prompt.
-    ///
-    /// `false` means the digits did not match. Since the SAS is what
-    /// authenticates a pairing, that is the one observable sign of a handshake
-    /// being relayed — not a typo, and not worth retrying straight away.
+    /// Answer the SAS prompt. `false` means the digits did not match — the one
+    /// observable sign of a relayed handshake, not a typo.
     ConfirmPairing {
         accept: bool,
     },
     /// Tell the core where a peer can be reached, bypassing discovery.
-    ///
-    /// Discovery is only ever a hint, so a hint supplied by a human who knows
-    /// the address is worth exactly as much. It is also what makes the daemon
-    /// usable on a network where mDNS is filtered.
     SetPeerAddress {
         peer: DeviceId,
         transport: TransportId,
@@ -207,19 +143,8 @@ pub enum LocalCommand {
         peer: DeviceId,
     },
     /// The network changed; try every peer again from the addresses on file.
-    ///
-    /// Distinct from `Connect` in what it is allowed to do: this may dial a
-    /// peer that is *already reachable*, when a better transport has become
-    /// possible. Going the other way — Bluetooth to Wi-Fi — depends on a fresh
-    /// sighting, and a host has no way to make one happen; mDNS resolves a
-    /// service once and then says nothing. So a phone that lost Wi-Fi and got
-    /// it back stayed on Bluetooth, which cannot carry a file, with a perfectly
-    /// good network in the room.
-    ///
-    /// Host-driven rather than a heartbeat, because the moment is knowable —
-    /// iOS reports a path becoming satisfied — and dialling Wi-Fi every few
-    /// seconds on the chance it has come back is a radio a phone in a pocket
-    /// cannot afford.
+    /// Unlike `Connect`, this may dial a peer that is already reachable, when
+    /// a better transport has become possible.
     ReconsiderRoutes,
     Disconnect {
         peer: DeviceId,
@@ -266,10 +191,8 @@ pub enum Effect {
         dests: Vec<String>,
         port: u16,
     },
-    /// Escape hatch for a plugin that needs something this enum does not name,
-    /// so adding a plugin never means editing core's vocabulary. A host that
-    /// does not recognise `ns` answers [`EffectResult::Unsupported`], and the
-    /// core then omits that plugin's capabilities from the handshake.
+    /// Escape hatch so adding a plugin never means editing this enum. A host
+    /// that does not recognise `ns` answers [`EffectResult::Unsupported`].
     Custom {
         ns: String,
         verb: String,
@@ -277,15 +200,8 @@ pub enum Effect {
     },
 }
 
-/// What to do to a player.
-///
-/// Milliseconds and a whole percent, not seconds and a fraction. Nothing here
-/// needs sub-millisecond precision, and integers keep this comparable — which
-/// matters because `Effect` is compared in tests and a float would quietly make
-/// that impossible.
-///
-/// Ranges are checked by the plugin before they get here, so a host may pass
-/// them on without checking again.
+/// What to do to a player. Integers keep `Effect` comparable (`Eq`); ranges
+/// are checked by the plugin, so a host may pass them on unchecked.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum MediaAction {
     Play,
@@ -294,8 +210,7 @@ pub enum MediaAction {
     Next,
     Previous,
     Stop,
-    /// Relative, and may be negative. A skip button means "thirty seconds on
-    /// from wherever it is", which needs no agreement about where that is.
+    /// Relative, and may be negative.
     Seek {
         offset_ms: i64,
     },
@@ -308,12 +223,9 @@ pub enum MediaAction {
     },
 }
 
-/// Coarse classes of effect, declared by a host at construction.
-///
-/// A plugin lists what it requires; a host that cannot provide it has that
-/// plugin disabled and its capabilities left out of the handshake. That is how
-/// iOS and Linux register the identical plugin set and simply negotiate down,
-/// rather than growing a `#[cfg]` forest.
+/// Coarse classes of effect, declared by a host at construction. A host that
+/// cannot provide what a plugin requires has that plugin's capabilities left
+/// out of the handshake; every host registers the identical plugin set.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub enum EffectKind {
     Session,
@@ -321,33 +233,14 @@ pub enum EffectKind {
     Command,
     Wol,
     Media,
-    /// Somewhere to put an incoming file.
-    ///
-    /// Receiving only, and that asymmetry is the point. A host that can pick a
-    /// file can offer it — there is nothing to gate, because it starts the
-    /// transfer and reads the bytes itself. Accepting one means a directory, a
-    /// listening socket and a person to ask, which is three things rather than
-    /// a capability, and any host that has all three may declare this.
-    ///
-    /// A phone does now, which it did not always: files land in the app's
-    /// Documents directory, it binds a port for one transfer, and a person taps
-    /// Accept. What it still cannot do is any of that with the app closed — but
-    /// that is a reason for the app to say so, not for the core to decide on
-    /// its behalf.
+    /// Somewhere to put an incoming file. Gates receiving only; offering needs
+    /// no capability, since the sender reads its own bytes.
     Share,
     Custom,
 }
 
-/// What a host can actually carry out, as a set.
-///
-/// A plugin registers on every device and negotiates down, so "can this machine
-/// do the thing behind this capability" is a question it has to be able to ask
-/// — a phone has no desktop session to lock and nowhere to put a file, and
-/// refusing a request it can never serve is better than accepting one and
-/// leaving the far end waiting for an answer that is not coming.
-///
-/// A bitmask rather than a slice because a `Cx` is built for every message and
-/// carrying this must not mean an allocation for every message.
+/// What a host can actually carry out. A bitmask because a `Cx` is built for
+/// every message and must not allocate.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
 pub struct EffectSet(u16);
 
@@ -357,8 +250,7 @@ impl EffectSet {
         Self(kinds.into_iter().fold(0, |set, k| set | Self::bit(k)))
     }
 
-    /// Everything. For a host that has not said otherwise, and for tests that
-    /// are not about this.
+    /// For a host that has not said otherwise, and tests not about this.
     #[must_use]
     pub fn all() -> Self {
         Self(u16::MAX)
@@ -394,21 +286,17 @@ pub enum EffectResult {
     Ok(Vec<u8>),
     /// The host tried and could not.
     Failed(String),
-    /// The host does not implement this effect at all. Distinct from `Failed`:
-    /// it is a static property of the host, not a transient failure.
+    /// The host does not implement this effect: a static property of the host,
+    /// not a transient failure.
     Unsupported,
 }
 
 /// Anything a UI or CLI should show.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum UiEvent {
-    /// Both ends show this. The user compares, then answers with
-    /// [`LocalCommand::ConfirmPairing`].
-    ///
-    /// This is the security boundary, not a courtesy: it is the only step that
-    /// distinguishes the machine somebody tapped from something relaying between
-    /// two handshakes. A UI that shows these digits without asking a person to
-    /// compare them has removed the authentication.
+    /// Both ends show this; the person compares, then answers with
+    /// [`LocalCommand::ConfirmPairing`]. The comparison is the security
+    /// boundary — a UI that skips it has removed the authentication.
     PairingSas {
         name: String,
         fingerprint: Fingerprint,
@@ -418,36 +306,24 @@ pub enum UiEvent {
         peer: DeviceId,
         name: String,
     },
-    /// A peer has been forgotten, and its record is gone.
-    ///
-    /// A host that asks for a revoke and then reads the peer list back is
-    /// racing the core, because asking is one-way. This is the answer arriving,
-    /// and the only reliable moment to redraw.
+    /// A peer has been forgotten and its record is gone: the only reliable
+    /// moment to redraw the peer list.
     Revoked {
         peer: DeviceId,
     },
     PairingFailed {
         reason: String,
     },
-    /// A device nearby that this one is not paired with.
-    ///
-    /// Untrusted, like everything discovery says: it supplies a name to show
-    /// and an address to try, and nothing may be decided from either. The
-    /// handshake is what settles who is actually there.
-    ///
-    /// Only unpaired devices. A paired one is already in `peers` with somewhere
-    /// to display it, and the core dials it without being asked — so reporting
-    /// it here would be a second list of the same machine that does nothing.
+    /// A nearby device this one is not paired with. Untrusted: a name to show
+    /// and an address to try, nothing more. Paired devices are not reported
+    /// here — they are already in `peers`.
     Discovered {
         fingerprint: Fingerprint,
         name: String,
         /// Transport-defined and opaque: a `host:port`, a BLE address.
         addr: String,
         transport: TransportId,
-        /// Whether it says it is already busy pairing with somebody.
-        ///
-        /// Advisory, and a courtesy to the screen: a machine that says so will
-        /// refuse a handshake, so offering the tap would only fail.
+        /// Whether it says it is already busy pairing with somebody; advisory.
         pairing: bool,
     },
     /// A machine that was on the network is not any more, and should stop being
@@ -471,17 +347,8 @@ pub enum UiEvent {
         body: Vec<u8>,
     },
     Error {
-        /// Which peer this is about, when it is about one.
-        ///
-        /// A host that correlates a request with its answer has to be able to
-        /// tell "the peer you asked about refused" from "something else went
-        /// wrong elsewhere". Without this the control socket reported any
-        /// core-level error anywhere as the refusal of whatever request
-        /// happened to be waiting — and with a `share` request waiting an hour,
-        /// that window is an hour long.
-        ///
-        /// `None` for errors that belong to the machine rather than to a
-        /// conversation with somebody.
+        /// Which peer this is about, when it is about one; `None` for errors
+        /// belonging to the machine rather than a conversation with somebody.
         peer: Option<DeviceId>,
         code: ErrorCode,
         detail: String,
@@ -578,11 +445,8 @@ pub struct Outcome {
     /// Absolute monotonic milliseconds at which the host should deliver
     /// [`Event::Tick`], or `None` for "no timer needed".
     ///
-    /// Deliberately a single deadline rather than `SetTimer`/`CancelTimer`
-    /// actions carrying tokens: timer identifiers that cross a host boundary
-    /// leak and desync, and every host then has to reimplement a timer wheel
-    /// correctly. One deadline, re-armed on every outcome, is quinn's model and
-    /// it moves the bookkeeping to the side that can actually test it.
+    /// A single re-armed deadline rather than `SetTimer`/`CancelTimer` actions
+    /// with tokens, which would leak and desync across a host boundary.
     pub next_deadline_ms: Option<u64>,
 }
 

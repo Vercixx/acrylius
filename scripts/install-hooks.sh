@@ -1,10 +1,7 @@
 #!/usr/bin/env bash
 #
-# Point git at the hooks in this repository.
-#
-# Git will not do this for you: hooks live in .git/hooks, which is not version
-# controlled, so a fresh clone has none. core.hooksPath redirects it at a
-# directory that is. Run this once per clone.
+# Point git at the hooks in this repository. Run once per clone:
+# .git/hooks is not version controlled, so a fresh clone has none.
 set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"

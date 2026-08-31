@@ -6,23 +6,13 @@ import UIKit
 #endif
 
 /// The computers this phone is paired with.
-///
-/// It owns nothing but the list now. Offers moved to Files and this phone's own
-/// details moved to Status, which leaves one screen answering one question.
 struct DeviceListView: View {
     @Environment(AppModel.self) private var model
     @Binding var path: [String]
     @Binding var showPair: Bool
 
-    /// The device a confirmation is currently about.
-    ///
-    /// Held here rather than in the row, which is the whole of a bug that has
-    /// been in the app since M1: swiping a row and tapping Forget opened a
-    /// `confirmationDialog` *attached to that row*, and the swipe had already
-    /// begun removing the row. The dialog went with it about half a second
-    /// later, before anyone could answer, and the device stayed paired while
-    /// the list no longer listed it — which is why it came back on relaunch.
-    /// A dialog has to outlive the thing it is asking about.
+    /// Held here, not in the row: a dialog attached to a swiped row is torn
+    /// down with it before anyone can answer.
     @State private var forgetting: FfiPeer?
 
     var body: some View {
@@ -44,13 +34,8 @@ struct DeviceListView: View {
                             }
                             .swipeActions {
                                 Button("Forget", role: .destructive) {
-                                    // Next runloop, not this one. Presenting a
-                                    // modal in the same frame as the swipe
-                                    // action makes the row snap shut instead
-                                    // of sliding — the swipe's own close
-                                    // animation is cut off by the
-                                    // presentation. Letting the row finish
-                                    // first costs nothing anybody can measure.
+                                    // Next runloop: presenting in the same
+                                    // frame cuts off the swipe's close animation.
                                     Task { @MainActor in forgetting = peer }
                                 }
                             }
@@ -58,15 +43,8 @@ struct DeviceListView: View {
                     }
                 }
 
-                // Bluetooth is asked for here rather than on a debug screen.
-                //
-                // `CBCentralManager` prompts the moment it is built, so the
-                // prompt has always been behind a tap. It used to be behind the
-                // Bluetooth diagnostics screen — which was fine while that
-                // screen was one tap from the root, and is not now that it is
-                // three taps into Status › Debug. A phone that is never granted
-                // Bluetooth simply stops working when Wi-Fi goes away, with
-                // nothing anywhere saying why.
+                // The Bluetooth permission prompt lives here, not three taps
+                // deep in Status › Debug where nobody would ever grant it.
                 if model.ble.awaitingPermission {
                     Section {
                         Button("Turn on Bluetooth", systemImage: "dot.radiowaves.left.and.right") {
@@ -93,14 +71,8 @@ struct DeviceListView: View {
             .toolbar {
                 Button("Pair", systemImage: "plus") { showPair = true }
             }
-            // An alert, and on the List rather than the row.
-            //
-            // A `confirmationDialog` is anchored: an action sheet on a phone, a
-            // popover on an iPad, and it wants something to point at. Asked
-            // from a swipe — where the thing it would point at is sliding
-            // away — it has nothing, and it read as a panel floating in the
-            // middle of the screen for no reason. A destructive confirmation
-            // is what `alert` is for, and an alert is meant to be centred.
+            // An alert on the List, not a `confirmationDialog` on the row: the
+            // dialog wants an anchor and the swiped row is sliding away.
             .alert(
                 forgetting.map { "Forget \($0.name)?" } ?? "",
                 isPresented: Binding(
@@ -132,9 +104,6 @@ private struct PeerRow: View {
                 Text(summary).font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
-            // Three states, not two. A peer part way through a handshake used
-            // to show the same grey dot as one that had given up, which is how
-            // a connection that was working perfectly well read as broken.
             switch peer.state {
             case .reachable:
                 Circle().fill(.green).frame(width: 8, height: 8)

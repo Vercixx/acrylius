@@ -1,22 +1,6 @@
-//! Sending a file, from a host with no async runtime.
+//! Blocking send/receive of a file, for hosts with no async runtime.
 //!
-//! The daemon moves these frames over tokio. A phone cannot: nothing async may
-//! cross the UniFFI boundary, which is the decision that keeps this whole
-//! seam simple, so the sender here is an ordinary blocking socket on whatever
-//! thread Swift calls it from.
-//!
-//! What it does *not* do is have its own idea of the wire format. The framing
-//! and the sealing are [`acrylius_proto::bulk`], the same functions the tokio
-//! transport calls, because two implementations of a wire format is exactly the
-//! failure this project was started to escape.
-//!
-//! Receiving is here too, and the same rules apply to it. It is a blocking
-//! `TcpListener` rather than a tokio one, and it borrows every byte of its
-//! format from the same place.
-//!
-//! What a phone still cannot do is receive in the *background*: the app has to
-//! be open. That is a property of iOS, not of this file, and the honest place
-//! to say so is the screen that offers the feature.
+//! Framing and sealing come from [`acrylius_proto::bulk`], the same functions the tokio transport uses, so the wire format has one implementation.
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -26,14 +10,8 @@ use acrylius_proto::bulk::{CHUNK, MAX_FRAME, hello, open, read_hello, seal};
 
 use crate::types::FfiError;
 
-/// Send a file to an endpoint the far end named.
-///
-/// Blocking, and deliberately so. Call it off the main thread; a transfer takes
-/// as long as it takes.
-///
-/// The path never leaves the device that owns it: it is not in the offer, it is
-/// not in any packet, and the peer at the other end of this socket only ever
-/// learns how many bytes arrived.
+/// Send a file to an endpoint the far end named. Blocking — call off the main thread.
+/// The path itself never crosses the wire; the peer only learns how many bytes arrived.
 #[uniffi::export]
 pub fn bulk_send(
     transfer: u64,
@@ -67,55 +45,36 @@ fn send(transfer: u64, endpoint: &str, key: &[u8], path: &Path) -> std::io::Resu
         seq += 1;
         sent += n as u64;
     }
-    // A clean shutdown is what tells the far end the file is finished. Its own
-    // byte count is what tells it the file is whole.
+    // Clean shutdown signals end-of-file; the byte count confirms completeness.
     stream.shutdown(std::net::Shutdown::Write)?;
     Ok(sent)
 }
 
-/// A name a peer chose, made safe to write.
-///
-/// Exposed rather than reimplemented in Swift. It decides whether a peer gets
-/// to pick the directory as well as the file, and a second copy of that rule is
-/// how one host ends up with a path traversal the other does not — so both ends
-/// call the same function, in `acrylius_proto`.
+/// A name a peer chose, made safe to write. Shared with `acrylius_proto` so
+/// both ends enforce the same path-traversal rule.
 #[must_use]
 #[uniffi::export]
 pub fn bulk_safe_name(offered: String) -> String {
     acrylius_proto::bulk::safe_name(&offered)
 }
 
-/// A socket waiting for one transfer.
-///
-/// Two calls rather than one, because the endpoint has to reach the far end
-/// *before* anything can arrive on it: the core sends it in the accept, and the
-/// sender dials it. Nothing async crosses this boundary, so the shape that
-/// works is an object that hands back its address and then blocks.
+/// A socket waiting for one transfer. Split into bind/accept/receive so
+/// waiting for a sender can be abandoned without cutting off a file already
+/// arriving.
 #[derive(uniffi::Object)]
 pub struct BulkListener {
     endpoint: String,
-    /// Taken by `accept`. `Option` because a UniFFI object is behind an `Arc`
-    /// and cannot be moved out of.
+    /// Taken by `accept`; `Option` because a UniFFI object sits behind an
+    /// `Arc` and can't be moved out of.
     listener: std::sync::Mutex<Option<TcpListener>>,
-    /// What `accept` left behind for `receive`. The two are separate calls so
-    /// that the wait for a sender and the reading of a file are separate things
-    /// a caller can be inside — only then can the first be given up on without
-    /// the second being cut short. See `Event::BulkStarted`.
+    /// Set by `accept`, consumed by `receive`. See `Event::BulkStarted`.
     connected: std::sync::Mutex<Option<TcpStream>>,
 }
 
 #[uniffi::export]
 impl BulkListener {
-    /// Bind a port for one transfer.
-    ///
-    /// `host` is what the far end will be told to dial, and it is the caller's
-    /// to supply for the same reason the daemon has `advertise_host` in its
-    /// config: a socket bound to every interface cannot say which of its
-    /// addresses a peer can actually reach.
-    ///
-    /// Port zero, so the operating system picks. A fixed one would be another
-    /// thing to configure, another thing to collide, and another thing left
-    /// open.
+    /// Bind a port for one transfer. `host` is the address the far end will be
+    /// told to dial. Port zero, so the OS picks.
     #[uniffi::constructor]
     pub fn bind(host: String) -> Result<Self, FfiError> {
         let listener = TcpListener::bind(("0.0.0.0", 0)).map_err(|e| FfiError::Effect {
@@ -134,19 +93,14 @@ impl BulkListener {
         })
     }
 
-    /// Where to tell the far end to connect. Valid the moment this exists, and
-    /// before anyone is listening on it — which is the point.
+    /// Where to tell the far end to connect. Valid before anything is listening.
     #[must_use]
     pub fn endpoint(&self) -> String {
         self.endpoint.clone()
     }
 
-    /// Wait for the far end to connect, and check it is the transfer expected.
-    ///
-    /// Blocking, and for as long as the sender takes to arrive — which may be
-    /// never. Call it off the main thread, and tell the core when it returns:
-    /// that is what separates a sender still coming from a file still arriving,
-    /// and the core gives up on only the first of those.
+    /// Blocks until the far end connects and confirms it's the expected
+    /// transfer. Call off the main thread.
     pub fn accept(&self, transfer: u64) -> Result<(), FfiError> {
         let listener = self
             .listener
@@ -167,14 +121,9 @@ impl BulkListener {
         Ok(())
     }
 
-    /// Write what arrives on the accepted connection to `path`.
-    ///
-    /// Blocking, like its sending counterpart, and for as long as the transfer
-    /// takes. Call it off the main thread.
-    ///
-    /// Written to a temporary beside the destination and renamed at the end, so
-    /// an interrupted transfer never leaves something that looks like a whole
-    /// file. A short one is a failure and the temporary goes.
+    /// Write what arrives on the accepted connection to `path`. Blocking —
+    /// call off the main thread. Written to a temp file beside `path` and
+    /// renamed at the end, so an interrupted transfer never looks complete.
     pub fn receive(&self, key: Vec<u8>, expect_bytes: u64, path: String) -> Result<u64, FfiError> {
         let stream = self
             .connected
@@ -276,11 +225,6 @@ mod tests {
     use super::*;
 
     /// A phone's sender and a computer's receiver, on one real socket.
-    ///
-    /// This is the test the whole arrangement exists for. The two ends have
-    /// nothing in common but `acrylius_proto::bulk` — one runs on tokio and one
-    /// on a blocking socket — so if the format were written twice, this is
-    /// where the copies would disagree.
     #[tokio::test]
     async fn a_phone_sends_and_a_daemon_receives() {
         use acrylius_proto::bulk::{CHUNK, key};
@@ -289,8 +233,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
-        // More than one chunk, and not a whole number of them, so the sequence
-        // numbering and the short final chunk are both exercised.
+        // Not a whole number of chunks: exercises sequencing and a short final chunk.
         let source = dir.join("holiday.jpg");
         let bytes: Vec<u8> = (0..CHUNK * 2 + 1234).map(|i| (i % 251) as u8).collect();
         std::fs::write(&source, &bytes).unwrap();
@@ -346,9 +289,7 @@ mod tests {
             tokio::task::spawn_blocking(move || bulk_send(7, endpoint, wrong, path))
         };
         let outcome = match listening.accept(7).await {
-            // The greeting names a transfer and nothing secret, so a sender
-            // without the key still gets this far. What it cannot do is open a
-            // single frame afterwards.
+            // The greeting isn't secret, so a wrong key still connects; it just can't open a frame.
             Ok(connected) => {
                 connected
                     .receive(
@@ -367,12 +308,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// The other direction, on one real socket: a daemon's tokio sender and a
-    /// phone's blocking receiver.
-    ///
-    /// The counterpart of `a_phone_sends_and_a_daemon_receives`, and it earns
-    /// its place for the same reason — these two ends share nothing but
-    /// `acrylius_proto::bulk`, so a format written twice would disagree here.
+    /// The other direction: a daemon's tokio sender and a phone's blocking receiver.
     #[tokio::test]
     async fn a_daemon_sends_and_a_phone_receives() {
         use acrylius_proto::bulk::{CHUNK, key};

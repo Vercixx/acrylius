@@ -1,10 +1,7 @@
 //! What this machine can actually do.
 //!
-//! [`LinuxEffector::supported`] is where a device's feature set is decided. A
-//! plugin whose required effects are missing is dropped by the core and its
-//! capabilities never advertised, so a headless server and a desktop run the
-//! same plugin list and simply negotiate down. There is no `#[cfg]` here and no
-//! feature flag: the machine reports what it has.
+//! [`LinuxEffector::supported`] decides the feature set at runtime, not via
+//! `#[cfg]`: a plugin with missing effects is dropped and never advertised.
 
 use acrylius_core::plugins::command::Exited;
 use acrylius_core::vocab::{Effect, EffectKind, EffectResult};
@@ -36,9 +33,7 @@ impl LinuxEffector {
         wol: WolSettings,
         session_commands: session::Commands,
     ) -> Self {
-        // A machine with no system bus, or no graphical session on it, simply
-        // does not offer to lock one. That is a normal configuration, not an
-        // error, so it is logged at debug and reported by omission.
+        // No system bus or no graphical session is a normal config, not an error.
         let session = match session::SessionEffector::new(session_commands).await {
             Ok(s) => Some(s),
             Err(e) => {
@@ -46,9 +41,8 @@ impl LinuxEffector {
                 None
             }
         };
-        // The session bus, not the system one. Players are per-login, and a
-        // machine with no session bus has nothing to control — which is a
-        // normal way for a headless install to be, not a failure.
+        // Session bus, not system: players are per-login, and a headless
+        // machine having none to control is normal, not a failure.
         let media = match media::MediaEffector::new().await {
             Ok(m) => Some(m),
             Err(e) => {
@@ -98,15 +92,12 @@ impl Effector for LinuxEffector {
         if self.has_wayland {
             kinds.push(EffectKind::Clipboard);
         }
-        // An empty catalog is not "commands, but none": it means this machine
-        // does not offer the capability at all, so a peer never sees a button
-        // that cannot work.
+        // Empty catalog means the capability is absent, not present-but-empty.
         if !self.catalog.is_empty() {
             kinds.push(EffectKind::Command);
         }
-        // Offered whenever there is a session bus, not only when something is
-        // playing. Players come and go, and a capability that appeared and
-        // disappeared with them would have a phone renegotiating all day.
+        // Offered whenever there's a session bus, not only while something
+        // plays, or the phone would renegotiate constantly.
         if self.media.is_some() {
             kinds.push(EffectKind::Media);
         }
@@ -141,8 +132,7 @@ impl Effector for LinuxEffector {
                 }
                 match clipboard::read().await {
                     Ok(Some(data)) => EffectResult::Ok(data),
-                    // An empty clipboard is not a failure; there is simply
-                    // nothing to hand over.
+                    // Empty clipboard isn't a failure; nothing to hand over.
                     Ok(None) => EffectResult::Ok(Vec::new()),
                     Err(e) => EffectResult::Failed(e.to_string()),
                 }
@@ -163,10 +153,8 @@ impl Effector for LinuxEffector {
             }),
 
             Effect::RunCommand { id } => {
-                // Checked again here even though the plugin already refused an
-                // unlisted id. This is the layer that actually starts a
-                // process, and it should not depend on a caller having been
-                // careful.
+                // Re-checked here: this layer starts the process and
+                // shouldn't trust the caller.
                 let Some(spec) = self.catalog.get(&id) else {
                     return EffectResult::Failed(format!("{id:?} is not a configured command"));
                 };
@@ -197,14 +185,8 @@ impl Effector for LinuxEffector {
             },
 
             Effect::MediaControl { player, action } => match &self.media {
-                // Answered with the state afterwards, not with a bare
-                // acknowledgement: a player may ignore a command, clamp a seek,
-                // or stop of its own accord, and only reading it back says
-                // which. `control_and_settle` waits for a reading that actually
-                // reflects the command rather than pausing for a fixed moment
-                // and hoping — a player slower than the pause used to be
-                // answered with the state we started from, which is a phone
-                // showing the previous track.
+                // Reply carries the settled state, not a bare ack: a player
+                // may ignore, clamp, or stop the command, and only re-reading says which.
                 Some(m) => match m.control_and_settle(&player, action).await {
                     Ok(state) => Self::encode(&state),
                     Err(e) => EffectResult::Failed(e.to_string()),
@@ -212,9 +194,7 @@ impl Effector for LinuxEffector {
                 None => EffectResult::Unsupported,
             },
 
-            // A namespace this host has never heard of. Answering `Unsupported`
-            // rather than failing is what lets the core drop the plugin and
-            // leave its capability unadvertised.
+            // Unknown namespace: `Unsupported` lets the core drop the plugin quietly.
             Effect::Custom { ns, verb, .. } => {
                 tracing::debug!(ns, verb, "unknown custom effect");
                 EffectResult::Unsupported
@@ -251,8 +231,7 @@ mod tests {
 
     #[tokio::test]
     async fn waking_is_always_offered() {
-        // Sending a UDP packet needs nothing from the desktop, so even a
-        // headless machine can relay a wake.
+        // A UDP send needs nothing from the desktop, so headless machines relay too.
         let e = LinuxEffector::new(
             CommandCatalog::default(),
             WolSettings::default(),

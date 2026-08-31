@@ -1,10 +1,8 @@
 //
 //  The Swift host runtime, tested on Linux.
 //
-//  Two CoreRuntimes joined by an in-memory transport pair, connect and ping:
-//  exercising the exact code the iOS app runs, minus SwiftUI and
-//  Network.framework. Without this it would all be unverifiable until an IPA
-//  reached a phone.
+//  Two CoreRuntimes joined by an in-memory transport pair: the same code the
+//  iOS app runs, minus SwiftUI and Network.framework.
 //
 
 import Foundation
@@ -21,7 +19,7 @@ final class Loopback: Transport, @unchecked Sendable {
     private var links: [UInt64: UInt64] = [:]
 
     private static let counter = NSLock()
-    // Guarded by `counter` on every access, which the compiler cannot see.
+    // Guarded by `counter`; the compiler can't see that.
     nonisolated(unsafe) private static var next: UInt64 = 0
     nonisolated static func freshPair() -> (UInt64, UInt64) {
         counter.lock(); defer { counter.unlock() }
@@ -31,9 +29,8 @@ final class Loopback: Transport, @unchecked Sendable {
 
     init(name: String) { self.name = name }
 
-    // Locking is confined to these synchronous helpers. Taking a lock directly
-    // in an async function is an error under the Swift 6 language mode, because
-    // a suspension while holding one can deadlock.
+    // Locking confined to sync helpers; holding a lock across a suspension
+    // point is an error under the Swift 6 language mode.
     private func setEmit(_ f: @escaping @Sendable (FfiEvent) -> Void) {
         lock.lock(); emit = f; lock.unlock()
     }
@@ -109,15 +106,13 @@ final class Recorder: UiSink, @unchecked Sendable {
 
 var failures = 0
 
-// Top-level code is main-actor isolated, so the helpers that touch `failures`
-// must be too; a global function would be nonisolated and could not.
+// Top-level code is main-actor isolated, so helpers touching `failures` must be too.
 @MainActor
 func check(_ ok: Bool, _ what: String) {
     if ok { print("  ok   \(what)") } else { print("  FAIL \(what)"); failures += 1 }
 }
 
-/// Poll until `cond` holds. The runtimes are asynchronous, so a test must wait
-/// for quiescence rather than assume it.
+/// Poll until `cond` holds; the runtimes are asynchronous.
 func until(_ what: String, timeoutMs: Int = 3000, _ cond: @escaping () -> Bool) async -> Bool {
     var waited = 0
     while waited < timeoutMs {
@@ -156,9 +151,6 @@ let bId = await bravo.deviceId()
 check(aId != bId, "two runtimes have distinct identities")
 
 // --- the capabilities a phone offers -------------------------------------
-// The FFI was left registering ping alone from the skeleton, so a phone
-// advertised nothing and a computer would not send it a clipboard. The failure
-// read as a missing clipboard implementation and was a missing registration.
 let offered = Set(await alpha.capsIn())
 for cap in [
     "org.acrylius.ping/1",
@@ -171,9 +163,8 @@ for cap in [
 }
 
 // --- pairing -------------------------------------------------------------
-// Nobody opens anything and nobody types anything: alpha asks, and six digits
-// appear on both ends. That comparison is the whole authentication, so "the
-// codes match" is the assertion that matters most in this file.
+// Alpha asks, six digits appear on both ends; the codes matching is the
+// whole authentication, and the assertion that matters most here.
 await alpha.submit(.requestPairing(transport: 1, addr: "bravo"))
 let sawSas = await until("a code on both screens") { aRec.sas() != nil && bRec.sas() != nil }
 check(sawSas, "both ends showed a code")
@@ -224,16 +215,14 @@ let bPeersAfter = await bravo.peers()
 check(!bPeersAfter.contains { $0.deviceId == mId }, "bravo did not learn the stranger")
 
 // --- the peer catalogue ------------------------------------------------
-// What a screen shows is driven by what a peer announced, not by the
-// handshake. A capability that may be exchanged is not the same as a
-// feature the peer actually has.
+// Driven by what a peer announced, not the handshake — an exchangeable
+// capability isn't the same as a feature the peer actually has.
 var catalog = PeerCatalog()
 check(!catalog["someone"].canLock, "an unknown peer offers nothing")
 check(!catalog["someone"].canRunCommands, "and no commands")
 
 let state = FfiSessionState(locked: true, sessionId: "2", kind: "wayland", active: true)
-// Bodies are built through the FFI. Swift does not know the wire format and
-// must not learn it.
+// Bodies built through the FFI; Swift must not learn the wire format.
 _ = catalog.ingest(.plugin(peer: "p", cap: capSession(), ty: "state",
                            body: encodeSessionState(state: state)))
 check(catalog["p"].canLock, "a peer that described a session can be locked")
@@ -249,9 +238,8 @@ _ = catalog.ingest(.plugin(peer: "p", cap: capClipboard(), ty: "set",
                            body: encodeClipboard(text: "hello from the pc")))
 check(catalog["p"].clipboard == "hello from the pc", "a clipboard value is kept")
 
-// The button that fetches a clipboard reports whether an answer came back, and
-// it cannot do that by watching the value: asking twice for the same text is a
-// success both times. So the arrival is what moves, even when nothing else does.
+// A timestamp, not the value, marks arrival: asking twice for the same text
+// is a success both times, so the value alone can't signal a fresh answer.
 let firstArrival = catalog["p"].clipboardAt
 check(firstArrival != nil, "an arriving clipboard value is timestamped")
 _ = catalog.ingest(.plugin(peer: "p", cap: capClipboard(), ty: "set",
@@ -263,9 +251,8 @@ check(
 check(!catalog["p"].canWake, "a peer that never offered wake targets cannot be woken")
 
 // --- where the track has got to -----------------------------------------
-// A computer announces a track change but not a position; broadcasting one
-// every second so a clock can tick would be absurd. So the phone advances it
-// against the moment the reading was taken, and only while it is playing.
+// Position isn't broadcast every second; the phone extrapolates it from the
+// last reading's timestamp, only while playing.
 func withMedia(_ status: String, positionMs: UInt64, lengthMs: UInt64) -> PeerCatalog {
     var c = PeerCatalog()
     let state = FfiMediaState(
@@ -297,20 +284,15 @@ let endedAt = ended["p"].mediaAt ?? Date()
 check(ended["p"].positionMs(at: endedAt.addingTimeInterval(9)) == 200_000,
       "and never past the end of it")
 
-// `position` is reported, never counted — the core says so, and gives the
-// reason: a receiver that keeps counting goes on counting after the media
-// stopped somewhere it cannot see. Readings arrive every couple of seconds
-// while anyone is looking, so one this old means they have stopped coming.
-// Freezing where it was last actually seen is the honest answer; extrapolating
-// ten minutes on is inventing a position nobody reported.
+// A reading this old (readings normally arrive every couple of seconds) means
+// they've stopped coming; freezing at the last known position beats extrapolating.
 let abandoned = withMedia("playing", positionMs: 190_000, lengthMs: 200_000)
 let abandonedAt = abandoned["p"].mediaAt ?? Date()
 check(abandoned["p"].positionMs(at: abandonedAt.addingTimeInterval(600)) == 190_000,
       "a reading nobody refreshed stops being counted forward")
 
-// The same thing said outright: the peer is gone, so the clock under the track
-// stops. This is the case that ran forever — a stream reports no length, so the
-// clamp above would never have caught it either.
+// Same idea via peer disconnect. Zero length (e.g. a stream) means the
+// end-of-track clamp above can't catch this case either.
 var wentAway = withMedia("playing", positionMs: 10_000, lengthMs: 0)
 let wentAwayAt = wentAway["p"].mediaAt ?? Date()
 check(wentAway["p"].positionMs(at: wentAwayAt.addingTimeInterval(5)) == 15_000,
@@ -323,9 +305,7 @@ check(wentAway["p"].positionMs(at: wentAwayAt.addingTimeInterval(600)) == 10_000
 check(playing["p"].media?.systemVolume == 40, "the machine's own volume comes through")
 
 // --- the widget's snapshot ---------------------------------------------
-// The widget renders this and nothing else. It runs in a process that can
-// open no session, so anything wrong here is a widget that is confidently
-// wrong with no way to notice.
+// The widget renders only this; its process can't open a session to double-check it.
 SnapshotStore.save(peers: [
     PeerSnapshot(deviceId: "p", name: "desktop", platform: "linux",
                  lastSeen: Date(timeIntervalSince1970: 1000), locked: false,
@@ -336,9 +316,7 @@ check(first?.peers.count == 1, "a snapshot round-trips")
 check(first?.peers.first?.nowPlaying == "Someone — A Song", "and what was playing")
 check(first?.shared == SharedContainer.isShared, "and says whether it is shared at all")
 
-// A peer that is not reachable right now keeps the time it last was. The
-// running app is the only thing that ever knows, so losing it on the next
-// write would mean a widget that can only ever say "open the app".
+// An unreachable peer keeps the time it was last seen rather than losing it on the next write.
 SnapshotStore.save(peers: [
     PeerSnapshot(deviceId: "p", name: "desktop", platform: "linux",
                  lastSeen: nil, locked: true, canWake: true),
@@ -348,7 +326,7 @@ check(second?.peers.first?.lastSeen == Date(timeIntervalSince1970: 1000),
       "an unreachable peer keeps when it was last seen")
 check(second?.peers.first?.locked == true, "while everything else is replaced")
 
-// A peer that came back sets a new time rather than keeping the old one.
+// A peer seen again moves the time forward.
 SnapshotStore.save(peers: [
     PeerSnapshot(deviceId: "p", name: "desktop", platform: "linux",
                  lastSeen: Date(timeIntervalSince1970: 2000), canWake: true),
@@ -358,10 +336,8 @@ check(SnapshotStore.load()?.peers.first?.lastSeen == Date(timeIntervalSince1970:
 
 // --------------------------------------------------------------- diagnostics
 
-// The trouble channel: a Bluetooth failure a person can act on has to survive
-// to somewhere they will read it, and clear itself once acted on. The mapping
-// from a CBError lives in BLETransport, which no compiler here can see; this
-// is the half that can be checked.
+// Trouble channel: an actionable Bluetooth failure persists until read, then clears.
+// The CBError mapping lives in BLETransport, which this compiler cannot see.
 let diag = await BLEDiagnostics()
 await diag.apply(.trouble("forget the device in Settings"))
 check(await diag.trouble == "forget the device in Settings",
@@ -375,11 +351,8 @@ check(await diag.notes.count == 1,
       "clearing leaves the record of what happened rather than a second entry")
 
 // --- when was that reading actually taken ----------------------------------
-// The desktop looks at the player when the query reaches it, so a reading is
-// already one leg of the round trip old when it lands. Stamping arrival put the
-// clock exactly that far behind for as long as a track played — invisible on
-// Wi-Fi, and "a second behind" over Bluetooth, where a round trip is several
-// fragments each way.
+// A reading is already one leg of the round trip old by the time it lands;
+// stamping arrival time alone runs the clock that far behind (worse over BLE).
 let sent = Date(timeIntervalSince1970: 1_000)
 let arrived = sent.addingTimeInterval(0.8)
 check(PeerCatalog.measuredAt(sent: sent, arrived: arrived) == sent.addingTimeInterval(0.4),
@@ -398,10 +371,8 @@ timed.noteMediaQuery(for: "pc", at: sent)
 check(timed["pc"].mediaQuerySentAt == sent, "the query's departure is noted")
 
 // --- which build is this ---------------------------------------------------
-// The whole point of the stamp is to be trustworthy: a build that misreports
-// its commit is worse than one that says nothing, because it ends the search
-// in the wrong place. Xcode leaves an unset build setting as an *empty string*
-// rather than an absent key, so that is the case worth pinning.
+// Xcode leaves an unset build setting as an empty string, not an absent key,
+// so that's the case worth pinning — a misreported commit is worse than none.
 let stamped = BuildInfo.from([
     "ACRBuildCommit": "86f96f3a1b2c3d4e5f60718293a4b5c6d7e8f900",
     "ACRBuildDate": "2026-08-29T18:20:49Z",

@@ -31,9 +31,8 @@ use clap::Parser;
 use tokio::sync::{Mutex, broadcast};
 
 const TCP: TransportId = TransportId(1);
-/// Higher than TCP, and that is load-bearing rather than arbitrary: the core
-/// tries routes in ascending transport order, so Wi-Fi is preferred and BLE is
-/// what a peer falls back to.
+/// Higher than TCP on purpose: the core tries routes in ascending order, so
+/// Wi-Fi is preferred and BLE is the fallback.
 const BLE: TransportId = TransportId(2);
 
 #[derive(Parser, Debug)]
@@ -55,9 +54,7 @@ struct Args {
     command: Option<Command>,
 }
 
-/// Things the installer needs, kept in the binary because that is where the
-/// schema is. A shell script that knew which settings exist would be a second
-/// copy of the config format to keep in step.
+/// Config subcommands, kept in the binary since that's where the schema lives.
 #[derive(clap::Subcommand, Debug)]
 enum Command {
     /// Config file maintenance.
@@ -73,11 +70,8 @@ enum ConfigAction {
     Path,
     /// Print every directory the daemon must be able to write to, one per line.
     ///
-    /// For the systemd unit. It runs under `ProtectHome=read-only`, so anything
-    /// outside `ReadWritePaths=` fails with "read-only file system" at the
-    /// moment it is used rather than at startup — and the download directory is
-    /// a config setting, so no unit shipped in this repository can name it. The
-    /// installer asks instead.
+    /// For the systemd unit's `ReadWritePaths=`: the download directory is a
+    /// runtime setting, so no shipped unit can name it in advance.
     WritablePaths,
     /// Write a commented config, if there is none. Never overwrites.
     Init,
@@ -87,8 +81,7 @@ enum ConfigAction {
     Check,
 }
 
-/// Expand a leading `~`, which is the only thing a person writing a path in a
-/// config file expects to work and the one thing no library call does.
+/// Expand a leading `~` in a path; no library call does this.
 fn expand_home(path: &str) -> PathBuf {
     let Some(rest) = path.strip_prefix('~') else {
         return PathBuf::from(path);
@@ -110,9 +103,8 @@ fn state_dir(arg: Option<PathBuf>) -> PathBuf {
 
 /// Load the static identity, or make one on first run.
 ///
-/// The public half is always derived from the private half rather than stored
-/// beside it, so a file that had been edited cannot produce an identity whose
-/// fingerprint lies about the key it can prove possession of.
+/// The public half is derived from the private half, never stored, so an
+/// edited file can't produce a mismatched fingerprint.
 fn load_identity(state: &std::path::Path) -> anyhow::Result<Identity> {
     let path = state.join("identity.key");
     if let Ok(bytes) = std::fs::read(&path) {
@@ -133,18 +125,12 @@ fn load_identity(state: &std::path::Path) -> anyhow::Result<Identity> {
     Ok(id)
 }
 
-/// What this machine tells a phone about waking it.
+/// What this machine tells a phone about waking it; every field falls back to
+/// a machine-derived value, since a blank one just hides the wake button.
 ///
-/// Every field falls back to something the machine can work out about itself,
-/// because the alternative is what shipped: a config with `macs = []` and
-/// `last_ipv4 = ""`, a phone that shows no wake button, and no indication
-/// anywhere that a value was missing rather than the feature being broken.
-///
-/// `last_ipv4` matters as much as the MAC. A network card matches a magic
-/// packet by its payload and ignores the address it was sent to, so a unicast
-/// datagram at the machine's last known address wakes it — and that is the only
-/// kind iOS can send, since broadcast needs an entitlement a free Apple account
-/// cannot have. Announcing an empty one leaves the phone with nowhere to aim.
+/// `last_ipv4` matters as much as the MAC: a NIC wakes on packet payload, not
+/// destination, and it's the only address iOS can unicast to (broadcast needs
+/// an entitlement free accounts lack).
 fn wake_config(cfg: &config::WolConfig) -> wol::WolConfig {
     let here = netself::routed_ipv4();
     let macs = if cfg.macs.is_empty() {
@@ -180,11 +166,10 @@ fn wake_config(cfg: &config::WolConfig) -> wol::WolConfig {
     }
 }
 
-/// A stand-in device id for a plugin verb that broadcasts.
+/// A stand-in device id for a plugin verb that broadcasts to every peer.
 ///
-/// A local change has no peer attached to it: the plugin decides who hears
-/// about it from the peers it has seen connect. The vocabulary requires an
-/// identifier here, so this is an obviously-not-real one.
+/// The vocabulary requires an identifier here even though a local change has
+/// no single peer attached; this is an obviously-not-real one.
 fn broadcast_placeholder() -> acrylius_core::proto::ids::DeviceId {
     acrylius_core::proto::ids::DeviceId::of(&[0u8; 32])
 }
@@ -206,23 +191,16 @@ fn snapshot_devices(core: &acrylius_core::core::Core) -> Vec<control::Device> {
 
 /// What to call this machine when nobody has said.
 ///
-/// The pretty hostname first. It is the one a person chose — `hostnamectl
-/// set-hostname --pretty "Кухня"` — and the only one that may contain spaces,
-/// punctuation or non-Latin characters. The static hostname is a DNS label and
-/// is conventionally restricted to letters, digits and hyphens, so reading only
-/// that made a phone show `vercixx-pc` however the machine had been named.
-///
-/// Read out of `/etc/machine-info` rather than asked of `hostnamed` over D-Bus:
-/// it is a plain `KEY=value` file, it is where `hostnamectl` writes, and the
-/// daemon starts before there is any reason to assume a system bus.
+/// Prefers the pretty hostname (may have spaces or non-Latin characters) over
+/// the DNS-label-only static one. Read from `/etc/machine-info` directly
+/// rather than over D-Bus, since the daemon starts before assuming a system bus exists.
 fn machine_name() -> String {
     if let Ok(info) = std::fs::read_to_string("/etc/machine-info") {
         for line in info.lines() {
             let Some(value) = line.trim().strip_prefix("PRETTY_HOSTNAME=") else {
                 continue;
             };
-            // Quoted or not, both of which `hostnamectl` writes depending on
-            // what is in the value.
+            // hostnamectl quotes the value or not, depending on content.
             let value = value.trim().trim_matches(['"', '\'']).trim();
             if !value.is_empty() {
                 return value.to_string();
@@ -236,12 +214,8 @@ fn machine_name() -> String {
         .unwrap_or_else(|| "acrylius".to_string())
 }
 
-/// What is on this network that this machine is not paired with.
-///
-/// `acryliusctl pair with` has always taken an address, and until now nothing
-/// would tell you one — the core knew every acrylius machine on the network and
-/// had no way to say so. This is that gap closed on the desktop side; the phone
-/// gets the same facts as `UiEvent::Discovered`.
+/// What is on this network that this machine is not paired with; the phone
+/// gets the same facts via `UiEvent::Discovered`.
 fn snapshot_nearby(core: &acrylius_core::core::Core) -> Vec<control::Nearby> {
     core.nearby()
         .map(|n| control::Nearby {
@@ -263,9 +237,7 @@ fn run_config_action(action: &ConfigAction, path: &std::path::Path) -> anyhow::R
         ConfigAction::Path => println!("{}", path.display()),
 
         ConfigAction::WritablePaths => {
-            // From the config as it stands, not from the defaults: somebody who
-            // pointed downloads somewhere else needs that path allowed, not the
-            // one they did not choose.
+            // From the config as-is, not defaults: the path actually in use needs to be allowed.
             let cfg = config::Config::load(path).unwrap_or_default();
             let dir = expand_home(&cfg.share.directory);
             if !dir.as_os_str().is_empty() {
@@ -304,8 +276,7 @@ fn run_config_action(action: &ConfigAction, path: &std::path::Path) -> anyhow::R
                     println!("  {where_}  {}", keys.join(", "));
                 }
             }
-            // Reported, never removed: a typo and a setting from a version
-            // newer than this binary look identical from here.
+            // Reported, never removed: a typo and a newer-version setting look identical here.
             let text = std::fs::read_to_string(path)?;
             let unknown = reconcile::unknown_keys(&text, &reference);
             if !unknown.is_empty() {
@@ -349,19 +320,8 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                // `acrylius_linux` is in the default set because a transport lives
-                // there now. Without it the BLE transport registered, advertised,
-                // took links up and down, and said none of it — which is how a
-                // whole transport ran unnoticed for an afternoon.
-                //
-                // `acrylius_core` for the same reason one level up, and it cost
-                // the same afternoon twice. The core decides which route every
-                // message takes and it was the one crate not admitted here, so a
-                // journal could show a Bluetooth link coming up and a desktop
-                // answering into a dead Wi-Fi socket and look identical to one
-                // where everything worked. Two wrong diagnoses were read off
-                // that silence, both of them from a log line that was never
-                // going to be printed.
+                // acrylius_linux and acrylius_core are in the default filter too:
+                // both can run silently otherwise, hiding real transport/routing issues.
                 .unwrap_or_else(|_| {
                     "acryliusd=info,acrylius_rt=info,acrylius_linux=info,acrylius_core=info".into()
                 }),
@@ -416,18 +376,15 @@ async fn main() -> anyhow::Result<()> {
         )
         .await,
     );
-    // Files are the daemon's business, not the effector's: it is the only
-    // place that knows both where a download goes and what a transfer is.
+    // Files are the daemon's business: it's the only place that knows both
+    // the download dir and the transfer.
     let bulk = match files::FileBulk::new(
         expand_home(&cfg.share.directory),
         (!cfg.share.advertise_host.is_empty()).then(|| cfg.share.advertise_host.clone()),
     ) {
         Ok(b) => {
-            // Checked now rather than during a transfer. Under the systemd
-            // unit's `ProtectHome=read-only` a directory outside
-            // `ReadWritePaths=` looks entirely normal until something writes to
-            // it, and the failure then arrives as "read-only file system" in
-            // the middle of receiving a file, pointing at nothing.
+            // Checked now, not during a transfer: under ProtectHome=read-only,
+            // a bad dir looks fine until something actually writes to it.
             match b.writable() {
                 Ok(()) => tracing::info!(dir = %b.dir().display(), "files sent here land in"),
                 Err(e) => tracing::warn!(
@@ -461,9 +418,8 @@ async fn main() -> anyhow::Result<()> {
         },
     )
     .effects(kinds.clone())
-    // The same plugin list every device registers. A plugin whose effects this
-    // machine cannot serve is dropped by the core and its capability never
-    // advertised, so there is nothing to switch on here.
+    // Same plugin list on every device; the core drops one whose effects this
+    // machine can't serve.
     .plugin(ping::PingPlugin::default())
     .plugin(session::SessionPlugin::default())
     .plugin(wol::WolPlugin::new(
@@ -497,9 +453,8 @@ async fn main() -> anyhow::Result<()> {
 
     let mut rt = Runtime::new(core, effector, Box::new(store));
 
-    // Keep the control socket's answers live. The closure sees `&Core` and
-    // nothing more, so there is deliberately no way to reach `handle()` from
-    // here, which is what keeps the single-serial-executor rule intact.
+    // Closure only sees &Core, no way to reach handle() — keeps the
+    // single-serial-executor rule intact.
     {
         let devices = devices.clone();
         let nearby = nearby.clone();
@@ -529,11 +484,8 @@ async fn main() -> anyhow::Result<()> {
     rt.add_transport(
         Arc::new(TcpTransport::new(TCP, port, fingerprint, name.clone())) as Arc<dyn Transport>,
     );
-    // Registered unconditionally. A machine with no adapter, or one whose
-    // controller cannot be a peripheral, answers that in `run` and quietly does
-    // nothing — the same "the machine reports what it has" rule the effectors
-    // follow, rather than a `#[cfg]` or a config flag that lies on the wrong
-    // hardware.
+    // Registered unconditionally; a machine with no adapter or peripheral
+    // support just no-ops in run().
     if cfg.ble.enabled {
         rt.add_transport(
             Arc::new(acrylius_linux::ble::BleTransport::new(BLE, name.clone()))
@@ -541,8 +493,8 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
-    // The control socket sees UI events over a broadcast, so several `acryliusctl`
-    // invocations can watch at once without stealing each other's events.
+    // UI events go out over a broadcast channel so multiple acryliusctl
+    // invocations can watch at once.
     let (ui_tx, _) = broadcast::channel(256);
     let (ui_mpsc_tx, mut ui_mpsc_rx) = tokio::sync::mpsc::unbounded_channel();
     if let Some(bulk) = bulk.clone() {
@@ -553,20 +505,11 @@ async fn main() -> anyhow::Result<()> {
     let offers_bulk = bulk.clone();
     let auto_accept = cfg.share.auto_accept;
     let auto_events = rt.events();
-    // A question for the person at this desktop belongs on their screen. Absent
-    // on a machine with no notification daemon, and everything still works
-    // through `acryliusctl` — which is why nothing below requires one.
+    // Not conditional on file sharing: pairing is unrelated, and gating this on
+    // `bulk` used to silently break pairing prompts when share was disabled.
     //
-    // Not conditional on file sharing: pairing has nothing to do with sharing,
-    // and building this only when `bulk` was present meant
-    // `[share] enabled = false` silently cost every desktop question.
-    //
-    // Connected off the startup path, though, and that is not tidiness. The
-    // notification service is often D-Bus activated, so `GetCapabilities` can
-    // take seconds the first time — 4.6 of them on the machine this was written
-    // on. Awaiting it here held up the control socket for that long, which made
-    // every acceptance script that waits for a daemon flaky, and it would have
-    // been worse once `[share] enabled = false` machines started paying it too.
+    // Started off the startup path: GetCapabilities can be D-Bus activated and
+    // take seconds, which would otherwise stall the control socket at boot.
     let prompter: Arc<tokio::sync::OnceCell<Option<Arc<prompt::Prompter>>>> =
         Arc::new(tokio::sync::OnceCell::new());
     {
@@ -580,16 +523,10 @@ async fn main() -> anyhow::Result<()> {
     let names = devices.clone();
     tokio::spawn(async move {
         while let Some(e) = ui_mpsc_rx.recv().await {
-            // `None` until the connection lands. A question in the first few
-            // seconds after start goes unprompted rather than delaying every
-            // one after it; `acryliusctl` answers it either way.
+            // None until the connection lands; a question in that window goes
+            // unprompted, acryliusctl still answers it either way.
             let prompter = prompter.get().and_then(Option::as_ref);
-            // Pairing, on the screen of the person who has to answer it. Six
-            // digits and two buttons is the whole ceremony, and it is the only
-            // thing authenticating the pairing — see `prompt.rs`.
-            // The daemon has no screen, so an error aimed at one was going
-            // nowhere at all. This is the only place every core error passes
-            // through.
+            // The daemon has no screen; this is the only place a core error gets logged.
             if let acrylius_core::vocab::UiEvent::Error { peer, code, detail } = &e {
                 tracing::warn!(
                     peer = peer.as_ref().map(ToString::to_string),
@@ -605,22 +542,16 @@ async fn main() -> anyhow::Result<()> {
                         fingerprint,
                         sas,
                     } => {
-                        // The digits, not just the fact. This is the last
-                        // resort on a machine with no notification daemon at
-                        // all, where the journal is the only surface left — and
-                        // `docs/M3-DEVICE-TESTS.md` already tells anyone
-                        // testing to keep `journalctl -f` open. They are not a
-                        // secret: both screens show them, and they authenticate
-                        // by being compared rather than by being known.
+                        // Log the digits themselves: on a machine with no
+                        // notification daemon, journalctl is the only surface.
                         tracing::info!(
                             %name, %fingerprint, %sas,
                             "a device asked to pair; run `acryliusctl pair` to answer"
                         );
                         prompter.ask_pair(name, &fingerprint.to_string(), sas).await;
                     }
-                    // Settled, one way or another — including by somebody using
-                    // the CLI, or by it lapsing. An answered question left on
-                    // screen is one that gets answered twice.
+                    // Close on any resolution (CLI, lapse, etc.) so an answered
+                    // question can't be answered twice.
                     acrylius_core::vocab::UiEvent::PairingComplete { .. }
                     | acrylius_core::vocab::UiEvent::PairingFailed { .. } => {
                         prompter.close_pair().await;
@@ -638,9 +569,8 @@ async fn main() -> anyhow::Result<()> {
                 && let Some(bulk) = &offers_bulk
             {
                 match ty.as_str() {
-                    // An offer has to be remembered before it can be accepted:
-                    // by the time a person says yes, the name it chose is all
-                    // there is to build a destination from.
+                    // Remember the offer before it can be accepted: the name is
+                    // all we have to build a destination from.
                     "offer" => {
                         if let Ok(offer) = minicbor::decode::<share::Offer>(body) {
                             bulk.note_offer(&peer.to_string(), offer.clone());
@@ -703,8 +633,8 @@ async fn main() -> anyhow::Result<()> {
     )
     .await?;
 
-    // Watchers. Each one only ever *submits an event*; none of them touches the
-    // core, which is what keeps the single-serial-executor rule intact.
+    // Watchers only ever submit an event; none touch the core directly —
+    // keeps the single-serial-executor rule intact.
     let events = rt.events();
     if kinds.contains(&acrylius_core::vocab::EffectKind::Clipboard) && cfg.clipboard.send {
         let events = events.clone();
@@ -712,8 +642,7 @@ async fn main() -> anyhow::Result<()> {
             acrylius_linux::clipboard::watch(move |data| {
                 let _ = events.send(acrylius_core::vocab::Event::Local(
                     acrylius_core::vocab::LocalCommand::Plugin {
-                        // Broadcast: the plugin sends to every connected peer,
-                        // so this identifier is a placeholder it ignores.
+                        // Placeholder id; the plugin broadcasts to every peer and ignores it.
                         peer: broadcast_placeholder(),
                         cap: clipboard::CAP.to_string(),
                         ty: "changed".to_string(),
@@ -727,9 +656,8 @@ async fn main() -> anyhow::Result<()> {
     if kinds.contains(&acrylius_core::vocab::EffectKind::Session) {
         let events = events.clone();
         tokio::spawn(async move {
-            // The lock state has two sources and only one of them is on D-Bus:
-            // a compositor that does not maintain LockedHint cannot signal at
-            // all. So this ticks, and the plugin drops anything unchanged.
+            // LockedHint isn't maintained by every compositor, so this polls
+            // instead of relying solely on D-Bus signals.
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(3));
             loop {
                 interval.tick().await;
@@ -753,15 +681,9 @@ async fn main() -> anyhow::Result<()> {
     if kinds.contains(&acrylius_core::vocab::EffectKind::Media) {
         let events = events.clone();
         tokio::spawn(async move {
-            // MPRIS does emit PropertiesChanged, but a player is free not to,
-            // and several do not until something asks. Without this a phone saw
-            // the state from the moment it connected and then nothing until it
-            // pressed a button — a remote that only updates when you use it.
-            //
-            // Two seconds because this is a now-playing display and a track
-            // change any later than that reads as broken. The plugin drops a
-            // state that has not meaningfully changed, and a position moving on
-            // its own does not count, so an idle machine sends nothing.
+            // MPRIS players aren't required to emit PropertiesChanged, so this
+            // polls instead; the plugin drops unchanged state, so an idle
+            // machine sends nothing.
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
             loop {
                 interval.tick().await;
@@ -782,14 +704,8 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    // SIGTERM as well as SIGINT, because systemd stops a service with SIGTERM
-    // and never sends SIGINT at all. Until now the shutdown below ran only when
-    // the daemon had been started by hand in a terminal: every `systemctl
-    // restart` killed it outright, and the BLE advertisement it had registered
-    // stayed registered with bluetoothd. One leaked instance per restart,
-    // against the three this adapter supports, and nothing short of restarting
-    // bluetoothd takes them back — which is what "restarting makes it appear,
-    // then it disappears again" turned out to be.
+    // systemd stops services with SIGTERM, never SIGINT, so both need to
+    // trigger a clean shutdown.
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     tokio::select! {
         () = rt.run() => {}

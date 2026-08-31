@@ -1,32 +1,22 @@
 #!/usr/bin/env bash
 #
-# M2 acceptance: the BLE transport.
-#
-# Everything a machine can check about itself is checked automatically — that
-# the adapter can be a peripheral at all, that an unprivileged daemon registers
-# a GATT application and gets on the air, and that what it publishes is exactly
-# what a phone needs to find it. The half that needs a phone is a checklist,
-# because no script here can turn Wi-Fi off on someone's iPhone.
-#
-# Self-skipping, like the M1 run in CI: a machine with no Bluetooth is a normal
-# machine, and this reports what it has rather than failing.
+# M2 acceptance: the BLE transport. Checks adapter roles, unprivileged GATT
+# registration, and advertised UUIDs; the half needing a phone is a checklist.
+# Self-skipping: a machine with no Bluetooth reports what it lacks, not a failure.
 set -u
 D=/tmp/acr-m2; BIN="$PWD/target/debug"
 PORT=19731
 ADAPTER=/org/bluez/hci0
 
-# Restated here on purpose rather than read out of the binary. This is the one
-# part of the design that can never change: iOS caches a peripheral's attribute
-# table, so a phone that has seen the old layout would keep using it. An
-# independent copy of the contract is what makes a silent edit fail loudly.
+# Restated on purpose, not read out of the binary: iOS caches a peripheral's
+# attribute table, so this layout can never change. A silent edit must fail here.
 SERVICE=61637279-6c69-7573-8001-000000000001
 IDENTITY=61637279-6c69-7573-8001-000000000002
 RX=61637279-6c69-7573-8001-000000000003
 TX=61637279-6c69-7573-8001-000000000004
 
-# Matches this run's state directory, never the binary name: a pattern naming
-# the binary also matches the shell running this script, which then kills
-# itself and takes the installed daemon with it.
+# Matches the state directory, not the binary name: a binary pattern also
+# matches this shell itself.
 mine() { pgrep -f "acryliusd --state $D/" 2>/dev/null; }
 cleanup() { mine | xargs -r kill 2>/dev/null || true; }
 trap cleanup EXIT
@@ -37,10 +27,7 @@ skip() { echo "  skip $1"; }
 
 prop() { busctl --system get-property org.bluez "$ADAPTER" "$1" "$2" 2>/dev/null; }
 
-# Built here rather than assumed, because nothing else in this script would
-# notice it was stale. A run against a binary from an earlier day reported a
-# failure that had been fixed hours before, and would just as happily report a
-# pass for a fix that is not in it.
+# Build here: nothing else in this script would notice a stale binary.
 if ! cargo build --quiet; then
   echo "  FAIL the workspace does not build; nothing to accept"
   exit 1
@@ -63,9 +50,8 @@ if ! echo "$POWERED" | grep -q true; then
   exit 0
 fi
 
-# One radio, and an advertisement already on it is almost certainly the
-# installed daemon. Two GATT applications offering the same service UUID would
-# make every result below meaningless, so say so rather than measure noise.
+# An advertisement already on the radio (usually the installed daemon) would
+# make every result below meaningless.
 BEFORE=$(prop org.bluez.LEAdvertisingManager1 ActiveInstances | awk '{print $2}')
 if [ "${BEFORE:-0}" != "0" ]; then
   echo "  skip something is already advertising ($BEFORE instance(s));"
@@ -107,11 +93,8 @@ check $? "bluetoothd accepted the GATT application"
 
 echo
 echo "### what a phone would actually find"
-# Read our own exported tree back over the system bus — the same way
-# bluetoothd read it. Our daemon holds no well-known name, so it is found by
-# PID; and it holds *more than one* system-bus connection, because the BLE
-# transport opens its own alongside the one logind already uses. So every
-# connection this PID owns is a candidate and only one of them answers here.
+# Read the tree back as bluetoothd did; the daemon has no well-known bus name, so
+# it's found by PID among its several system-bus connections, only one of which answers.
 NAME=""
 for n in $(busctl --system list --no-pager 2>/dev/null | awk -v p="$PID" '$2==p {print $1}'); do
   if busctl --system call "$n" /org/acrylius/gatt \
@@ -121,14 +104,8 @@ for n in $(busctl --system list --no-pager 2>/dev/null | awk -v p="$PID" '$2==p 
   fi
 done
 if [ -z "$NAME" ]; then
-  # The ordinary outcome, and not a failure. The system bus denies method
-  # calls between unprivileged connections, so only bluetoothd — which is
-  # root — can read this tree back, and that it did so is exactly what the
-  # "GATT application registered" line above proves: bluetoothd validates an
-  # application before accepting it, and rejects a malformed one.
-  #
-  # The shape and the flags are pinned instead by the unit tests in
-  # crates/acrylius-linux/src/ble.rs, which need no bus at all.
+  # Expected: the system bus denies calls between unprivileged connections; bluetoothd (root) already validated the tree.
+  # Shape and flags are covered by the unit tests in crates/acrylius-linux/src/ble.rs.
   skip "the tree is not readable without root; bluetoothd already validated it"
 else
   ADV=$(busctl --system call "$NAME" /org/acrylius/adv0 \
@@ -136,8 +113,8 @@ else
   echo "$ADV" | grep -q "$SERVICE"
   check $? "the service UUID is in the advertisement, not merely in the database"
 
-  # Without this bluetoothd emits no Flags element at all, and an advertisement
-  # with flags 0x00 is one iOS will not surface.
+  # Without Discoverable, bluetoothd emits no Flags element; iOS will not
+  # surface an advertisement with flags 0x00.
   echo "$ADV" | grep -q 'Discoverable.*true'
   check $? "the advertisement is discoverable"
 
@@ -151,12 +128,8 @@ else
     check $? "the tree publishes $u"
   done
 
-  # An encrypt-* or secure-* flag is what raises an iOS pairing dialog, and
-  # every recurring iOS/BlueZ GATT failure in the wild is a pairing failure.
-  # Noise is the security boundary here, not the link layer.
-  #
-  # Guarded on the tree being there at all: "we read nothing, and nothing we
-  # read asks for encryption" is a pass this check must never report.
+  # encrypt-*/secure-* flags would raise an iOS pairing dialog; Noise is the security boundary, not the link layer.
+  # Guarded on a non-empty tree: "read nothing" must never pass as "no flags."
   if [ -z "$TREE" ]; then
     skip "the tree came back empty; cannot judge the flags"
     fail=1
@@ -171,8 +144,7 @@ for i in $(seq 1 50); do mine >/dev/null || break; sleep 0.1; done
 
 echo
 echo "### a daemon that is not allowed to advertise"
-# A radio that announces the machine continuously is the owner's call, so the
-# switch has to actually switch something off.
+# The off switch has to actually switch something off.
 cat > $D/off/config.toml <<CFG
 name = "m2-ble-off"
 

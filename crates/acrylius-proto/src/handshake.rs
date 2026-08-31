@@ -1,35 +1,14 @@
 //! Handshake payloads: what rides inside the Noise messages.
 //!
-//! ## Why there is no command in here
-//!
-//! `IKpsk2`'s first message is encrypted under `es` + `ss`, which means it is
-//! not forward-secret: someone who later compromises the responder's static
-//! key can decrypt every message 1 they ever recorded. Capability lists and a
-//! device name are semi-public and survive that fine. An unlock command would
-//! not. So message 1 carries identity and capabilities, and nothing else; the
-//! initiator waits for message 2 before sending anything that matters. On a LAN
-//! that costs about four milliseconds.
-//!
-//! ## Why there is a timestamp
-//!
-//! `IKpsk2` message 1 is replayable. An observer can record one and send it
-//! again later. WireGuard solves this with a monotonic timestamp plus a
-//! per-peer greatest-seen check, and so do we ([`Hello::check_freshness`]).
-//!
-//! This is where the old project's entire replay apparatus goes. `pc-helper-ios`
-//! needed a persisted SQLite table of every nonce inside a 30-second window,
-//! swept on a timer, because a signed request carries no session. Here the Noise
-//! session's own cipher counter handles replay within a session, and one `u64`
-//! per peer handles replay of the session opener. One integer replaces a table.
+//! `IKpsk2` message 1 is not forward-secret, so it carries only identity and
+//! capabilities. It is also replayable, so a monotonic timestamp plus a
+//! per-peer greatest-seen watermark refuses recorded openers (WireGuard's scheme).
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
-/// How far a peer's clock may differ from ours before we refuse the handshake.
-///
-/// Generous, because this is not a freshness guarantee. [`GreatestSeen`] is.
-/// It only bounds how far into the future a peer can push its own watermark and
-/// lock itself out after a clock correction.
+/// Permitted clock skew. Not a freshness guarantee ([`GreatestSeen`] is); it
+/// bounds how far ahead a peer can push its own watermark and lock itself out.
 pub const MAX_SKEW_MS: u64 = 60_000;
 
 #[derive(Clone, PartialEq, Eq, Debug, minicbor::Encode, minicbor::Decode)]
@@ -39,9 +18,8 @@ pub struct Hello {
     /// Sender's clock, milliseconds since the Unix epoch.
     #[n(1)]
     pub ts_ms: u64,
-    /// Derived by the receiver from the static key Noise just authenticated;
-    /// carried here only so a log line can name the peer before the lookup.
-    /// Never trusted as an identity; see [`crate::ids`].
+    /// Carried only so a log line can name the peer; never trusted — the
+    /// receiver derives the id from the authenticated static key.
     #[b(2)]
     pub device_id: String,
     #[b(3)]
@@ -69,11 +47,9 @@ pub enum FreshnessError {
 pub struct GreatestSeen(pub u64);
 
 impl Hello {
-    /// Reject a stale, skewed, or replayed handshake opener.
-    ///
-    /// Both checks are needed and neither subsumes the other: the watermark stops
-    /// replay, and the skew bound stops a peer with a wildly wrong clock from
-    /// setting a watermark so far ahead that it can never connect again.
+    /// Reject a stale, skewed, or replayed handshake opener. The watermark
+    /// stops replay; the skew bound stops a wild clock from setting a
+    /// watermark it can never pass again.
     pub fn check_freshness(
         &self,
         now_ms: u64,
@@ -94,15 +70,8 @@ impl Hello {
     }
 }
 
-/// The capabilities that may flow from `sender` to `receiver`.
-///
-/// A plain set intersection, which is the entire reason the major version lives
-/// *inside* the capability id: `org.acrylius.clipboard/2` is simply a different
-/// string from `/1`, so there is no separate version field to compare wrongly.
-///
-/// Note this is directional. `a.negotiate(b) != b.negotiate(a)` in general, and
-/// conflating the two would silently let a peer send a capability it only
-/// declared it could receive.
+/// The capabilities that may flow from `sender` to `receiver`: a plain set
+/// intersection. Directional — `a.negotiate(b) != b.negotiate(a)` in general.
 #[must_use]
 pub fn negotiate(sender_out: &[String], receiver_in: &[String]) -> Vec<String> {
     let mut caps: Vec<String> = sender_out
@@ -189,10 +158,7 @@ mod tests {
 
     #[test]
     fn a_clock_exactly_at_the_limit_is_still_within_it() {
-        // `MAX_SKEW_MS` is a bound, not the first value outside it. Nothing
-        // pinned that, so the check could quietly become `>=` and start refusing
-        // handshakes from a peer whose clock is exactly a minute out — which is
-        // a refusal to talk at all, on a machine that is behaving.
+        // The check must stay `>`, not `>=`: a clock exactly a minute out is within bound.
         let now = 1_700_000_000_000;
         assert!(
             hello(now + MAX_SKEW_MS)
@@ -208,11 +174,7 @@ mod tests {
 
     #[test]
     fn a_refusal_says_how_far_out_the_clock_was() {
-        // The number in the error is the overshoot, and it is what an operator
-        // reads to decide whether a clock is a minute out or a decade. Pinned at
-        // a value where subtracting and dividing give different answers: at
-        // exactly one millisecond over they agree, which is how the arithmetic
-        // here stayed untested.
+        // The error carries the overshoot; pinned where wrong arithmetic would differ.
         let now = 1_700_000_000_000;
         assert_eq!(
             hello(now + MAX_SKEW_MS * 2).check_freshness(now, GreatestSeen(0)),
@@ -222,8 +184,7 @@ mod tests {
 
     #[test]
     fn the_watermark_survives_a_restart() {
-        // The whole point of persisting it: a daemon that forgot would accept a
-        // recorded opener again. Reloading the stored value must still refuse.
+        // A daemon that forgot the watermark would accept a recorded opener again.
         let now = 1_700_000_000_000;
         let h = hello(now);
         let persisted = h.check_freshness(now, GreatestSeen(0)).unwrap();

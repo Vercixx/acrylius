@@ -1,43 +1,8 @@
-//! The Noise layer: two patterns, one prologue, no IO.
-//!
-//! `snow` is itself sans-IO. `write_message(payload, &mut out)` and
-//! `read_message(msg, &mut out)` are pure buffer transforms, so this module
-//! composes with the core's state machine without a shim, and every test below
-//! runs with no sockets and no clock.
-//!
-//! ## Two patterns, and why each
-//!
-//! Pairing is plain `XX`: neither side knows the other's static key in advance,
-//! which is exactly the situation on first contact, and there is no pre-shared
-//! key because there is nothing for a person to type. Pairing begins by tapping
-//! a machine, so the only out-of-band channel is the pair of screens, and the
-//! six digits of `pairing::sas` are what crosses it.
-//!
-//! That makes the SAS the security mechanism rather than a cross-check. An
-//! active attacker can run two `XX` handshakes and relay between them; what
-//! stops it is that the two handshake hashes differ, so the digits differ and a
-//! person says so. Its only win is the two SAS values coinciding, one in a
-//! million per attempt — which is why the core rate-limits who may raise a
-//! confirmation, and why that limit is a security control rather than a
-//! politeness.
-//!
-//! This used to be `XXpsk0`, keyed by a code typed off the other machine's
-//! screen. The trade was deliberate: a code authenticated the handshake outright,
-//! but it could only be read by somebody already looking at that screen.
-//!
-//! Sessions are `IKpsk2`. The initiator already knows the responder's static
-//! key from pairing, so the session is up in one round trip, which matters
-//! because an App Intent gets seconds of process life. The PSK is derived at
-//! pairing time and never transmitted, so a session opener stays opaque even to
-//! someone who has somehow obtained the responder's static key.
-//!
-//! ## The prologue
-//!
-//! Both patterns are run with a prologue naming the wire version and the mode.
-//! Noise mixes the prologue into the handshake hash, so it is authenticated
-//! without being secret: a MITM flipping `Session` to `Pair`, to force a device
-//! back into a pairing it did not ask for, causes a decrypt failure on both
-//! sides rather than a downgrade.
+//! The Noise layer. Pairing is plain `XX`: no prior keys, and the SAS derived
+//! from the handshake hash is the security mechanism, not a cross-check.
+//! Sessions are `IKpsk2`: one round trip, PSK derived at pairing time and never
+//! transmitted. Both patterns run with a prologue naming the wire version and
+//! mode, so a Pair/Session downgrade fails to decrypt on both sides.
 
 use snow::{Builder, HandshakeState, TransportState};
 
@@ -49,9 +14,8 @@ pub const MAX_NOISE_MESSAGE: usize = 65535;
 const PAIR_PARAMS: &str = "Noise_XX_25519_ChaChaPoly_SHA256";
 const SESSION_PARAMS: &str = "Noise_IKpsk2_25519_ChaChaPoly_SHA256";
 
-/// The session PSK's position, from the pattern name above. Getting it wrong is
-/// a silent interop failure rather than a compile error, so it is named once
-/// here. Pairing has no PSK at all.
+/// The session PSK's position, from the pattern name above; a wrong value is a
+/// silent interop failure, not a compile error. Pairing has no PSK.
 const SESSION_PSK_INDEX: u8 = 2;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -75,10 +39,8 @@ impl Mode {
         SESSION_PSK_INDEX
     }
 
-    /// The prologue, mixed into the handshake hash by both sides.
-    ///
-    /// Not secret, since an observer sees it, but authenticated, so it cannot
-    /// be altered in flight without both sides noticing.
+    /// Mixed into the handshake hash by both sides: not secret, but
+    /// authenticated.
     fn prologue(self) -> Vec<u8> {
         let mut p = Vec::new();
         p.extend_from_slice(b"ACR");
@@ -116,8 +78,7 @@ pub struct Identity {
 }
 
 impl Identity {
-    /// Generate a fresh identity. Takes the pattern only to reuse `snow`'s
-    /// resolver; the key is not pattern-specific.
+    /// Uses `snow`'s resolver; the key is not pattern-specific.
     pub fn generate() -> Result<Self, NoiseError> {
         let kp =
             Builder::new(PAIR_PARAMS.parse().expect("static pattern parses")).generate_keypair()?;
@@ -135,12 +96,8 @@ impl Identity {
         })
     }
 
-    /// Load an identity from its stored private half.
-    ///
-    /// The public key is derived, never stored alongside and trusted: a file
-    /// that had been edited to pair a real private key with someone else's
-    /// public key would otherwise produce an identity whose fingerprint lies
-    /// about which key it can actually prove possession of.
+    /// Load an identity from its stored private half. The public key is
+    /// derived, never stored alongside and trusted.
     #[must_use]
     pub fn from_private(private: [u8; 32]) -> Self {
         let secret = x25519_dalek::StaticSecret::from(private);
@@ -188,11 +145,8 @@ pub struct Handshake {
 }
 
 impl Handshake {
-    /// Start a pairing handshake.
-    ///
-    /// No key of any kind: anybody may complete one of these. What it buys is a
-    /// handshake hash, and the six digits both ends derive from it. Nothing is
-    /// written to the trust store until a person has compared them.
+    /// Start a pairing handshake. No key of any kind: anybody may complete
+    /// one; nothing is trusted until a person compares the SAS.
     pub fn pair_initiator(id: &Identity) -> Result<Self, NoiseError> {
         Self::build(Mode::Pair, id, None, None, true)
     }
@@ -214,21 +168,10 @@ impl Handshake {
         Self::build(Mode::Session, id, Some(psk), None, false)
     }
 
-    /// Learn who is calling, before we know which PSK to answer with.
-    ///
-    /// `IKpsk2` puts the responder in an awkward spot: `snow` wants the PSK at
-    /// build time, but the PSK is per-peer and the peer's identity arrives
-    /// inside message 1. The way out is that `psk2` is mixed at message 2:
-    /// message 1's tokens are `e, es, s, ss` and its payload is encrypted under a
-    /// chaining key the PSK has not touched yet. So a throwaway handshake built
-    /// with a zero PSK reads message 1 to exactly the same result as the real one
-    /// would.
-    ///
-    /// The caller uses the returned static key to find the peer, then builds a
-    /// real responder with that peer's PSK and replays the same message 1 into
-    /// it. Nothing is leaked and nothing is trusted: the identity learned here is
-    /// only used to choose a PSK, and if the choice is wrong, message 2 fails
-    /// on the initiator exactly as it should.
+    /// Learn who is calling before choosing a PSK. `psk2` is mixed at message
+    /// 2, so a throwaway responder with a zero PSK reads message 1 identically;
+    /// the caller then replays message 1 into a real responder with the right
+    /// PSK. The identity only chooses a PSK — a wrong one fails at message 2.
     pub fn session_identify(id: &Identity, msg1: &[u8]) -> Result<[u8; 32], NoiseError> {
         let mut probe = Self::build(Mode::Session, id, Some(&[0u8; 32]), None, false)?;
         probe.read(msg1)?;
@@ -246,8 +189,7 @@ impl Handshake {
         let mut b = Builder::new(mode.params().parse().expect("static pattern parses"))
             .prologue(&prologue)?
             .local_private_key(id.private())?;
-        // Only sessions carry one. `snow` rejects a PSK the pattern has no slot
-        // for, so this is not merely skipped work.
+        // snow rejects a PSK the pattern has no slot for.
         if let Some(psk) = psk {
             b = b.psk(mode.psk_index(), psk)?;
         }
@@ -303,19 +245,15 @@ impl Handshake {
         Ok(buf)
     }
 
-    /// The peer's static public key, once the pattern has transmitted it.
-    ///
-    /// `None` early in `XX`, which is exactly why a pairing decision cannot be
-    /// made before the handshake completes.
+    /// The peer's static public key, once the pattern has transmitted it
+    /// (`None` early in `XX`).
     #[must_use]
     pub fn peer_static(&self) -> Option<[u8; 32]> {
         self.state.get_remote_static()?.try_into().ok()
     }
 
-    /// The handshake hash, for the SAS and for deriving the session PSK.
-    ///
-    /// Only meaningful once complete. Before that it is a running value, and two
-    /// honest peers would derive different strings from it.
+    /// The handshake hash, for the SAS and for deriving the session PSK. Only
+    /// meaningful once complete.
     pub fn handshake_hash(&self) -> Result<Vec<u8>, NoiseError> {
         if !self.is_complete() {
             return Err(NoiseError::NotComplete);
@@ -329,9 +267,7 @@ impl Handshake {
             return Err(NoiseError::NotComplete);
         }
         if !attrs.supports_stateful_cipher() {
-            // A lossy or unordered link needs caller-supplied nonces plus a
-            // replay window. The plumbing to notice that is here; the stateless
-            // path itself lands with the first such transport.
+            // The stateless path lands with the first lossy/unordered transport.
             return Err(NoiseError::UnsupportedLink);
         }
         Ok(Session {
@@ -347,9 +283,8 @@ pub struct Session {
     sent: u64,
 }
 
-/// Rekey before the cipher's nonce space gets anywhere near exhaustion.
-/// ChaChaPoly's counter is 64-bit, so this is enormously conservative, which is
-/// the point: it costs nothing and removes a class of bug entirely.
+/// Rekey far before nonce exhaustion; ChaChaPoly's counter is 64-bit, so this
+/// is deliberately very conservative.
 pub const REKEY_AFTER_MESSAGES: u64 = 1 << 20;
 
 impl Session {
@@ -464,7 +399,6 @@ mod tests {
     fn both_ends_display_the_same_sas() {
         let (a, b) = (Identity::generate().unwrap(), Identity::generate().unwrap());
         let (i, r) = pair(&a, &b).unwrap();
-        // The property the whole pairing screen rests on.
         assert_eq!(
             pairing::sas(&i.handshake_hash().unwrap()),
             pairing::sas(&r.handshake_hash().unwrap())
@@ -473,16 +407,13 @@ mod tests {
 
     #[test]
     fn two_separate_pairings_do_not_show_the_same_digits() {
-        // What a person comparing six digits is detecting. A relay is two
-        // handshakes, not one: it pairs with each side separately, so it holds
-        // two different hashes and cannot make both screens agree except by
-        // luck. If this ever passed, the SAS would be authenticating nothing.
+        // A relay runs two handshakes with two different hashes, so it cannot
+        // make both screens agree except by luck.
         let (a, b, m) = (
             Identity::generate().unwrap(),
             Identity::generate().unwrap(),
             Identity::generate().unwrap(),
         );
-        // The shape of a relay: `m` in the middle, one handshake each way.
         let (left, _) = pair(&a, &m).unwrap();
         let (_, right) = pair(&m, &b).unwrap();
         assert_ne!(
@@ -494,14 +425,8 @@ mod tests {
 
     #[test]
     fn any_two_devices_can_complete_a_pairing_handshake() {
-        // Stated as a test because it is the security model, not an oversight.
-        // `XXpsk0` made a stranger's handshake fail at message 1; plain `XX`
-        // lets anybody finish one. Nothing on the wire distinguishes the machine
-        // somebody tapped from one that answered instead — that is what the six
-        // digits are for, and what `Core::why_not_pair` bounds.
-        //
-        // If this ever starts failing, pairing has grown a secret again and the
-        // SAS ceremony can be reconsidered.
+        // The security model, not an oversight: plain XX lets anybody finish a
+        // handshake; the SAS and `Core::why_not_pair` are the controls.
         let (a, b) = (Identity::generate().unwrap(), Identity::generate().unwrap());
         let (i, r) = pair(&a, &b).expect("no key is required to pair");
         assert!(i.is_complete() && r.is_complete());
@@ -509,8 +434,6 @@ mod tests {
 
     #[test]
     fn a_pairing_peer_is_unknown_until_the_pattern_transmits_it() {
-        // This is why a pairing decision cannot be made early: for most of XX
-        // there is simply nobody identified to decide about.
         let (a, b) = (Identity::generate().unwrap(), Identity::generate().unwrap());
         let mut i = Handshake::pair_initiator(&a).unwrap();
         let mut r = Handshake::pair_responder(&b).unwrap();
@@ -580,8 +503,7 @@ mod tests {
         let mut i = Handshake::session_initiator(&a, &[1u8; 32], b.public()).unwrap();
         let mut r = Handshake::session_responder(&b, &[2u8; 32]).unwrap();
         let m1 = i.write(b"hello").unwrap();
-        // IKpsk2 mixes the PSK at message 2, so msg1 reads fine and msg2 is
-        // where an impostor is caught.
+        // IKpsk2 mixes the PSK at message 2, so msg1 reads fine.
         r.read(&m1).unwrap();
         let m2 = r.write(b"hello back").unwrap();
         assert!(
@@ -602,8 +524,7 @@ mod tests {
 
     #[test]
     fn a_pairing_handshake_cannot_be_answered_as_a_session() {
-        // The downgrade a MITM would attempt: push a paired device back into
-        // pairing. Different patterns AND a different prologue both refuse it.
+        // The downgrade a MITM would attempt.
         let (a, b) = (Identity::generate().unwrap(), Identity::generate().unwrap());
         let psk = [3u8; 32];
         let mut i = Handshake::pair_initiator(&a).unwrap();
@@ -642,8 +563,6 @@ mod tests {
 
     #[test]
     fn a_replayed_session_message_is_refused() {
-        // This is the property that deletes the old project's SQLite nonce
-        // table: the cipher's own counter refuses a replay, for free.
         let (a, b) = (Identity::generate().unwrap(), Identity::generate().unwrap());
         let (i, r) = session(&a, &b, &[7u8; 32]).unwrap();
         let mut si = i.into_session(&loopback()).unwrap();
@@ -659,9 +578,6 @@ mod tests {
 
     #[test]
     fn messages_are_not_interchangeable_between_sessions() {
-        // Two independent pairs of peers. A message from one must be worthless
-        // against the other, which is the cross-server replay the old protocol
-        // needed a SERVER_FP term in every signature to prevent.
         let (a, b) = (Identity::generate().unwrap(), Identity::generate().unwrap());
         let (c, d) = (Identity::generate().unwrap(), Identity::generate().unwrap());
         let (i1, _r1) = session(&a, &b, &[7u8; 32]).unwrap();
@@ -717,11 +633,9 @@ mod identify_tests {
         let mut i = Handshake::session_initiator(&a, &psk, b.public()).unwrap();
         let m1 = i.write(b"hello").unwrap();
 
-        // The responder has no idea who this is yet.
         let who = Handshake::session_identify(&b, &m1).unwrap();
         assert_eq!(who, *a.public());
 
-        // Having chosen a PSK from that, replay the very same message 1.
         let mut r = Handshake::session_responder(&b, &psk).unwrap();
         assert_eq!(r.read(&m1).unwrap(), b"hello");
         let m2 = r.write(b"hi").unwrap();
@@ -732,8 +646,7 @@ mod identify_tests {
 
     #[test]
     fn identifying_does_not_let_a_wrong_psk_slip_through() {
-        // The identity learned by probing chooses a PSK; it must not also
-        // *authorise* anything. Choosing the wrong one still has to fail.
+        // The probed identity chooses a PSK; it must not authorise anything.
         let (a, b) = (Identity::generate().unwrap(), Identity::generate().unwrap());
         let mut i = Handshake::session_initiator(&a, &[9u8; 32], b.public()).unwrap();
         let m1 = i.write(b"hello").unwrap();

@@ -1,25 +1,12 @@
-//! The one byte outside the encryption.
-//!
-//! A responder has to know which handshake it is being offered before it can
-//! build the right `HandshakeState`: the pairing and session patterns are
-//! different, so it cannot simply try to read the message. One leading tag byte
-//! answers that.
-//!
-//! Being outside the encryption, the tag is trivially forgeable. That is fine,
-//! and it is why the Noise prologue exists: the mode is *also* mixed into the
-//! handshake hash, so flipping this byte to push a paired device back into
-//! pairing produces a decrypt failure rather than a downgrade. The tag chooses a
-//! parser; the prologue is what makes the choice binding.
+//! The one tag byte outside the encryption: it tells a responder which
+//! handshake to build. Forgeable, but the mode is also mixed into the Noise
+//! prologue, so flipping it gives a decrypt failure, not a downgrade.
 
-/// What a framed message is.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(u8)]
 pub enum FrameKind {
-    /// A message of an `XX` pairing handshake.
-    ///
-    /// Anybody may send one: pairing has no pre-shared key, so this frame *is*
-    /// the request to pair. What bounds it is the core's admission policy, not
-    /// anything on the wire.
+    /// A message of an `XX` pairing handshake. Anybody may send one; the core's
+    /// admission policy is what bounds it.
     PairHandshake = 1,
     /// A message of an `IKpsk2` session handshake.
     SessionHandshake = 2,
@@ -79,8 +66,7 @@ mod tests {
 
     #[test]
     fn an_empty_payload_still_carries_its_kind() {
-        // Noise's first XX message can have an empty payload; the frame must
-        // survive that rather than looking like an empty frame.
+        // Noise's first XX message can have an empty payload.
         let framed = join(FrameKind::PairHandshake, b"");
         assert_eq!(
             split(&framed).unwrap(),

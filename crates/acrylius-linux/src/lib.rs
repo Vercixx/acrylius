@@ -1,13 +1,7 @@
 //! Effectors for a Linux desktop.
 //!
-//! The core decides what should happen. This crate is where it actually
-//! happens, and it is the only part of the project that knows logind exists.
-//!
-//! Everything here runs as your user, never root. logind passes a session's
-//! owner uid to polkit as `good_user`, which short-circuits the check when the
-//! caller's uid matches, so locking and unlocking your own session needs no
-//! sudo, no setuid binary and no polkit rule. That is what lets the systemd unit
-//! be locked down hard: nothing it does requires privilege.
+//! Everything runs as your user, never root: logind short-circuits polkit when
+//! the caller's uid owns the session, so no privilege is ever needed.
 
 pub mod ble;
 pub mod clipboard;
@@ -20,9 +14,7 @@ pub mod notify;
 pub mod session;
 pub mod wol;
 
-/// This process's real uid.
-///
-/// Read from `/proc` rather than pulling in `libc` for one number.
+/// This process's real uid, from `/proc` rather than `libc`.
 #[must_use]
 pub fn uid() -> u32 {
     std::fs::read_to_string("/proc/self/status")

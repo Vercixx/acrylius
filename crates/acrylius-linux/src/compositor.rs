@@ -1,16 +1,8 @@
 //! Asking the compositor whether the screen is actually locked.
 //!
-//! logind's `LockedHint` is only as good as the screen locker maintaining it,
-//! and some maintain it not at all. Noctalia on Hyprland locks the screen while
-//! leaving the hint reading `no`. Believing the hint meant unlock answered
-//! "already unlocked" and did nothing, and lock reported failure over a screen
-//! it had just locked.
-//!
-//! So a hint of `yes` is trusted as-is, and only a `no` on an active Wayland
-//! session is escalated to the compositor. A compositor that cannot answer
-//! returns [`None`], meaning no opinion, never "unlocked". That distinction
-//! is the whole point: a failed probe must leave the hint standing rather than
-//! assert the more dangerous of the two answers.
+//! logind's `LockedHint` can be wrong (Hyprland/Noctalia reports `no` while
+//! locked); a `no` on an active Wayland session is escalated to the
+//! compositor, but `None` means no opinion, never "unlocked".
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -22,10 +14,8 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Candidate Hyprland IPC sockets, best first.
 ///
-/// `HYPRLAND_INSTANCE_SIGNATURE` is tried first but cannot be trusted alone:
-/// systemd's user manager caches the environment it was given, so after a
-/// Hyprland restart the variable still names an instance that is gone. The
-/// fallback scans the directory newest-first.
+/// `HYPRLAND_INSTANCE_SIGNATURE` may be stale after a Hyprland restart
+/// (systemd caches the env it started with), so the rest scan newest-first.
 fn candidates() -> Vec<PathBuf> {
     let Some(runtime) = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from) else {
         return Vec::new();
@@ -42,8 +32,7 @@ fn candidates() -> Vec<PathBuf> {
             Some((modified, e.path()))
         })
         .collect();
-    // Newest first: after a Hyprland restart the freshest directory is the
-    // live one.
+    // Newest first: the freshest directory is the live one after a restart.
     found.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
 
     order(
@@ -53,10 +42,8 @@ fn candidates() -> Vec<PathBuf> {
     )
 }
 
-/// Which sockets to try, best first.
-///
-/// Split out from the directory listing so the ordering and the traversal check
-/// can be tested without a filesystem or environment variables.
+/// Which sockets to try, best first; split out so ordering is testable without
+/// a filesystem or environment variables.
 fn order(
     hypr: &std::path::Path,
     signature: Option<&std::path::Path>,
@@ -64,8 +51,7 @@ fn order(
 ) -> Vec<PathBuf> {
     let mut out = Vec::new();
     if let Some(sig) = signature {
-        // A signature names one directory. Anything with a separator in it is
-        // not a signature, and joining it would be a path traversal.
+        // A separator means it's not a bare signature; joining it would be a path traversal.
         if sig.components().count() == 1 {
             out.push(hypr.join(sig).join(".socket.sock"));
         }
@@ -75,11 +61,8 @@ fn order(
     out
 }
 
-/// Ask Hyprland whether the session is locked.
-///
-/// Speaks the socket directly rather than shelling out to `hyprctl`: the binary
-/// may not be on `PATH` for a systemd user unit, while the socket is already
-/// inside the paths such a unit is allowed to touch.
+/// Ask Hyprland whether the session is locked. Speaks the socket directly
+/// rather than `hyprctl`, which may not be on `PATH` for a systemd user unit.
 pub async fn locked() -> Option<bool> {
     for path in candidates() {
         match tokio::time::timeout(PROBE_TIMEOUT, ask(&path)).await {
@@ -115,7 +98,7 @@ mod tests {
 
     #[test]
     fn a_signature_with_a_separator_is_not_used_as_a_path() {
-        // A traversal here would have us connect to an arbitrary socket.
+        // A traversal here would connect to an arbitrary socket.
         let out = order(&hypr(), Some(std::path::Path::new("../../../tmp/evil")), []);
         assert!(
             out.is_empty(),
@@ -125,9 +108,7 @@ mod tests {
 
     #[test]
     fn the_signature_is_tried_first_then_newest_first() {
-        // systemd's user manager caches the environment it was started with, so
-        // after a Hyprland restart the signature names an instance that is gone.
-        // It is still worth trying first, but it must not be the only candidate.
+        // The signature can be stale after a restart, but still worth trying first.
         let out = order(
             &hypr(),
             Some(std::path::Path::new("stale")),

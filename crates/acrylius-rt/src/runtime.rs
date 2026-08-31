@@ -1,12 +1,5 @@
-//! The action pump.
-//!
-//! One task owns the core. Nothing else ever touches it.
-//!
-//! Transports and effectors run on their own tasks and communicate only by
-//! sending [`Event`]s into a channel this loop drains. Results of actions come
-//! back the same way. That is the rule from the top of `vocab`, made structural:
-//! there is no handle to the core to misuse, so `handle()` cannot be reentered
-//! from inside an action handler.
+//! The action pump. One task owns the core; transports and effectors talk to
+//! it only via [`Event`]s, so `handle()` can never be reentered.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -25,20 +18,13 @@ use crate::transport::{Transport, TransportCmd};
 /// socket, a CLI, a test).
 pub type UiSink = mpsc::UnboundedSender<UiEvent>;
 
-/// Where a bulk transfer's bytes come from and go to.
-///
-/// Kept out of the core and out of the transport alike: the core must not know
-/// what a file is, and the transport must not decide where one lands. A host
-/// that has no answer to these does not offer the capability, and an offer it
-/// receives is refused rather than half-honoured.
+/// Where a bulk transfer's bytes come from and go to. Kept out of the core and
+/// the transport: the core must not know what a file is, and the transport
+/// must not decide where one lands.
 #[async_trait::async_trait]
 pub trait BulkHost: Send + Sync + 'static {
-    /// Somewhere for the far end to connect, for this transfer.
-    ///
-    /// `offered_as` is the number the *sender* uses, and the only one it will
-    /// put in its greeting. Keep the listener under `transfer`, which is what
-    /// everything else here is keyed by, and check the greeting against
-    /// `offered_as`.
+    /// Somewhere for the far end to connect. Key the listener by `transfer`;
+    /// check the greeting against `offered_as`, the number the sender uses.
     async fn listen(
         &self,
         transfer: TransferId,
@@ -47,12 +33,8 @@ pub trait BulkHost: Send + Sync + 'static {
         expect_bytes: u64,
     ) -> anyhow::Result<String>;
 
-    /// Wait for the far end to connect, and no further.
-    ///
-    /// Split from `receive` so that the two silences can be told apart: a
-    /// sender that never dials has to be given up on, and a file taking its time
-    /// must not be. Only a host knows which of the two it is in, and this
-    /// returning is how it says so.
+    /// Wait for the far end to connect, and no further. Split from `receive`
+    /// so a sender that never dials can be given up on while a slow file is not.
     async fn accept(&self, transfer: TransferId) -> anyhow::Result<()>;
 
     /// Take what arrives on the connection `accept` returned for.
@@ -82,21 +64,13 @@ pub struct Runtime {
     store: Box<dyn Store>,
     ui: Option<UiSink>,
     bulk: Option<Arc<dyn BulkHost>>,
-    /// The task carrying each transfer, so that cancelling one can reach it.
-    ///
-    /// A bulk transfer runs detached, because it lasts as long as a file takes
-    /// and the loop below has other work. Detached and *forgotten*, though, is
-    /// what made `BulkCancel` a suggestion: the host's `cancel` takes the
-    /// transfer out of its own table, which the task stopped consulting the
-    /// moment it started, so a receive already blocked on `accept` never heard
-    /// about it and waited for a connection that was not coming.
+    /// The task carrying each transfer, so cancelling one can abort a task
+    /// already blocked inside the host.
     running: HashMap<TransferId, tokio::task::JoinHandle<()>>,
     /// Called with the core after every step, so a host can keep a live
-    /// snapshot for its own queries without ever holding the core itself.
+    /// snapshot without holding the core itself.
     observer: Option<Observer>,
-    /// Monotonic zero. The core is handed milliseconds since this instant, so a
-    /// wall-clock change cannot move a deadline, which is what makes the pairing
-    /// window's expiry honest.
+    /// Monotonic zero: a wall-clock change cannot move a deadline.
     started: Instant,
 }
 
@@ -125,8 +99,7 @@ impl Runtime {
     }
 
     /// Give the runtime somewhere to put files. Without one, a bulk action is
-    /// reported as a failed transfer rather than ignored — a sender waiting
-    /// forever for an endpoint is worse than one told no.
+    /// reported as a failed transfer rather than ignored.
     pub fn set_bulk(&mut self, bulk: Arc<dyn BulkHost>) {
         self.bulk = Some(bulk);
     }
@@ -172,7 +145,6 @@ impl Runtime {
 
     /// Run until the event channel closes.
     pub async fn run(mut self) {
-        // Start advertising and browsing on every transport we have.
         let mut pairing = self.core.pairing_open();
         for tx in self.transports.values() {
             let _ = tx.send(TransportCmd::Advertise {
@@ -203,8 +175,7 @@ impl Runtime {
                 () = &mut sleep => Event::Tick,
             };
 
-            // A transfer that has ended has nothing left to abort, and a handle
-            // kept for it is one this map never gives back.
+            // A finished transfer's handle would otherwise never leave the map.
             if let Event::BulkFinished { transfer, .. } = &ev {
                 self.running.remove(transfer);
             }
@@ -218,13 +189,9 @@ impl Runtime {
             for a in out.actions {
                 self.apply(a).await;
             }
-            // Re-advertise when the pairing window opens or closes.
-            //
-            // Compared rather than driven by an event, because a window closes
-            // four ways — paired, refused, given up on, expired — and only the
-            // first two announce themselves. A `pair=1` left on the air because
-            // the window quietly timed out is an invitation to a device that
-            // will be refused when it accepts.
+            // Re-advertise when the pairing window opens or closes. Compared
+            // rather than event-driven: a window can also close silently, by
+            // expiry, and `pair=1` must not stay on the air past that.
             let now_pairing = self.core.pairing_open();
             if now_pairing != pairing {
                 pairing = now_pairing;
@@ -242,13 +209,9 @@ impl Runtime {
         }
     }
 
-    /// What this device says about itself in a discovery advertisement.
-    ///
-    /// Never the raw static key: that is what keeps an `IKpsk2` opener opaque
-    /// to somebody watching, and the fingerprint is enough to match a peer we
-    /// already know. The display name is added by the transport, not here —
-    /// it is a hint nothing may decide from, and it belongs with the
-    /// advertisement rather than with the core's facts.
+    /// What this device advertises about itself. Never the raw static key,
+    /// which would deanonymize the `IKpsk2` opener; the display name is the
+    /// transport's business, not the core's.
     fn txt(&self, pairing: bool) -> Vec<(String, String)> {
         vec![
             ("v".to_string(), "1".to_string()),
@@ -261,10 +224,8 @@ impl Runtime {
         ]
     }
 
-    /// Report a transfer that never started as one that finished badly.
-    ///
-    /// Silence would leave the far end waiting for an endpoint that is never
-    /// coming, and it has no way to tell that from a slow disk.
+    /// Report a transfer that never started as one that finished badly, so the
+    /// far end is not left waiting for an endpoint that is never coming.
     fn bulk_failed(&self, transfer: TransferId, why: &str) {
         let _ = self.events_tx.send(Event::BulkFinished {
             transfer,
@@ -300,8 +261,7 @@ impl Runtime {
                 }
             }
             Action::Effect { token, effect } => {
-                // Off to its own task, so a slow effector cannot stall the loop.
-                // Its answer arrives as an ordinary event.
+                // Own task, so a slow effector cannot stall the loop.
                 let eff = self.effector.clone();
                 let back = self.events_tx.clone();
                 tokio::spawn(async move {
@@ -347,15 +307,9 @@ impl Runtime {
                     match bulk.listen(transfer, offered_as, key, expect_bytes).await {
                         Ok(endpoint) => {
                             let _ = back.send(Event::BulkListening { transfer, endpoint });
-                            // Accepting blocks until the far end connects, so it
-                            // runs after the endpoint has been sent rather than
-                            // before it.
-                            //
-                            // Reported the moment it returns, because that is the
-                            // one thing about a transfer only a host can know and
-                            // the core needs it: everything before this is a wait
-                            // that has to be bounded, and everything after is a
-                            // file arriving, which must not be.
+                            // `accept` blocks until the far end connects; the
+                            // core bounds the wait before it, never the
+                            // transfer after it.
                             if let Err(e) = bulk.accept(transfer).await {
                                 let _ = back.send(Event::BulkFinished {
                                     transfer,
@@ -408,18 +362,12 @@ impl Runtime {
                         detail,
                     });
                 });
-                // Held for the same reason a receive is: a send that cannot
-                // reach the endpoint it was given blocks in `connect` just as
-                // patiently.
                 self.running.insert(transfer, task);
             }
 
             Action::BulkCancel { transfer } => {
-                // The task first. Telling the host to forget a transfer does
-                // nothing to a task already blocked inside it, and that task
-                // holds the listener — so without this a cancelled receive kept
-                // its port bound and its file reserved for the life of the
-                // process.
+                // Abort the task first: the host forgetting a transfer does
+                // nothing to a task already blocked inside it.
                 if let Some(task) = self.running.remove(&transfer) {
                     task.abort();
                 }

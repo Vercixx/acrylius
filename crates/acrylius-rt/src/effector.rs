@@ -4,11 +4,8 @@ use acrylius_core::vocab::{Effect, EffectKind, EffectResult};
 
 #[async_trait::async_trait]
 pub trait Effector: Send + Sync + 'static {
-    /// Which effect kinds this host can actually carry out.
-    ///
-    /// The core drops plugins whose requirements are unmet and never advertises
-    /// their capabilities, so this list is what decides the device's feature
-    /// set. Not a `#[cfg]`, and not a config file.
+    /// Effect kinds this host can carry out; the core drops plugins whose
+    /// requirements are unmet, so this list decides the device's feature set.
     fn supported(&self) -> Vec<EffectKind>;
 
     async fn run(&self, effect: Effect) -> EffectResult;

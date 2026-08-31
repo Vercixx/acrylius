@@ -1,22 +1,9 @@
 //
-//  Persistence on Apple platforms.
-//
-//  Two rules, both learned the hard way in the previous project:
-//
-//  1. The identity key goes in the Keychain as `WhenUnlockedThisDeviceOnly`,
-//     with no biometric ACL. An item behind `.biometryCurrentSet` cannot be
-//     read while the phone is locked, which breaks every short-lived extension
-//     and every background refresh. Biometrics belong on the action, as an
-//     `LAContext` check before sending an unlock, not on the key.
-//  2. Peer records are ordinary files in the app container, not Keychain items.
-//     They contain a session PSK, so the container is `.completeUntilFirstUserAuthentication`
-//     and the files are excluded from backup; but the Keychain is for the one
-//     secret that must survive nothing else, and filling it with blobs makes
-//     the 7-day reinstall cycle worse rather than better.
-//
-//  A reinstall wipes the Keychain, and with it the identity. That is not a bug
-//  to route around: it means re-pairing, which is a ten-second QR scan by
-//  design.
+//  Persistence on Apple platforms. Identity key: Keychain,
+//  `WhenUnlockedThisDeviceOnly`, no biometric ACL — that belongs on the
+//  action, not the key, or reads fail while locked. Peer records hold a
+//  session PSK and are plain files in the app container instead. A reinstall
+//  wipes both, by design: re-pairing is a QR scan.
 //
 
 #if canImport(Security)
@@ -43,14 +30,9 @@ public final class KeychainStore: Store, @unchecked Sendable {
 
     /// The stored identity, or `nil` if this device has never had one.
     ///
-    /// `nil` means absent and nothing else. Every other failure throws, and the
-    /// difference is not pedantry: the item is stored
-    /// `WhenUnlockedThisDeviceOnly`, so reading it on a locked phone returns
-    /// `errSecInteractionNotAllowed` — and App Intents, Shortcuts and the widget
-    /// are all *designed* to run from the lock screen. Folding that into `nil`
-    /// told `bootstrap` this was a first run, which generated a new identity and
-    /// deleted the real one on the way in. Every paired computer became a
-    /// stranger, from tapping a widget button with the phone in a pocket.
+    /// Every other failure throws: on a locked phone this item throws
+    /// `errSecInteractionNotAllowed`, and App Intents/widgets can run from the
+    /// lock screen — folding that into `nil` would look like a first run.
     public func identityKey() throws -> Data? {
         let q: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
@@ -85,9 +67,8 @@ public final class KeychainStore: Store, @unchecked Sendable {
 
     // MARK: - peers
 
-    /// Keys are `peer/<device-id>`. A device id is strict base64url, so it holds
-    /// no `/` and no `.` and cannot climb out of the directory, but check
-    /// anyway rather than depend on that.
+    /// Keys are `peer/<device-id>`. Device ids are strict base64url so this
+    /// can't escape the directory, but check anyway rather than rely on that.
     private func url(for key: String) throws -> URL {
         let parts = key.split(separator: "/")
         guard parts.count == 2, parts[0] == "peer", !parts[1].contains(".") else {

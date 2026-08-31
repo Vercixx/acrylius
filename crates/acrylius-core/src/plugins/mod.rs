@@ -1,9 +1,5 @@
-//! The built-in plugins' protocol halves.
-//!
-//! They live inside `acrylius-core` rather than in their own crate because they
-//! need [`Plugin`](crate::plugin::Plugin) and [`Cx`](crate::plugin::Cx), which
-//! live here. A separate crate would buy a dependency cycle and nothing else.
-//! Moving them out later is a `git mv`, not a wire change.
+//! The built-in plugins' protocol halves. In `acrylius-core` because they need
+//! [`Plugin`](crate::plugin::Plugin) and [`Cx`](crate::plugin::Cx).
 
 pub mod clipboard;
 pub mod command;

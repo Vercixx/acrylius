@@ -8,14 +8,9 @@ import UIKit
 /// What this phone is and what it can do — the screen equivalent of
 /// `acryliusctl status`.
 ///
-/// Capabilities are listed in both directions because they are not the same
-/// thing. A phone advertises every capability it knows about, but it can only
-/// *serve* the few its hardware supports; the rest it can only ask a computer
-/// for. Showing one list would suggest a symmetry that is not there.
-///
-/// Everything diagnostic moved behind the Debug row. Half of this screen used
-/// to be identifiers and entitlement introspection — useful perhaps twice in
-/// the life of an install, and in the way every other time.
+/// Capabilities are shown per direction because they aren't symmetric: a
+/// phone advertises every capability it knows, but can only serve the few
+/// its hardware supports.
 struct StatusView: View {
     @Environment(AppModel.self) private var model
 
@@ -53,10 +48,6 @@ struct StatusView: View {
                 } header: {
                     Text("This build")
                 } footer: {
-                    // On the front of Status rather than behind Debug, because
-                    // the question it answers is asked *before* deciding
-                    // whether something is broken, and an answer two taps away
-                    // is one people reinstall instead of going to find.
                     Text(
                         BuildInfo.current.commit == nil
                             ? "Built outside CI, so there is no commit to name."
@@ -67,9 +58,6 @@ struct StatusView: View {
                 Section {
                     NavigationLink("Debug") { DebugView() }
                 } footer: {
-                    // Named plainly, because the one thing here a person may
-                    // genuinely need is the fingerprint, and it is now two taps
-                    // away rather than one.
                     Text("Identifiers, the fingerprint, and what Bluetooth is doing.")
                 }
             }
@@ -84,10 +72,8 @@ struct StatusView: View {
     }
 
     private var capabilities: [Capability] {
-        // Which of these the phone can act on comes from the core, which
-        // already knows: it holds the plugin manifests and the effects this
-        // host declared. Repeating the list here would be a second copy to
-        // keep in step, and the project exists to avoid those.
+        // Sourced from the core, which holds the plugin manifests and declared
+        // effects, rather than duplicated here.
         let served = Set(model.capsServed)
         return Set(model.capsIn).union(model.capsOut).sorted().map { name in
             Capability(

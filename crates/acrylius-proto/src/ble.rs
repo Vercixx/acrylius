@@ -1,20 +1,4 @@
-//! Fragmentation for a BLE link: a header byte, and nothing else.
-//!
-//! A GATT characteristic carries an ATT payload of a couple of hundred bytes,
-//! and section 5 says a transport delivers whole messages. Something has to cut
-//! a message up and put it back together, and that something is here rather than
-//! in a transport for the same reason the bulk sealing is
-//! (see [`crate::bulk`]): there are two transports. The daemon moves fragments
-//! over zbus to BlueZ; a phone moves them over CoreBluetooth. If each carried
-//! its own idea of where a message ends there would be two implementations of
-//! the wire format, which is the single thing this project exists to avoid.
-//!
-//! So the format lives here as plain buffer transforms — no socket, no runtime,
-//! no async — and each transport only decides how bytes reach the wire.
-//!
-//! ## The header
-//!
-//! One byte in front of every fragment:
+//! BLE fragmentation, shared by both transports: one header byte per fragment.
 //!
 //! ```text
 //! bit 0  MORE    more fragments belong to this message
@@ -22,39 +6,24 @@
 //! 2..7           reserved, must be zero
 //! ```
 //!
-//! So a message that fits one fragment is `0x02`, and a message in three is
-//! `0x03`, `0x01`, `0x00`.
-//!
-//! `START` is redundant on a link that never loses or reorders, which is what
-//! `LinkAttrs::reliable && ordered` promises. It is here anyway because it costs
-//! no bytes and turns two silent failures — a continuation arriving with no
-//! message open, and a new message beginning while one is still unfinished —
-//! into errors that name themselves.
+//! `START` is redundant on a reliable ordered link; it is kept to turn desyncs
+//! into errors instead of silent corruption.
 
 use alloc::vec::Vec;
 
-/// More fragments belong to this message.
 pub const MORE: u8 = 0x01;
-/// This fragment begins a message.
 pub const START: u8 = 0x02;
-/// Bits nothing may set yet. A peer that sets one is speaking a dialect we do
-/// not have, and guessing at it is worse than saying so.
 const RESERVED: u8 = !(MORE | START);
 
-/// Every fragment carries this much header.
 pub const HEADER: usize = 1;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum BleError {
-    /// A fragment with no header byte at all.
     Empty,
-    /// A reserved header bit was set.
     Reserved,
-    /// A continuation arrived with no message open, or a message began while
-    /// one was still unfinished.
+    /// A continuation with no message open, or a start while one was unfinished.
     Desync,
-    /// Reassembling would exceed the link's `max_message`. Reported before the
-    /// bytes are kept, so a peer cannot make us hold what it never has to send.
+    /// Reassembly would exceed `max_message`; reported before the bytes are kept.
     TooLarge,
 }
 
@@ -70,16 +39,10 @@ impl core::fmt::Display for BleError {
     }
 }
 
-/// Cut a whole message into fragments of at most `fragment` bytes each,
-/// **header included**.
+/// Cut a message into fragments of at most `fragment` bytes each, header included.
 ///
-/// `fragment` is what the link can carry in one write or one notification — on
-/// BlueZ that is the `mtu` the daemon is handed rather than a number anyone
-/// guessed. A `fragment` of 1 leaves no room for payload and would never
-/// terminate, so it is treated as 2.
-///
-/// An empty message is one fragment carrying only a header, not zero fragments:
-/// a message that exists and says nothing still has to arrive.
+/// A `fragment` of 1 has no room for payload and is treated as 2. An empty
+/// message is one header-only fragment, not zero fragments.
 #[must_use]
 pub fn fragment(msg: &[u8], fragment: usize) -> Vec<Vec<u8>> {
     let payload = fragment.saturating_sub(HEADER).max(1);
@@ -103,10 +66,8 @@ pub fn fragment(msg: &[u8], fragment: usize) -> Vec<Vec<u8>> {
     out
 }
 
-/// Puts fragments back together.
-///
-/// Owned by one link and dropped with it, so a connection that dies mid-message
-/// cannot leak half of one into the next.
+/// Puts fragments back together. Owned by one link and dropped with it, so a
+/// connection that dies mid-message cannot leak half of one into the next.
 pub struct Reassembler {
     buf: Vec<u8>,
     max: usize,
@@ -127,9 +88,7 @@ impl Reassembler {
     ///
     /// # Errors
     ///
-    /// See [`BleError`]. Any error leaves the reassembler closed: the stream is
-    /// no longer trustworthy, and the caller's job is to drop the link rather
-    /// than to carry on and hope.
+    /// See [`BleError`]. Any error leaves the reassembler closed; drop the link.
     pub fn push(&mut self, frag: &[u8]) -> Result<Option<Vec<u8>>, BleError> {
         let Some((&header, body)) = frag.split_first() else {
             self.fail();
@@ -141,13 +100,9 @@ impl Reassembler {
         }
         let starts = header & START != 0;
         if starts == self.open {
-            // Either a message began while one was unfinished, or a
-            // continuation arrived with nothing to continue.
             self.fail();
             return Err(BleError::Desync);
         }
-        // Checked before the bytes are kept, which is the same rule the TCP
-        // transport follows for its length prefix.
         if self.buf.len().saturating_add(body.len()) > self.max {
             self.fail();
             return Err(BleError::TooLarge);
@@ -185,9 +140,7 @@ mod tests {
     #[test]
     fn a_message_survives_every_plausible_mtu() {
         let msg: Vec<u8> = (0..1000u32).map(|i| (i % 251) as u8).collect();
-        // 23 is the ATT default, 185 what iOS long negotiated, 517 the modern
-        // ceiling. The exact numbers matter less than that none of them change
-        // what arrives.
+        // 23 is the ATT default, 185 the long-time iOS value, 517 the modern ceiling.
         for mtu in [23, 27, 64, 185, 247, 517, 1024] {
             assert_eq!(round_trip(&msg, mtu), msg, "mtu {mtu}");
         }
@@ -210,8 +163,7 @@ mod tests {
         // 4 bytes per fragment, one of them header: 3 bytes of payload each.
         let headers = |msg: &[u8]| -> Vec<u8> { fragment(msg, 4).iter().map(|x| x[0]).collect() };
         assert_eq!(headers(&[0u8; 10]), vec![START | MORE, MORE, MORE, 0]);
-        // A message that divides evenly must not emit a trailing empty
-        // fragment just to carry the closing header.
+        // An evenly dividing message must not emit a trailing empty fragment.
         assert_eq!(headers(&[0u8; 9]), vec![START | MORE, MORE, 0]);
     }
 
@@ -237,11 +189,7 @@ mod tests {
 
     #[test]
     fn a_message_of_exactly_the_size_allowed_is_kept() {
-        // The boundary the `>` guards, and which nothing pinned: a `>=` here
-        // refuses a message of exactly `max_message`, which the other end is
-        // entitled to send. The core's own check is `len > max_message`, so the
-        // two would disagree by one byte and the link would be dropped for a
-        // message that was never too big.
+        // `>=` would refuse exactly `max_message`, which the core's own check allows.
         let mut r = Reassembler::new(4);
         assert_eq!(r.push(&[START | MORE, 1, 2]), Ok(None));
         assert_eq!(r.push(&[0, 3, 4]), Ok(Some(vec![1, 2, 3, 4])));

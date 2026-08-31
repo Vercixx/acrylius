@@ -3,11 +3,7 @@
 import AppIntents
 import Foundation
 
-/// A paired computer, as a shortcut can refer to it.
-///
-/// Backed by a query so a shortcut reads "Lock Desktop" rather than asking the
-/// user to paste a device id, and so it defaults sensibly when only one computer
-/// is paired.
+/// A paired computer, as a shortcut refers to it.
 struct PCEntity: AppEntity {
     let id: String
     let name: String
@@ -26,22 +22,15 @@ struct PCQuery: EntityQuery {
         try await suggestedEntities().filter { identifiers.contains($0.id) }
     }
 
-    /// Read the peer list without standing up a session.
-    ///
-    /// An intent runs in a short-lived process, and listing what is paired needs
-    /// no network at all: the records are already on disk.
-    ///
-    /// The snapshot is tried first, and not only because it is cheaper. A widget
-    /// runs in a process with no Keychain access and no identity, so building a
-    /// core there is not merely wasteful — it returns nothing at all.
+    /// List paired peers from disk. Snapshot first: the widget process has no
+    /// Keychain access, so building a core there returns nothing.
     func suggestedEntities() async throws -> [PCEntity] {
         if let snapshot = SnapshotStore.load(), !snapshot.peers.isEmpty {
             return snapshot.peers.map { PCEntity(id: $0.deviceId, name: $0.name) }
         }
         let store = try KeychainStore()
-        // A locked phone throws here rather than answering "no identity", and
-        // suggesting no computers is the right answer to that — inventing one
-        // is not. See `KeychainStore.identityKey`.
+        // A locked phone throws here; suggesting no computers is the right
+        // answer to that. See `KeychainStore.identityKey`.
         guard let key = try store.identityKey() else { return [] }
         let core = try AcryliusCore(
             config: defaultConfig(name: "Acrylius", platform: "ios"),

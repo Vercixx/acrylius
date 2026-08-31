@@ -1,32 +1,17 @@
 #!/usr/bin/env bash
 #
-# M3 acceptance: pairing by tapping, confirmed by six digits.
-#
-# The admission policy is the whole of this milestone's security, so most of
-# what follows is about what a device *refuses*. Pairing runs plain `XX` with no
-# pre-shared key — anybody who can reach a daemon can complete a handshake with
-# it — and what keeps that from being a way in is the six digits a person
-# compares plus the rules in PROTOCOL.md § 8. Those rules are testable from a
-# shell, and every one of them is checked here.
-#
-# Self-skipping like the M2 run: it reports what this machine has rather than
-# failing on what it does not. The half that needs a phone is a checklist,
-# because no script can tap a row on somebody's iPhone.
-#
-# State lives under /tmp because a Unix socket path has a hard ~108 byte limit.
+# M3 acceptance: tap-to-pair with six-digit confirmation; mostly checks the admission rules in PROTOCOL.md § 8.
+# Self-skipping (the phone half is a checklist). State under /tmp: Unix socket paths cap at ~108 bytes.
 set -u
 D=/tmp/acr-m3; BIN="$PWD/target/debug"
 
-# Not the default port: a developer running this has an installed daemon on
-# 1971, and the failure a conflict causes — one instance quietly refusing to
-# bind, then a pairing that never completes — looks nothing like a port clash.
+# Not the default port: an installed daemon holds 1971.
 PORT_A=19713
 PORT_B=19723
 PORT_C=19733
 
-# Matches this run's state directory, never the binary name: a pattern naming
-# the binary also matches the shell running this script, which then kills
-# itself and takes the installed daemon with it.
+# Matches the state directory, not the binary name: a binary pattern also
+# matches this shell itself.
 mine() { pgrep -f "acryliusd --state $D/" 2>/dev/null; }
 cleanup() { mine | xargs -r kill 2>/dev/null || true; }
 trap cleanup EXIT
@@ -35,10 +20,7 @@ fail=0
 check() { if [ "$1" = 0 ]; then echo "  ok   $2"; else echo "  FAIL $2"; fail=1; fi; }
 skip() { echo "  skip $1"; }
 
-# Built here rather than assumed, because nothing else in this script would
-# notice it was stale. A run against a binary from an earlier day reported a
-# failure that had been fixed hours before, and would just as happily report a
-# pass for a fix that is not in it.
+# Build here: nothing else in this script would notice a stale binary.
 if ! cargo build --quiet; then
   echo "  FAIL the workspace does not build; nothing to accept"
   exit 1
@@ -47,13 +29,10 @@ fi
 cleanup
 for i in $(seq 1 50); do mine >/dev/null || break; sleep 0.1; done
 rm -rf $D; mkdir -p $D/a $D/b $D/c
-# `acryliusd` at info, because the journal is the only place a pairing shows up
-# on a machine with no notification daemon, and that is checked below. The noisy
-# ones stay at warn; all of it goes to files either way.
+# acryliusd at info: the log is where a pairing shows up with no notification
+# daemon, and that is checked below.
 export RUST_LOG=acryliusd=info,acrylius_rt=warn,acrylius_linux=warn
-# Every daemon log here goes to a file, where colour is escape codes sitting
-# between a field name and its value — which greps below could not match, and a
-# person reading the file to find out why cannot either.
+# Colour escape codes in the log files would break the greps below.
 export NO_COLOR=1
 
 for who in a b c; do
@@ -78,19 +57,15 @@ for who in a b c; do
   ready $D/$who || { echo "$who never came up"; cat $D/$who.log; exit 1; }
 done
 
-# One pairing attempt from `$1` aimed at `$2`, left running in the background
-# with its output in a file. Nothing is armed first and nothing is typed: that
-# is the entire point of the milestone.
+# One background pairing attempt from $1 aimed at port $2.
 ask() {
   "$BIN/acryliusctl" --state $D/$1 pair with 127.0.0.1:$2 > $D/$1.pair 2>&1 &
 }
 # The six digits a side is showing, or empty.
 digits() { grep -o 'It should be showing:  *[0-9 ]*' $D/$1.pair 2>/dev/null | head -1; }
 
-# Wait up to ~5s for a side to show digits. Polled rather than slept: a fixed
-# wait is either too short on a loaded machine — which is how this script first
-# reported a pairing failure that was really a slow handshake — or wasted time
-# on an idle one.
+# Wait up to ~5s for a side to show digits; polled, since a fixed wait is too
+# short on a loaded machine.
 wait_digits() {
   for _ in $(seq 1 50); do
     [ -n "$(digits $1)" ] && return 0
@@ -99,8 +74,7 @@ wait_digits() {
   return 1
 }
 
-# And the other direction: give a refusal long enough to have arrived, so that
-# "no digits" means refused rather than not yet answered.
+# Give a refusal long enough to arrive, so "no digits" means refused.
 settle() { sleep 1.5; }
 
 echo "### nothing has to be opened first"
@@ -115,10 +89,8 @@ SAS_A=$(digits a); SAS_B=$(digits b)
 
 echo
 echo "### answering a pairing nobody was watching for"
-# The case a desktop with no notification daemon lands in. Subscribing only
-# ever showed what happened *next*, so a pairing that completed before anyone
-# ran this was invisible and lapsed in silence two minutes later — you had to
-# know to start `acryliusctl pair` before touching the phone.
+# The case a desktop with no notification daemon lands in: a pairing that
+# completed before anyone subscribed must still be visible.
 grep -q "a device asked to pair" $D/b.log
 check $? "the daemon says so in its log, digits included, with no UI at all"
 grep -q "sas=" $D/b.log
@@ -152,7 +124,7 @@ sleep 1
 
 echo
 echo "### refusing the digits"
-# A fresh pair, so the cooldown from anything above cannot be what is measured.
+# A fresh pair, so a cooldown from anything above cannot be what is measured.
 rm -f $D/c.pair $D/a.pair
 "$BIN/acryliusctl" --state $D/c pair > $D/c.pair 2>&1 &
 sleep 0.5
@@ -163,9 +135,8 @@ wait_digits c
 sleep 0.5
 [ "$("$BIN/acryliusctl" --state $D/c device list | grep -c .)" -le 1 ]; check $? "saying they differ stored nothing"
 
-# The long cooldown. A mismatch is the one sign of a relayed handshake, so the
-# next attempt has to cost more than one that merely lapsed — otherwise the
-# one-in-a-million bound on the digits can simply be retried.
+# A mismatch is the one sign of a relayed handshake: the next attempt must
+# cost more than one that merely lapsed, or the digit bound can be retried.
 rm -f $D/a.pair
 "$BIN/acryliusctl" --state $D/a pair with 127.0.0.1:$PORT_C > $D/a.pair 2>&1 &
 settle
@@ -173,17 +144,8 @@ settle
 
 echo
 echo "### finding something to pair with"
-# The other half of `pair with`, which takes an address and until now had
-# nothing anywhere that would tell you one.
-#
-# Polled, and skipped rather than failed when nothing at all turns up: this
-# needs mDNS to actually work on the machine running the script, which is not
-# something the script can arrange. A list that has *something* in it and not
-# the machine we want is a real failure and is still reported as one.
-# Matched on the port, not on `127.0.0.1:port`. Discovery advertises the
-# address the machine is actually reachable at, which on a machine with a real
-# network card is its LAN address — the loopback address is what this script
-# *dials*, not what mDNS hands back.
+# Skipped, not failed, when mDNS finds nothing: that isn't something the script controls.
+# Matched on port alone: discovery advertises the LAN address, not the loopback this script dials.
 for _ in $(seq 1 60); do
   "$BIN/acryliusctl" --state $D/a device nearby | grep -q ":$PORT_C " && break
   sleep 0.25

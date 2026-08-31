@@ -1,12 +1,6 @@
 //! What travels over the control socket.
 //!
-//! One definition, used by the daemon that answers and the CLI that asks. These
-//! were two hand-maintained copies in the same crate — `control.rs` and
-//! `bin/acryliusctl.rs` — which agreed only because nobody had changed one yet.
-//!
-//! Newline-delimited JSON. Not because the format matters, but because the
-//! socket is `0600` with a uid check and the only thing on the far end is a
-//! program shipped in this binary.
+//! Newline-delimited JSON, over a `0600` Unix socket with a uid check.
 
 use serde::{Deserialize, Serialize};
 
@@ -14,12 +8,8 @@ use serde::{Deserialize, Serialize};
 #[serde(tag = "cmd", rename_all = "kebab-case")]
 pub enum Request {
     Status,
-    /// Wait for a device to ask to pair, and answer it from here.
-    ///
-    /// Arms nothing: any device may start a pairing handshake. This is the
-    /// terminal's way of seeing the six digits and pressing a button, for a
-    /// machine with no notification daemon or somebody on the end of an SSH
-    /// connection.
+    /// Wait for a device to ask to pair, and answer it from here. Arms
+    /// nothing: any device may start a pairing handshake.
     Pair,
     Approve,
     Deny,
@@ -117,9 +107,7 @@ pub struct Confirmation {
 
 /// A machine on this network that this one is not paired with.
 ///
-/// No device id: that is derived from a static key, and nothing has exchanged
-/// keys with this machine yet. A fingerprint is what an advertisement carries
-/// and all there is to tell two rows apart by.
+/// No device id: that's derived from a key exchange, which hasn't happened yet.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct Nearby {
@@ -137,10 +125,9 @@ pub struct Nearby {
 pub enum Response {
     Ok,
     Status(Status),
-    /// A struct variant, not `Devices(Vec<Device>)`. serde's internally-tagged
-    /// representation cannot encode a newtype variant wrapping a sequence, and
-    /// it fails at serialisation time, so the wrapper form compiled fine and
-    /// silently closed the connection with no reply.
+    /// A struct variant, not `Devices(Vec<Device>)`: serde's internally-tagged
+    /// enums can't encode a newtype wrapping a sequence and fail silently at
+    /// serialization time.
     Devices {
         devices: Vec<Device>,
     },
@@ -155,10 +142,8 @@ pub enum Response {
     Report {
         report: Report,
     },
-    /// A device is waiting on a human. Sent instead of `Event` for the short
-    /// authentication string, because it is the one event that needs an answer
-    /// — the client can then put up its own prompt rather than print prose and
-    /// leave the operator to work out what to run next.
+    /// A device is waiting on a human. Sent instead of `Event` since this is
+    /// the one event that needs an answer, so the client can put up its own prompt.
     Confirm {
         name: String,
         fingerprint: String,
@@ -171,14 +156,10 @@ pub enum Response {
 
 /// A peer's answer, as data.
 ///
-/// The daemon used to word every reply itself and hand the CLI a finished
-/// string, which is why there was no `--json` to add: the numbers had been
-/// decoded and thrown away one process too early.
-///
-/// These deliberately mirror the plugin bodies rather than reusing them. The
-/// wire types are `minicbor` and belong to the protocol; this is the CLI's
+/// Deliberately mirrors the plugin bodies rather than reusing them: the wire
+/// types are `minicbor` and belong to the protocol, while this is the CLI's
 /// output schema, and a script parsing it should not break because a field
-/// moved on the wire. That is a different contract, kept on purpose.
+/// moved on the wire.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "of", rename_all = "kebab-case")]
 pub enum Report {
@@ -221,8 +202,8 @@ pub enum Report {
         code: i32,
         truncated: bool,
     },
-    /// Something this version has no shape for. Kept rather than dropped: a
-    /// peer running a newer daemon should not make the CLI silent.
+    /// Something this version has no shape for; kept rather than dropped so a
+    /// newer peer doesn't go silent.
     Opaque {
         ty: String,
         bytes: usize,
@@ -252,10 +233,8 @@ pub struct Command {
 }
 
 impl Report {
-    /// The same answer, worded.
-    ///
-    /// Here rather than in the daemon so that the table and `--json` are two
-    /// renderings of one value, and cannot disagree about what a peer said.
+    /// The same answer, worded; kept here so the table and `--json` output
+    /// can't disagree about what a peer said.
     #[must_use]
     pub fn render(&self) -> String {
         match self {
@@ -299,9 +278,7 @@ impl Report {
                 ..
             } => {
                 if players.is_empty() {
-                    // The volume is still worth saying. It is a property of the
-                    // machine and it can be turned down whether or not anything
-                    // is playing through it.
+                    // Still worth reporting: it's a machine property, independent of playback.
                     return match system_volume {
                         Some(v) => format!("nothing is playing (output volume {v}%)"),
                         None => "nothing is playing".to_string(),
@@ -310,9 +287,7 @@ impl Report {
                 players
                     .iter()
                     .map(|p| {
-                        // The active one is marked, because a command with no
-                        // player named goes there and a person should be able
-                        // to see which.
+                        // Mark the active player: a command naming none targets this one.
                         let mark = if p.active { "*" } else { " " };
                         let mut line = format!("{mark} {:<12} {:<8} {}", p.id, p.status, p.title);
                         if !p.artist.is_empty() {
@@ -334,9 +309,7 @@ impl Report {
                         line
                     })
                     .chain(
-                        // Last, and separate: this is the machine's, not a
-                        // player's, and it is what a `volume` with no player
-                        // named moves.
+                        // Separate from players: this is the machine's own volume.
                         system_volume
                             .map(|v| format!("  {:<12} {:<8} output volume {v}%", "system", "")),
                     )
@@ -366,9 +339,8 @@ impl Report {
     }
 }
 
-/// The short form a person can retype, which is what an offer was listed
-/// under. Ending a transfer under its full id would name it differently from
-/// the number somebody accepted.
+/// The short id an offer was listed under, so ending a transfer under it
+/// matches the number somebody accepted.
 fn short_transfer(t: u64) -> u64 {
     acrylius_core::vocab::TransferId(t).short()
 }
@@ -430,9 +402,7 @@ mod tests {
 
     #[test]
     fn the_table_and_the_json_are_two_views_of_one_value() {
-        // The point of the split. If these ever came from different places,
-        // `--json` would be a second implementation of the answer and would
-        // drift from what the table says.
+        // Table and JSON must render identically from one value.
         let r = media();
         let round: Report = serde_json::from_str(&serde_json::to_string(&r).unwrap()).unwrap();
         assert_eq!(r.render(), round.render());
@@ -465,8 +435,6 @@ mod tests {
 
     #[test]
     fn nothing_playing_still_reports_the_machines_volume() {
-        // It is a property of the machine and can be turned down whether or not
-        // anything is playing through it.
         let r = Report::Media {
             active: String::new(),
             players: Vec::new(),
@@ -477,8 +445,6 @@ mod tests {
 
     #[test]
     fn a_transfer_is_reported_under_the_number_it_was_offered_as() {
-        // Ending it under the full id would name it differently from the
-        // number somebody typed to accept it.
         let full = 1_u64 << 63 | 7;
         let Report::Transfer { transfer, .. } = (Report::Transfer {
             transfer: full,

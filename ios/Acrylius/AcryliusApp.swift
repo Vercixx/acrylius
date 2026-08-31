@@ -10,9 +10,7 @@ struct AcryliusApp: App {
             RootView()
                 .environment(model)
                 .task { await model.start() }
-                // Here rather than on a view inside the app, because a tab
-                // that is not on screen gets no lifecycle at all — and the
-                // whole point is to run when the *process* comes back.
+                // On the root, not a tab: off-screen tabs get no lifecycle.
                 .onChange(of: scenePhase) { was, now in
                     guard now == .active, was != .active else { return }
                     Task { await model.cameToForeground() }

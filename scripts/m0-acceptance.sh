@@ -1,30 +1,17 @@
 #!/usr/bin/env bash
 #
-# M0 acceptance. Two daemons on one machine pair over real TCP, open a session,
-# ping, and survive a restart, with no Apple hardware and no second device.
-#
-# Run it from the repo root after `cargo build`.
-#
-# The state directories live under /tmp rather than somewhere deeper because a
-# Unix socket path has a hard ~108-byte limit (SUN_LEN); a deeply nested state
-# directory genuinely cannot host one. Real installs use $XDG_RUNTIME_DIR.
+# M0 acceptance: two daemons on one machine pair over TCP, ping, and survive a
+# restart. Run from the repo root after `cargo build`.
+# State lives under /tmp: a Unix socket path has a hard ~108-byte limit.
 set -u
 D=/tmp/acr; BIN="$PWD/target/debug"
 
-# Not the default port. A developer running this has an installed daemon on
-# 1971, and the failure it caused — one instance quietly refusing to bind, then
-# a pairing that never completes — looks nothing like a port conflict.
+# Not the default port: an installed daemon holds 1971.
 PORT_A=19710
 PORT_B=19720
 
-# Wait for a previous run's daemons to actually be gone. pkill returns as
-# soon as the signal is sent, and a daemon that still holds the listening
-# port, or the Wayland selection, makes the next run fail in a way that looks
-# like a flake.
-#
-# The pattern matches this run's state directory rather than the binary: a
-# pattern naming the binary also matches the shell that runs this script, which
-# then kills itself, and it would take an installed daemon with it.
+# pkill returns before the port/Wayland selection is released, so poll until the process is gone.
+# Matched by state dir, not binary name: a name pattern would also match this shell's own pgrep/pkill.
 mine() { pgrep -f "acryliusd --state $D/" 2>/dev/null; }
 cleanup() { mine | xargs -r kill 2>/dev/null || true; }
 trap cleanup EXIT
@@ -40,10 +27,7 @@ ready() { for i in $(seq 1 100); do "$BIN/acryliusctl" --state "$1" status >/dev
 ready $D/a || { echo "alpha never came up"; cat $D/a.log; exit 1; }
 ready $D/b || { echo "bravo never came up"; cat $D/b.log; exit 1; }
 
-# Built here rather than assumed, because nothing else in this script would
-# notice it was stale. A run against a binary from an earlier day reported a
-# failure that had been fixed hours before, and would just as happily report a
-# pass for a fix that is not in it.
+# Build here: nothing else in this script would notice a stale binary.
 if ! cargo build --quiet; then
   echo "  FAIL the workspace does not build; nothing to accept"
   exit 1
@@ -89,9 +73,7 @@ echo "### 5. paired devices"
 
 echo
 echo "### 6. alpha opens a session to bravo and pings"
-# Deliberately no --addr. Passing one used to hide the fact that nothing
-# recorded the address a successful pairing had just proved, so a freshly
-# paired device reported itself unreachable.
+# No --addr on purpose: pairing must have recorded the address it proved.
 "$BIN/acryliusctl" --state $D/a device connect "$B_ID"
 "$BIN/acryliusctl" --state $D/a device ping "$B_ID"
 RC=$?

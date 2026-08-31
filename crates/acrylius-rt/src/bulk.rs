@@ -1,35 +1,13 @@
-//! Moving a file over its own connection.
+//! Bulk file transfer over its own connection; file bytes never cross the core.
 //!
-//! The core hands out a key and then has nothing more to do with this. Nothing
-//! here decodes an envelope, and no byte of a file crosses the state machine:
-//! that is the point of a side channel, and it is why a hundred-megabyte
-//! transfer does not stall every other message on the link.
-//!
-//! ## What the key does
-//!
-//! Everything. The key is derived from the Noise session both ends already
-//! share, so a connection nobody else can produce ciphertext for is one only
-//! the peer could have opened. There is no handshake here and no identity of
-//! its own: an impostor that dials the port and names a transfer gets exactly
-//! as far as its first chunk.
-//!
-//! ## Framing
-//!
-//! `u32` big-endian length, then that many bytes of ciphertext, capped so a
-//! peer cannot name a length and make the other side reserve it before sending
-//! anything. Each chunk is sealed under a nonce carrying its own sequence
-//! number, so a chunk cannot be reordered, repeated or dropped without the next
-//! one failing to open. The key is fresh per transfer, which is what makes
-//! counting from zero safe.
+//! The only auth is the per-transfer key derived from the Noise session. Chunk
+//! nonces carry sequence numbers, so reorder, repeat, or drop fails to open.
 
 use std::path::{Path, PathBuf};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-// How a chunk is sealed lives with the format, not here. A phone sends these
-// same frames over a blocking socket, and two transports each carrying their
-// own idea of the wire format is the one thing this project exists to avoid.
 use acrylius_proto::bulk::{CHUNK, MAX_FRAME, hello, open, read_hello, seal};
 
 async fn write_frame(stream: &mut TcpStream, frame: &[u8]) -> anyhow::Result<()> {
@@ -62,11 +40,8 @@ pub struct Listening {
     listener: TcpListener,
 }
 
-/// Start listening for one transfer.
-///
-/// Port zero: the operating system picks, and the port travels to the peer in
-/// the accept message. A fixed port would be one more thing to configure, one
-/// more thing to collide, and one more thing to leave open.
+/// Start listening for one transfer. The OS picks the port; it travels to the
+/// peer in the accept message.
 pub async fn listen(advertise_host: &str) -> anyhow::Result<Listening> {
     let listener = TcpListener::bind(("0.0.0.0", 0)).await?;
     let port = listener.local_addr()?.port();
@@ -76,11 +51,8 @@ pub async fn listen(advertise_host: &str) -> anyhow::Result<Listening> {
     })
 }
 
-/// A connection that has arrived and said which transfer it is.
-///
-/// Separate from [`Listening`] so that waiting for a sender and reading from one
-/// are two things a caller can be in the middle of, rather than one. Nothing
-/// above here can bound the first without being able to see the difference.
+/// A connection that has arrived and said which transfer it is. Separate from
+/// [`Listening`] so waiting for a sender can be bounded on its own.
 pub struct Accepted {
     stream: TcpStream,
 }
@@ -102,11 +74,8 @@ impl Listening {
 }
 
 impl Accepted {
-    /// Write what arrives to `dest`.
-    ///
-    /// Written to a temporary beside the destination and renamed at the end, so
-    /// an interrupted transfer never leaves something that looks like a
-    /// complete file. A short transfer is a failure and the temporary goes.
+    /// Write what arrives to `dest`, via a temporary renamed at the end, so an
+    /// interrupted transfer never leaves something that looks complete.
     pub async fn receive(self, key: &[u8], expect_bytes: u64, dest: &Path) -> anyhow::Result<u64> {
         let mut stream = self.stream;
         let tmp = temp_beside(dest);
@@ -166,40 +135,25 @@ pub async fn send(transfer: u64, endpoint: &str, key: &[u8], path: &Path) -> any
         seq += 1;
         sent += n as u64;
     }
-    // A clean shutdown is what tells the far end the file is finished. Its own
-    // byte count is what tells it the file is whole.
+    // A clean shutdown is the end-of-file signal.
     stream.shutdown().await?;
     Ok(sent)
 }
 
-/// A name beside the destination, so the rename at the end stays on one
-/// filesystem and is therefore atomic.
+/// A name beside the destination, so the final rename stays on one filesystem.
 fn temp_beside(dest: &Path) -> PathBuf {
     let mut name = dest.file_name().unwrap_or_default().to_os_string();
     name.push(".part");
     dest.with_file_name(name)
 }
 
-// `safe_name` lives in `acrylius_proto::bulk` and is re-exported here, because
-// a phone receives files too and this is the rule that decides where a peer's
-// chosen name is allowed to put them. Two copies of that is exactly one too
-// many, and it is the copy that drifts which becomes the path traversal.
+// Lives in `acrylius_proto::bulk`; a drifting duplicate of this rule would be
+// a path traversal.
 pub use acrylius_proto::bulk::safe_name;
 
-/// A path in `dir` that is not already taken, **claimed** by creating it.
-///
-/// A transfer never overwrites. Two photos with the same name is a normal thing
-/// to happen and losing the first one is not.
-///
-/// Creating the file is the whole point, and replaces a version that only
-/// looked. Looking is not a claim: two transfers of the same name offered at the
-/// same time both looked before either wrote, both were told `photo.jpg` was
-/// free, and both then wrote to it and to one `photo.jpg.part` between them.
-/// One file arrived, made of both. `create_new` is the only step here that is
-/// atomic against somebody else doing the same thing.
-///
-/// The empty file left behind is the reservation. Whoever finishes renames its
-/// `.part` over it; whoever fails should remove it.
+/// A path in `dir` not already taken, claimed via `create_new` so two
+/// transfers of one name cannot race to the same file. The empty file is the
+/// reservation: the finisher renames its `.part` over it; a failure removes it.
 pub fn reserve_path(dir: &Path, name: &str) -> std::io::Result<PathBuf> {
     let claim = |candidate: &Path| {
         std::fs::OpenOptions::new()
@@ -234,9 +188,6 @@ pub fn reserve_path(dir: &Path, name: &str) -> std::io::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // The `safe_name` tests moved with it, into `acrylius_proto::bulk`. What
-    // stays here is `free_path`, which is about a filesystem and so cannot.
 
     #[tokio::test]
     async fn a_file_goes_across_and_arrives_whole() {
@@ -296,8 +247,6 @@ mod tests {
 
     #[tokio::test]
     async fn a_truncated_transfer_is_a_failure_not_a_short_file() {
-        // The receiver's own byte count is what makes a half-arrived file a
-        // failure rather than something that looks complete.
         let dir = std::env::temp_dir().join(format!("acr-bulk-short-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let src = dir.join("src.bin");
@@ -337,16 +286,13 @@ mod tests {
 
     #[test]
     fn two_transfers_of_one_name_do_not_share_a_destination() {
-        // The reservation, which is the point of creating the file rather than
-        // looking at it. Both of these are decided before either writes a byte —
-        // which is exactly the order two offers accepted together arrive in.
+        // Both paths are decided before either transfer writes a byte.
         let dir = std::env::temp_dir().join(format!("acr-claim-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::create_dir_all(&dir);
         let a = reserve_path(&dir, "photo.jpg").unwrap();
         let b = reserve_path(&dir, "photo.jpg").unwrap();
         assert_ne!(a, b, "one file made of two transfers is the bug");
-        // And so do their temporaries, which is the other half of it.
         assert_ne!(a.with_extension("jpg.part"), b.with_extension("jpg.part"));
         let _ = std::fs::remove_dir_all(&dir);
     }

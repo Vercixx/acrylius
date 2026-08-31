@@ -1,20 +1,7 @@
-//! The control socket.
-//!
-//! This is where "you must be at the machine" lives, and it is deliberately a
-//! property of the transport rather than a rule a handler could forget. The
-//! socket is `0600` inside `$XDG_RUNTIME_DIR`, and every connection's peer
-//! credentials are checked against our own uid before a single byte is read.
-//!
-//! Pairing used to have no network route at all — not a protected one, none —
-//! and that was the single best structural idea carried over from
-//! `pc-helper-ios`. M3 gave up half of it deliberately: a phone can now start a
-//! pairing handshake, because requiring a code off this machine's screen is
-//! exactly what stops somebody pairing by tapping.
-//!
-//! The half worth keeping is here. **Approving** a pairing has no network route.
-//! A handshake from a stranger costs a notification and nothing else; only
-//! `Approve` writes a peer to the trust store, and it arrives only through this
-//! socket, so a future plugin still cannot expose it.
+//! The control socket: `0600` in `$XDG_RUNTIME_DIR`, peer credentials checked
+//! against our own uid before a byte is read. Approving a pairing has no
+//! network route — only `Approve` writes to the trust store, and it arrives
+//! only through this socket.
 
 use std::path::{Path, PathBuf};
 
@@ -24,7 +11,6 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, mpsc};
 
-// One definition, shared with the CLI. See `crate::ipc`.
 pub use acryliusd::ipc::{
     Command, Confirmation, Device, Nearby, Player, Report, Request, Response, Status,
 };
@@ -38,21 +24,15 @@ pub struct ControlSocket {
 
 impl Drop for ControlSocket {
     fn drop(&mut self) {
-        // Carried over from a real bug in the old project: an unconditional
-        // unlink meant a second instance that failed to start would delete the
-        // *live* instance's socket on its way out.
+        // A second instance that failed to start must not delete the live one's socket.
         if self.bound {
             let _ = std::fs::remove_file(&self.path);
         }
     }
 }
 
-/// Where the control socket lives.
-///
-/// When a state directory is named explicitly, the socket goes beside it, which
-/// is what lets two daemons run on one machine without fighting over a single
-/// path in `$XDG_RUNTIME_DIR`. That is not just a test affordance: it is
-/// also how you would run a second instance for a second user session.
+/// An explicitly named state directory keeps its socket beside it, so two
+/// daemons can run on one machine.
 #[must_use]
 pub fn socket_path(state: &Path, explicit_state: bool) -> PathBuf {
     if explicit_state {
@@ -77,13 +57,8 @@ enum Verdict {
     Ignore,
 }
 
-/// Decide what an event means for a request aimed at `id`.
-///
-/// A function rather than match guards inside the wait loop, because the guards
-/// were the fix for the correlation bug and nothing could reach them to test
-/// them — mutation testing flipped every one of `p == id`, `c == cap` and the
-/// `&&` between them with no test objecting. The bug they fix would have come
-/// straight back.
+/// Decide what an event means for a request aimed at `id`. A function rather
+/// than match guards inside the wait loop, so the filter is testable.
 fn verdict(e: UiEvent, id: &DeviceId, cap: &str, expect: &[&str]) -> Verdict {
     match e {
         UiEvent::Plugin {
@@ -98,14 +73,8 @@ fn verdict(e: UiEvent, id: &DeviceId, cap: &str, expect: &[&str]) -> Verdict {
                 Verdict::Ignore
             }
         }
-        // A request the core refused before it left this machine — a value out
-        // of range, a capability not negotiated. Nothing will ever come back
-        // from the peer, so waiting for one turns an immediate, well-explained
-        // refusal into a fifteen-second timeout reported as if the peer were at
-        // fault.
-        //
-        // An error with no peer is about the machine rather than about a
-        // conversation, and is not this request's answer.
+        // A refusal from our own core: nothing will come back from the peer, so
+        // don't wait. An error with no peer is about the machine, not this request.
         UiEvent::Error { peer, code, detail } => {
             if peer.as_ref() == Some(id) {
                 Verdict::Refused(format!("{detail} ({})", code.as_str()))
@@ -124,12 +93,8 @@ fn verdict(e: UiEvent, id: &DeviceId, cap: &str, expect: &[&str]) -> Verdict {
     }
 }
 
-/// Whether an event is about a particular peer.
-///
-/// The control socket subscribes to one broadcast carrying every device's
-/// events, so anything that waits for an answer has to say which conversation
-/// it is waiting on. Events with no peer — a pairing window opening, a
-/// machine-level error — are about the machine and answer nobody's request.
+/// Whether an event is about a particular peer. Events with no peer are about
+/// the machine and answer nobody's request.
 fn about(e: &UiEvent, who: &DeviceId) -> bool {
     match e {
         UiEvent::PeerReachable { peer, .. }
@@ -137,8 +102,7 @@ fn about(e: &UiEvent, who: &DeviceId) -> bool {
         | UiEvent::Plugin { peer, .. }
         | UiEvent::PairingComplete { peer, .. } => peer == who,
         UiEvent::Error { peer, .. } => peer.as_ref() == Some(who),
-        // Nobody's request. A sighting is news about a stranger, and the
-        // control socket's waits are all about a device already paired.
+        // News about strangers; the waits here are all about paired devices.
         UiEvent::Discovered { .. }
         | UiEvent::Undiscovered { .. }
         | UiEvent::Revoked { .. }
@@ -303,16 +267,11 @@ async fn handle_conn(stream: UnixStream, h: Handles) -> anyhow::Result<()> {
                 write(&mut wr, &Response::Nearby { nearby: n }).await?;
             }
             // Nothing to arm: any device may start a pairing handshake, so this
-            // only subscribes and waits for one. It is what answers a pairing
-            // over SSH, where there is no notification daemon to press.
+            // only subscribes and waits for one.
             Request::Pair => {
                 let mut rx = h.ui.subscribe();
-                // Anything already waiting, before anything new. Subscribing
-                // only ever showed what happened *next*, so a pairing that
-                // completed a moment ago — while no notification daemon was
-                // running, or before anyone thought to run this — was
-                // invisible, and answering it meant knowing to start this
-                // first. It then lapsed in silence two minutes later.
+                // Replay a pairing already waiting; subscribing alone only
+                // shows what happens next.
                 if let Some(p) = h.pending_pair.lock().await.clone() {
                     write(
                         &mut wr,
@@ -372,10 +331,7 @@ async fn handle_conn(stream: UnixStream, h: Handles) -> anyhow::Result<()> {
                     }
                     h.events
                         .send(Event::Local(LocalCommand::Connect { peer: id.clone() }))?;
-                    // The first event *about this peer*, not the first event at
-                    // all. Taking whatever arrived meant a media push from
-                    // another machine, two seconds after asking, was reported
-                    // as the outcome of connecting.
+                    // The first event about this peer, not the first event at all.
                     let waited = tokio::time::timeout(std::time::Duration::from_secs(10), async {
                         loop {
                             match rx.recv().await {
@@ -491,11 +447,8 @@ async fn handle_conn(stream: UnixStream, h: Handles) -> anyhow::Result<()> {
                     continue;
                 };
                 let path = std::path::PathBuf::from(&path);
-                // Refused, not resolved. This process's working directory is
-                // `/` under systemd and has nothing to do with where the person
-                // asking was standing, so quietly resolving against it reports
-                // that a file they are looking at does not exist. Clients make
-                // paths absolute themselves; `acryliusctl` does.
+                // Refused, not resolved: the daemon's working directory is `/`
+                // under systemd. Clients make paths absolute themselves.
                 if !path.is_absolute() {
                     write(
                         &mut wr,
@@ -536,8 +489,8 @@ async fn handle_conn(stream: UnixStream, h: Handles) -> anyhow::Result<()> {
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_else(|| "file".to_string());
-                // The path stops here. What crosses the session is a name, a
-                // size and an id, so a peer never learns where anything lives.
+                // The path stops here: a peer sees a name, a size and an id,
+                // never where anything lives.
                 let offer = bulk.offer(path, meta.len(), name, String::new());
                 let body = minicbor::to_vec(&offer).unwrap_or_default();
                 plugin_request(
@@ -590,10 +543,7 @@ async fn handle_conn(stream: UnixStream, h: Handles) -> anyhow::Result<()> {
                     .await?;
                     continue;
                 };
-                // What a person typed is what they were shown, which is the id
-                // without the half-of-the-range marker on it. Resolved back to
-                // the real one here, once, so nothing below this deals in two
-                // spellings of the same transfer.
+                // Resolve the short id a person was shown back to the real one, once.
                 let Some(transfer) = bulk
                     .resolve(transfer)
                     .filter(|t| bulk.peer_for(*t).is_some())
@@ -616,8 +566,7 @@ async fn handle_conn(stream: UnixStream, h: Handles) -> anyhow::Result<()> {
                 .unwrap_or_default();
                 let expect: &[&str] = if accept { &["finished", "err"] } else { &[] };
                 if !accept {
-                    // An accepted offer is dropped when the bytes stop moving.
-                    // A refused one has no later moment, so it goes here.
+                    // A refused offer has no later moment to be dropped.
                     bulk.forget(transfer);
                 }
                 plugin_request(
@@ -636,8 +585,7 @@ async fn handle_conn(stream: UnixStream, h: Handles) -> anyhow::Result<()> {
             }
 
             Request::Commands { device } => {
-                // The catalog arrives unprompted when a peer connects, so this
-                // reads what was already cached rather than asking again.
+                // The catalog arrives unprompted when a peer connects; this reads the cache.
                 plugin_request(
                     &mut wr,
                     &h,
@@ -696,11 +644,7 @@ async fn handle_conn(stream: UnixStream, h: Handles) -> anyhow::Result<()> {
                         body: b"acryliusctl".to_vec(),
                     }))?;
                     let deadline = std::time::Duration::from_secs(5);
-                    // By peer, like `plugin_request`. A pong is the one reply
-                    // where taking somebody else's would be perfectly
-                    // convincing: every pong is identical, so pinging a device
-                    // that was not answering succeeded whenever any other one
-                    // was.
+                    // Filtered by peer: every pong is identical, so anybody's would convince.
                     let got = tokio::time::timeout(deadline, async {
                         loop {
                             match rx.recv().await {
@@ -754,18 +698,10 @@ async fn handle_conn(stream: UnixStream, h: Handles) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Send a plugin verb to a peer and report what comes back.
-///
-/// `expect` names the reply verbs worth waiting for. An empty list means the
-/// verb is fire-and-forget, which is the case for pushing a clipboard value: it
-/// is a broadcast to every peer, and there is nothing to answer it.
-///
 /// How long a machine gets to answer a machine.
 const MACHINE: std::time::Duration = std::time::Duration::from_secs(15);
-/// How long a file transfer gets. It waits on two things a clock cannot bound:
-/// a person noticing the offer, and however long the bytes take. Giving up here
-/// does not stop the transfer, it only stops reporting on it, so the generous
-/// figure costs nothing and the short one lies.
+/// How long a file transfer gets: a person noticing the offer plus however
+/// long the bytes take. Giving up only stops the reporting, not the transfer.
 const PATIENT: std::time::Duration = std::time::Duration::from_secs(3600);
 
 /// What came back: the peer's reply, or a refusal from our own core.
@@ -779,10 +715,8 @@ struct Ask<'a> {
     cap: &'a str,
     ty: &'a str,
     body: Vec<u8>,
-    /// The reply verbs worth waiting for.
+    /// The reply verbs worth waiting for; empty means fire-and-forget.
     expect: &'a [&'a str],
-    /// How long the reply is worth waiting for. A lock either happens or does
-    /// not, in seconds. A file offer waits on a person noticing it.
     patience: std::time::Duration,
 }
 
@@ -822,16 +756,8 @@ async fn plugin_request(
         return write(wr, &Response::Ok).await;
     }
 
-    // Every arm below is filtered by peer, and that is the whole point of it.
-    //
-    // This used to match on `(cap, ty)` alone against a *global* event
-    // broadcast, so with two devices connected the answer to a question about
-    // one could be somebody else's unsolicited push. That is not theoretical:
-    // the media plugin broadcasts state every two seconds, so `media A query`
-    // was routinely answered with B's now-playing. The same held for the
-    // failure paths — any peer going unreachable ended a request aimed at a
-    // different one, and any core-level error anywhere became this request's
-    // refusal, for as long as an hour on a `share`.
+    // Filtered by peer: the event broadcast is global, so another device's
+    // unsolicited push must not answer this request.
     let waited = tokio::time::timeout(patience, async {
         loop {
             let Ok(e) = rx.recv().await else { return None };
@@ -877,15 +803,8 @@ async fn plugin_request(
     }
 }
 
-/// Render a reply body for a human.
-///
-/// The core keeps bodies opaque, which is the right call for routing and the
-/// wrong one for a terminal, so decoding happens here at the edge.
-/// Decode a peer's answer into data. Wording it is the CLI's job.
-///
-/// This used to return a finished `String`, which is exactly why there was no
-/// `--json` to add: the numbers were decoded here and thrown away one process
-/// before anything could have used them.
+/// Decode a reply body into data at the edge; the core keeps bodies opaque,
+/// and wording is the CLI's job.
 fn report(cap: &str, ty: &str, body: &[u8]) -> Report {
     use acrylius_core::plugins::{clipboard, command, media, session};
     use acrylius_core::proto::envelope::ErrorBody;
@@ -935,9 +854,7 @@ fn report(cap: &str, ty: &str, body: &[u8]) -> Report {
             };
         }
         if let Ok(f) = minicbor::decode::<Finished>(body) {
-            // The same number the offer was listed under. Reporting the stored
-            // one instead would end a transfer under a different name from the
-            // one it was accepted by.
+            // The same number the offer was listed under.
             return Report::Transfer {
                 transfer: f.transfer,
                 ok: f.ok,
@@ -962,9 +879,6 @@ fn report(cap: &str, ty: &str, body: &[u8]) -> Report {
                     length_ms: p.length_ms,
                     volume_percent: p.volume_percent,
                     can_control: p.can_control,
-                    // Resolved here, where `active` is in hand, so nothing
-                    // downstream has to re-derive which player a command with
-                    // no player named would reach.
                     active: p.id == s.active,
                 })
                 .collect(),
@@ -997,10 +911,8 @@ fn report(cap: &str, ty: &str, body: &[u8]) -> Report {
     }
 }
 
-/// Relay pairing events until the window resolves one way or the other.
-///
-/// The short authentication string goes out as `Confirm` rather than as prose,
-/// because it is the one event that needs an answer.
+/// Relay pairing events until the window resolves. The SAS goes out as
+/// `Confirm` rather than prose because it is the one event that needs an answer.
 async fn stream_pairing(
     wr: &mut tokio::net::unix::OwnedWriteHalf,
     rx: &mut broadcast::Receiver<UiEvent>,
@@ -1058,18 +970,13 @@ fn human(bytes: u64) -> String {
     }
 }
 
-// `clock` moved to `ipc`, beside the rendering that is now its only caller.
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use acrylius_core::proto::envelope::ErrorCode;
 
-    /// A device id built the only way one can be from outside: parsed.
-    ///
-    /// 22 base64url characters carry 16 bytes, so the last one holds just two
-    /// significant bits and anything but `A`, `Q`, `g` or `w` there is refused
-    /// as non-canonical. The variation therefore goes at the front.
+    /// 22 base64url chars carry 16 bytes, so the last char is constrained to
+    /// `A`, `Q`, `g` or `w`; the variation goes at the front.
     fn who(first: char) -> DeviceId {
         let s: String = std::iter::once(first)
             .chain(std::iter::repeat_n('A', DeviceId::CHARS - 1))
@@ -1079,9 +986,6 @@ mod tests {
 
     #[test]
     fn a_reply_from_another_peer_is_not_this_requests_answer() {
-        // The bug this whole change exists for. The media plugin broadcasts
-        // state every two seconds, so with two devices connected the answer to
-        // "what is playing on A" was routinely B's.
         let theirs = UiEvent::Plugin {
             peer: who('B'),
             cap: "org.acrylius.media/1".to_string(),
@@ -1094,8 +998,6 @@ mod tests {
 
     #[test]
     fn a_machine_leaving_the_network_reads_as_a_sentence() {
-        // `acryliusctl` prints these verbatim, and a sighting and its
-        // withdrawal are the pair a person watches to see discovery working.
         let fp = acrylius_core::proto::ids::Fingerprint::of(&[7u8; 32]);
         let line = render(&UiEvent::Undiscovered {
             fingerprint: fp.clone(),
@@ -1118,10 +1020,6 @@ mod tests {
 
     #[test]
     fn an_error_about_the_machine_is_nobodys_answer() {
-        // `None` is the honest value for a failure that belongs to this
-        // computer rather than to a conversation. Treating it as an answer is
-        // how any error anywhere became the refusal of whatever request
-        // happened to be waiting — for up to an hour, on a share.
         let machine = UiEvent::Error {
             peer: None,
             code: ErrorCode::Internal,
@@ -1151,9 +1049,7 @@ mod tests {
 
     #[test]
     fn a_reply_must_match_the_peer_the_cap_and_the_verb() {
-        // All three, and each on its own. Mutation testing flipped every
-        // comparison in the old inline guard and the `&&` between them, and
-        // nothing noticed — so each conjunct gets a case that fails without it.
+        // Each conjunct gets a case that fails without it.
         let want = ["state"];
         assert_eq!(
             verdict(
@@ -1241,9 +1137,6 @@ mod tests {
 
     #[test]
     fn pairing_events_answer_no_ones_request() {
-        // They are about a stranger, not a paired device, and there is no peer
-        // to compare against: somebody asking to pair must not satisfy a
-        // `session query` that happens to be outstanding.
         assert!(!about(
             &UiEvent::PairingSas {
                 name: "someone".to_string(),

@@ -1,40 +1,20 @@
 //
-//  The one directory the app and its widget can both see.
-//
-//  A widget is a separate process with a separate container. Nothing the app
-//  writes to its own container is visible there, so anything the widget renders
-//  has to live in an App Group.
-//
-//  The identifier compiled into an app is not necessarily the one it runs
-//  under. Sideloading tools re-sign with their own team and rewrite bundle
-//  identifiers to keep them unique — SideStore appends the team ID — and App
-//  Groups are rewritten to match, because a group can only be registered under
-//  the team that owns it. A hardcoded `group.org.acrylius` then names a
-//  container that does not exist, and does so in silence.
-//
-//  So the group is discovered, not assumed: read out of the profile the bundle
-//  was signed with. The literal below is only the fallback for a build signed
-//  the ordinary way.
-//
-//  When nothing is granted at all, this falls back to the process's own
-//  container. The app then works exactly as before and the widget says it has
-//  nothing, instead of writes vanishing with no error anywhere. `isShared` is
-//  what tells those apart, and "This device" surfaces it.
+//  The one directory the app and its widget can both see, since a widget's
+//  own container is separate. A sideloader can rewrite bundle/group
+//  identifiers at re-signing, so the group is discovered from the signed
+//  profile rather than assumed; falls back to the app's own container if
+//  none is granted.
 //
 
 import Foundation
 
 public enum SharedContainer {
-    /// The group as built. Must match `com.apple.security.application-groups`
-    /// in both entitlements files — but see above: what a bundle is signed with
-    /// may not be this, so nothing reads it directly.
+    /// The group as built; must match `com.apple.security.application-groups`
+    /// in both entitlement files. What a build is actually signed with may differ — see above.
     public static let configuredGroup = "group.org.acrylius"
 
-    /// The group this build actually holds, or nil.
-    ///
-    /// Resolved once. Reading a provisioning profile means parsing a signed
-    /// blob off disk, and the widget's timeline provider is not somewhere to do
-    /// that repeatedly.
+    /// The group this build actually holds, or nil. Resolved once — parsing
+    /// the provisioning profile isn't cheap enough to do repeatedly from the widget's timeline provider.
     public static let group: String? = {
         #if canImport(Darwin)
         for candidate in Entitlements.appGroups() + [configuredGroup]
@@ -86,11 +66,8 @@ public enum SharedContainer {
         return dir
     }
 
-    /// What to show someone whose widget is empty.
-    ///
-    /// Three outcomes that look identical from the outside and need different
-    /// answers: the entitlement was rewritten and found, rewritten and lost, or
-    /// never there because nothing signed this build.
+    /// What to show someone whose widget is empty: distinguishes a rewritten
+    /// group that was found, one that was lost, and an unsigned build.
     public static func diagnosis() -> String {
         #if canImport(Darwin)
         if let group {
@@ -109,13 +86,8 @@ public enum SharedContainer {
         #endif
     }
 
-    /// Everything worth knowing when the widget stops working.
-    ///
-    /// A sideloading tool decides at install time whether the app and its
-    /// extension get one App ID or two, and rewrites identifiers either way.
-    /// Both arrangements can work and they fail differently, so what matters is
-    /// being able to see which one happened rather than reasoning about what
-    /// the installer probably did.
+    /// Everything worth knowing when the widget stops working. A sideloader
+    /// can give the app/extension one App ID or two, and each fails differently.
     public static func report() -> [(String, String)] {
         #if canImport(Darwin)
         var rows = [
@@ -140,12 +112,9 @@ public enum SharedContainer {
 
 #if canImport(Darwin)
 
-/// What this bundle was actually signed with.
-///
-/// iOS offers no public API for reading your own entitlements —
-/// `SecTaskCopyValueForEntitlement` is macOS only — but every signed bundle
-/// carries the profile it was signed with, and the profile is a CMS blob with
-/// an XML plist inside it.
+/// What this bundle was actually signed with. iOS has no public API for
+/// reading entitlements directly, so this parses the signed provisioning
+/// profile's CMS blob instead.
 enum Entitlements {
     static func appGroups(in bundle: Bundle = .main) -> [String] {
         read(in: bundle)?["com.apple.security.application-groups"] as? [String] ?? []
@@ -161,10 +130,8 @@ enum Entitlements {
         bundle.url(forResource: "embedded", withExtension: "mobileprovision") != nil
     }
 
-    /// Whose team this build was signed under.
-    ///
-    /// The prefix a sideloading tool appends to bundle identifiers and app
-    /// groups, so seeing it is how a rewritten identifier stops being a mystery.
+    /// Whose team this build was signed under — the prefix a sideloader
+    /// appends to bundle identifiers and app groups.
     static func teamIdentifier(in bundle: Bundle = .main) -> String? {
         read(in: bundle)?["com.apple.developer.team-identifier"] as? String
     }
@@ -179,9 +146,8 @@ enum Entitlements {
         return profile["Entitlements"] as? [String: Any]
     }
 
-    /// Cut the XML plist out of the CMS envelope by its markers rather than by
-    /// parsing PKCS#7. Nothing here verifies the signature — iOS already did,
-    /// or this would not be running — it only reads.
+    /// Cut the XML plist out of the CMS envelope by its markers rather than
+    /// parsing PKCS#7. Doesn't verify the signature — iOS already did.
     private static func carvePlist(from data: Data) -> Data? {
         guard let start = data.range(of: Data("<?xml".utf8)),
               let end = data.range(of: Data("</plist>".utf8),

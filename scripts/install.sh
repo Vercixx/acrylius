@@ -1,10 +1,7 @@
 #!/usr/bin/env bash
 #
-# Install or update acrylius for the current user.
-#
-# Run it again whenever you have pulled: it replaces the binaries, adds settings
-# a newer version introduced without touching what you have written, and
-# restarts the service. Nothing here needs root, and nothing here asks for it.
+# Install or update acrylius for the current user. Rerun after every pull:
+# it replaces the binaries, migrates config, and restarts the service.
 #
 #   ./scripts/install.sh            build and install
 #   ./scripts/install.sh --no-build use the binaries already in target/release
@@ -19,7 +16,7 @@ BUILD=1
 for arg in "$@"; do
     case "$arg" in
         --no-build) BUILD=0 ;;
-        -h|--help) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "unknown option: $arg" >&2; exit 2 ;;
     esac
 done
@@ -35,9 +32,8 @@ die()  { printf 'error: %s\n' "$*" >&2; exit 1; }
 command -v systemctl >/dev/null || die "no systemctl; this expects a systemd user session"
 cd "$(git rev-parse --show-toplevel 2>/dev/null || dirname "$(dirname "$(readlink -f "$0")")")"
 
-# An update is "the binary is already where we put it". Not the unit and not the
-# config: either can be absent on a machine that was installed before they
-# existed, and treating that as a fresh install would overwrite a config.
+# Detected via the binary, not config: an older install may lack the unit or
+# config, and fresh-install would overwrite a config that already exists.
 UPDATE=0
 [ -x "$BIN_DIR/acryliusd" ] && UPDATE=1
 
@@ -64,9 +60,7 @@ done
 step "Binaries"
 mkdir -p "$BIN_DIR"
 for b in acryliusd acryliusctl; do
-    # Copy beside and rename. Writing over a running binary fails with ETXTBSY,
-    # and renaming onto it does not — the running process keeps the inode it
-    # already opened and the next start gets the new one.
+    # Copy beside and rename: writing over a running binary fails with ETXTBSY.
     install -m 755 "target/release/$b" "$BIN_DIR/.$b.new"
     mv -f "$BIN_DIR/.$b.new" "$BIN_DIR/$b"
     say "$BIN_DIR/$b"
@@ -82,17 +76,11 @@ esac
 step "Config"
 CONFIG="$("$BIN_DIR/acryliusd" config path)"
 if [ -e "$CONFIG" ]; then
-    # Adds what is missing and leaves everything else exactly as written,
-    # comments included. Printing what it did matters more than it looks: a
-    # setting nobody can see is a setting nobody uses.
     "$BIN_DIR/acryliusd" config update | sed 's/^/  /'
 else
     "$BIN_DIR/acryliusd" config init | sed 's/^/  /'
 fi
 if CHECK="$("$BIN_DIR/acryliusd" config check 2>&1)"; then
-    # Where files land is worth saying out loud. It is the one setting whose
-    # being wrong looks like a broken feature rather than a wrong setting: files
-    # arrive, and nobody can find them.
     echo "$CHECK" | grep -E '^  (files|NOTE)' | sed 's/^  /  /'
 else
     warn "the config does not parse; the service will refuse to start. Run: acryliusd config check"
@@ -105,15 +93,8 @@ mkdir -p "$UNIT_DIR"
 install -m 644 "systemd/$UNIT" "$UNIT_DIR/$UNIT"
 say "$UNIT_DIR/$UNIT"
 
-# The unit runs under ProtectHome=read-only, so anything the daemon writes to
-# has to be named in ReadWritePaths= or it fails with "read-only file system"
-# at the moment it is used — which for a download directory means halfway
-# through receiving a file.
-#
-# The shipped unit cannot name it: where downloads go is a config setting, and
-# on this desktop that folder may be called Загрузки or Téléchargements or
-# anything else. So the daemon is asked, and the answer becomes a drop-in.
-# Rewritten on every run, so moving the directory and re-running is enough.
+# ProtectHome=read-only means every writable path needs ReadWritePaths=; the
+# daemon is asked for its config paths and the answer becomes a drop-in, rewritten each run.
 DROPIN_DIR="$UNIT_DIR/$UNIT.d"
 mkdir -p "$DROPIN_DIR"
 {
@@ -122,14 +103,8 @@ mkdir -p "$DROPIN_DIR"
     echo "[Service]"
     "$BIN_DIR/acryliusd" config writable-paths | while read -r p; do
         [ -n "$p" ] || continue
-        # A leading '-' so a directory that is not there yet is not a reason
-        # for the whole service to refuse to start.
-        #
-        # Quoted, because systemd splits this setting on whitespace: a share
-        # directory with a space in its name became two paths, neither of which
-        # exists, and the daemon could not write to the one directory it had
-        # been configured with. Quotes are removed before the list is parsed, so
-        # the '-' belongs inside them.
+        # Leading '-' lets ReadWritePaths tolerate a missing directory.
+        # Quoted: systemd splits paths on whitespace, and the '-' must stay inside.
         echo "ReadWritePaths=\"-$p\""
     done
 } > "$DROPIN_DIR/writable.conf"
@@ -138,8 +113,7 @@ grep '^ReadWritePaths=' "$DROPIN_DIR/writable.conf" | sed 's/^ReadWritePaths=-*/
 
 systemctl --user daemon-reload
 
-# A daemon someone started by hand holds the port, and the service would then
-# fail to bind with an error that says nothing about why.
+# A daemon started by hand holds the port; the service would fail to bind.
 STRAY="$(pgrep -u "$(id -u)" -x acryliusd 2>/dev/null | while read -r pid; do
     systemctl --user status "$UNIT" 2>/dev/null | grep -q "PID: $pid" || echo "$pid"
 done || true)"

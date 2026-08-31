@@ -5,11 +5,8 @@ import SwiftUI
 import UIKit
 #endif
 
-/// One paired computer.
-///
-/// Every section here is conditional on something the peer announced. A machine
-/// with no commands configured sends no catalogue and gets no Commands section,
-/// so the screen never offers something that cannot work.
+/// One paired computer. Every section is conditional on something the peer
+/// announced, so the screen never offers what cannot work.
 struct DeviceView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
@@ -20,9 +17,7 @@ struct DeviceView: View {
 
     private var features: PeerFeatures { model.catalog[peer.deviceId] }
 
-    /// How a link kind reads to a person. `nil` when nothing is carrying the
-    /// session, since "Not connected" already says that and a second line
-    /// saying it again is noise.
+    /// How a link kind reads to a person; `nil` when nothing carries the session.
     private static func carrying(_ kind: FfiTransportKind?) -> String? {
         switch kind {
         case .tcpLan: "Wi-Fi"
@@ -35,14 +30,7 @@ struct DeviceView: View {
 
     var body: some View {
         List {
-            // There is no Connect button.
-            //
-            // There never really was one: the core dials the moment discovery
-            // names a paired device, so pressing it repeated what had already
-            // happened. Worse, its action returned `true` without looking, so
-            // it went green whether or not a session opened — and a failed dial
-            // emits nothing, so the honest report was a tick followed by
-            // silence. What replaces it is saying what is actually going on.
+            // No Connect button: the core already dials on discovery.
             Section {
                 switch peer.state {
                 case .reachable:
@@ -56,35 +44,17 @@ struct DeviceView: View {
                     }
                 case .unreachable:
                     LabeledContent("Status", value: "Not connected")
-                    // A button again, and for a reason the first one did not
-                    // have. Dialling is automatic, but "Not connected" sitting
-                    // next to a state called "Connecting" reads as *gave up* —
-                    // so either the screen says it is still trying, or it
-                    // offers to try now. This does both: the footer says the
-                    // retries continue, and this asks for one immediately and
-                    // reports what actually happened rather than that a
-                    // request was sent.
                     TaskButton("Try again") { await model.retry(peer) }
                 }
-                // Which radio is carrying this. A second transport is only
-                // useful if it takes over quietly, and something that takes
-                // over quietly is indistinguishable from something broken
-                // unless it says so somewhere.
                 if let over = Self.carrying(peer.transport) {
                     LabeledContent("Transport", value: over)
                 }
             } footer: {
-                // Only once every route has been spent. A peer still being
-                // dialled has nothing to explain yet, and saying so while it
-                // came up normally is the flicker this whole arrangement
-                // exists to avoid.
                 if peer.state == .unreachable {
                     VStack(alignment: .leading, spacing: 4) {
                         if let trouble = peer.trouble {
                             Text(trouble)
                         }
-                        // Said plainly, because the absence of a spinner is
-                        // otherwise indistinguishable from having stopped.
                         Text("Still trying every few seconds.")
                     }
                 }
@@ -104,16 +74,8 @@ struct DeviceView: View {
 
             MediaSection(peer: peer)
 
-            // Sending lives on the Files tab now, with the offers arriving the
-            // other way. Two halves of one thing, and only one of them could
-            // ever be here: an incoming offer is not about any particular
-            // computer's screen.
-
-            // Whenever this phone is not talking to the computer, which is
-            // exactly when waking it means something — and it must not depend
-            // on the live catalogue, which is empty until a session opens. A
-            // machine that is asleep will never fill it in, so the answer comes
-            // off disk: the computer handed these over while it was awake.
+            // Read off disk, not the live catalogue: a sleeping machine never
+            // fills the catalogue in.
             if !peer.reachable, WakeTargets.load(for: peer.deviceId) != nil {
                 Section {
                     TaskButton("Wake up") {

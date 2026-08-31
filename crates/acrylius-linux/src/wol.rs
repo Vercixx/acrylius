@@ -1,15 +1,9 @@
 //! Magic packets.
 //!
-//! A magic packet is `ff` six times followed by the target MAC repeated sixteen
-//! times: 102 bytes, or 108 with a six-byte SecureOn password. A network
-//! interface matches it by that payload and pays no attention to the destination
-//! address, so a unicast datagram to the sleeping machine's last known address
-//! wakes it exactly as well as a broadcast.
-//!
-//! That detail carries real weight here, because iOS gates UDP broadcast behind
-//! an entitlement a free developer account cannot get. Unicast-first is not a
-//! fallback, it is the primary path, and it works as long as the router still
-//! holds an ARP entry for the sleeping machine.
+//! A magic packet is `ff` x6 then the target MAC x16 (102 bytes, +6 for
+//! SecureOn). The NIC matches on payload, not destination, so unicast wakes as
+//! well as broadcast; unicast is the primary path here (not a fallback) since
+//! iOS gates UDP broadcast behind an entitlement free accounts lack.
 
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 
@@ -30,8 +24,7 @@ pub fn parse_mac(mac: &str) -> anyhow::Result<[u8; 6]> {
     Ok(out)
 }
 
-/// Build the packet. `secure_on` is the optional six-byte password some network
-/// interfaces require before they will act on one.
+/// Build the packet; `secure_on` is the optional six-byte password some NICs require.
 #[must_use]
 pub fn build(mac: [u8; 6], secure_on: Option<[u8; 6]>) -> Vec<u8> {
     let mut packet = Vec::with_capacity(108);
@@ -45,12 +38,8 @@ pub fn build(mac: [u8; 6], secure_on: Option<[u8; 6]>) -> Vec<u8> {
     packet
 }
 
-/// Send one packet to every destination given, in order.
-///
-/// Every destination is tried even when an earlier one succeeded. A send that
-/// returns `Ok` only means the datagram left; whether the machine was listening
-/// is not knowable from here, which is why the caller confirms by polling for
-/// the machine to come back rather than by trusting this.
+/// Send one packet to every destination, in order, even after an earlier one
+/// succeeds. `Ok` only means the datagram left; the caller must poll to confirm.
 pub async fn send(macs: &[String], destinations: &[String], port: u16) -> anyhow::Result<usize> {
     let mut packets = Vec::new();
     for m in macs {
@@ -125,7 +114,7 @@ mod tests {
         let p = build(MAC, None);
         assert_eq!(p.len(), 102);
         assert_eq!(&p[..6], &[0xFF; 6]);
-        // Sixteen repetitions, checked at both ends rather than just the first.
+        // Sixteen repetitions; checked at both ends, not just the first.
         assert_eq!(&p[6..12], &MAC);
         assert_eq!(&p[96..102], &MAC);
         for chunk in p[6..].as_chunks::<6>().0 {

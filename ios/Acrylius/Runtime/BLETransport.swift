@@ -1,37 +1,16 @@
 //
-//  Bluetooth LE, from the phone's side: the central.
+//  BLE central: the desktop advertises and serves GATT, this end scans,
+//  connects and writes (background iOS advertising is unreadable to Linux
+//  scanners; see PROTOCOL.md §4). Also feeds BLEDiagnostics, so the diagnostics
+//  observe this code path rather than a second stack.
+//  Guarded because scripts/swift-test.sh compiles this directory on Linux.
 //
-//  The desktop advertises and serves GATT; this end scans, connects and writes.
-//  That direction is forced rather than chosen — an iPhone advertising in the
-//  background drops its local name and pushes service UUIDs into an Apple-private
-//  overflow area no Linux scanner can read — and it happens to be the direction
-//  `PROTOCOL.md` §4 already describes: a device that cannot advertise "dials and
-//  is never dialled".
-//
-//  This is also the diagnostics probe. There is deliberately not a second
-//  CoreBluetooth stack for reporting: everything the Bluetooth screen shows is
-//  what this object actually did, because a diagnostic that observes a different
-//  code path than the one that breaks is worse than none.
-//
-//  Guarded, because `scripts/swift-test.sh` compiles this directory on Linux —
-//  the same guard `NWTransport.swift` uses for Network.framework.
-//
-//  ## The traps, named
-//
-//  Each of these produces "it just does nothing", which is what the previous
-//  attempt at this in a predecessor project reported before it was abandoned:
-//
-//  * Anything asked of a manager before it reports `.poweredOn` is discarded
-//    silently, so scanning starts in the state callback and nowhere else.
-//  * `scanForPeripherals(withServices:)` matches the **advertisement**, not the
-//    GATT database. A service present only in the database is invisible.
-//  * A `CBPeripheral` that is not strongly retained is deallocated, and Apple
-//    documents that this implicitly cancels the connection. No callback ever
-//    fires again.
-//  * `delegate` must be set before `discoverServices`, and only from
-//    `didConnect`.
-//  * Writes past `canSendWriteWithoutResponse` are dropped with no error and
-//    surface as corruption much later.
+//  CoreBluetooth traps, all of which fail silently:
+//  * Requests before `.poweredOn` are discarded; scan only from the state callback.
+//  * `scanForPeripherals(withServices:)` matches the advertisement, not the GATT database.
+//  * An unretained `CBPeripheral` is deallocated, implicitly cancelling its connection.
+//  * `delegate` must be set before `discoverServices`, and only from `didConnect`.
+//  * Writes past `canSendWriteWithoutResponse` are dropped with no error.
 //
 
 #if canImport(CoreBluetooth)
@@ -46,7 +25,7 @@ public final class BLETransport: NSObject, Transport, @unchecked Sendable {
     private var central: CBCentralManager?
     private var emit: (@Sendable (FfiEvent) -> Void)?
 
-    /// Peripherals we have seen, held strongly. See the trap list above.
+    /// Held strongly; see the trap list.
     private var peers: [UUID: Peer] = [:]
     private var nextLink: UInt64 = 1
 
@@ -58,26 +37,18 @@ public final class BLETransport: NSObject, Transport, @unchecked Sendable {
     private let report: @Sendable (BLEUpdate) -> Void
     private let queue = DispatchQueue(label: "org.acrylius.ble")
 
-    /// Everything known about one desktop.
     private final class Peer {
         let peripheral: CBPeripheral
         var rx: CBCharacteristic?
         var tx: CBCharacteristic?
-        /// Assigned when the core dials, not when we connect: a connection is
-        /// how we learn who someone is, and a link is what the core opens.
+        /// Assigned when the core dials, not when we connect.
         var link: UInt64?
         var reassembler: BleReassembler?
         /// Fragments waiting on `canSendWriteWithoutResponse`.
         var pending: [Data] = []
         var fingerprint: String?
         var name: String = "unnamed"
-        /// Whether the core has been told this machine is on the network.
-        ///
-        /// Kept so it can be told when it is not. Nothing here ever withdrew a
-        /// sighting — `NWTransport` was the only place in the app that did — and
-        /// because the core only drops a machine from "on this network" once
-        /// *every* transport has withdrawn it, one Bluetooth sighting pinned
-        /// every entry forever, however correctly Bonjour withdrew its own.
+        /// Whether the core was told this peer is present; `retire` must withdraw it.
         var announced = false
 
         init(_ p: CBPeripheral) { self.peripheral = p }
@@ -125,26 +96,18 @@ public final class BLETransport: NSObject, Transport, @unchecked Sendable {
     }
     private func claimLink() -> UInt64 {
         lock.lock(); defer { lock.unlock() }
-        // Namespaced by transport, because the core keys every link in one table
-        // and NWTransport is counting from 1 as well. The rule lives in Rust so
-        // neither host invents its own.
+        // Namespaced by transport: the core keys every link in one table and
+        // NWTransport counts from 1 as well.
         let id = linkId(transport: transportId, counter: nextLink)
         nextLink += 1
         return id
     }
 
-    /// Whether we may build a manager without ambushing someone.
-    ///
-    /// `CBManager.authorization` is a class property from iOS 13.1, readable
-    /// *without* constructing a manager — which matters, because constructing
-    /// one is what raises the prompt. So this doubles as the persisted opt-in:
-    /// nothing happens until a person has agreed once, and everything happens
-    /// automatically afterwards, with no separate setting to keep in step.
+    /// Readable without constructing a manager; constructing one is what raises
+    /// the permission prompt, so this doubles as the persisted opt-in.
     public static var permitted: Bool { CBManager.authorization == .allowedAlways }
 
-    /// The one spelling of a BLE address. Written by `didUpdateValueFor` when
-    /// identity is read, parsed by `dial`; naming it once is what keeps those
-    /// two from drifting.
+    /// The one spelling of a BLE address, shared by identity reads and `dial`.
     static let addrPrefix = "ble:"
 
     // MARK: - Transport
@@ -164,9 +127,8 @@ public final class BLETransport: NSObject, Transport, @unchecked Sendable {
             return
         }
         guard Self.permitted else {
-            // Refusing here is the whole reason there is no prompt at launch: a
-            // permission dialog with nothing on screen to explain it is one
-            // people decline, and declining is undone only in Settings.
+            // No prompt at launch: an unexplained dialog gets declined, and a
+            // decline is undone only in Settings.
             push(.state(BLEDiagnostics.waitingForPermission, auth: Self.authorizationName()))
             push(.note("not permitted yet; the Devices screen offers the button that asks"))
             return
@@ -184,12 +146,8 @@ public final class BLETransport: NSObject, Transport, @unchecked Sendable {
         push(.note("central manager created; permission is \(Self.authorizationName())"))
     }
 
-    /// `ble:<peripheral identifier>`, which is what discovery emitted.
-    ///
-    /// The identifier is CoreBluetooth's own per-app handle for the device, and
-    /// it is stable across launches — unlike the desktop's BLE address, which
-    /// rotates. By the time the core dials we are normally already connected,
-    /// because connecting is how we learned the fingerprint it is dialling.
+    /// `ble:<peripheral identifier>`: CoreBluetooth's per-app handle, stable
+    /// across launches unlike the desktop's rotating BLE address.
     public func dial(addr: String, token: UInt64) async {
         guard addr.hasPrefix(Self.addrPrefix),
             let uuid = UUID(uuidString: String(addr.dropFirst(Self.addrPrefix.count)))
@@ -197,11 +155,8 @@ public final class BLETransport: NSObject, Transport, @unchecked Sendable {
             fire(.dialFailed(dial: token, reason: "not a Bluetooth address: \(addr)"))
             return
         }
-        // Onto CoreBluetooth's queue, like everything else that touches a
-        // `Peer`. Every delegate callback already runs here, so serialising on
-        // this one queue is what makes the shared state safe — the
-        // `@unchecked Sendable` on this class is a promise, and this is how it
-        // is kept rather than assumed.
+        // Everything touching a Peer serialises on CoreBluetooth's queue; that
+        // is what makes `@unchecked Sendable` hold.
         queue.async { [weak self] in
             guard let self else { return }
             guard let p = self.peer(uuid), p.rx != nil, p.tx != nil else {
@@ -223,32 +178,22 @@ public final class BLETransport: NSObject, Transport, @unchecked Sendable {
 
     public func send(link: UInt64, msg: Data) async {
         queue.async { [weak self] in
-            // A link belongs to one transport, and the core does not track
-            // which, so every transport is offered every send. Not ours:
-            // nothing to do.
+            // Every transport is offered every send; not ours means nothing to do.
             guard let self, let p = self.peer(forLink: link) else { return }
-            // Belt and braces under `didModifyServices`. If the peripheral has
-            // gone and CoreBluetooth has not said so, writing here would be
-            // silent — and silence is the failure this transport is worst at,
-            // because a write without response cannot report anything either.
+            // Under didModifyServices the peripheral can be gone with no
+            // callback, and a write without response would fail silently.
             guard p.peripheral.state == .connected, let rx = p.rx else {
                 self.retire(p.peripheral.identifier, why: "the computer is no longer connected")
                 return
             }
-            // The negotiated payload, asked for rather than assumed. iOS reports
-            // 512 against a modern peripheral and 20 against an old one, and
-            // guessing either way is how fragments get silently truncated.
+            // Ask for the real limit: iOS reports 512 or 20 depending on the peripheral.
             let size = p.peripheral.maximumWriteValueLength(for: .withoutResponse)
             p.pending.append(contentsOf: bleFragment(msg: msg, fragment: UInt32(size)))
             self.drain(p, rx)
         }
     }
 
-    /// Write what the connection will currently take.
-    ///
-    /// `canSendWriteWithoutResponse` is not advisory. Fragments written past it
-    /// are dropped with no error at all, and the damage shows up much later as a
-    /// message that will not reassemble.
+    /// Fragments written past `canSendWriteWithoutResponse` are silently dropped.
     private func drain(_ p: Peer, _ rx: CBCharacteristic) {
         while p.peripheral.canSendWriteWithoutResponse, !p.pending.isEmpty {
             p.peripheral.writeValue(p.pending.removeFirst(), for: rx, type: .withoutResponse)
@@ -294,12 +239,8 @@ extension BLETransport: CBCentralManagerDelegate {
         push(.state(name, auth: auth))
         guard c.state == .poweredOn else {
             push(.scanning(false))
-            // The radio going away takes every link on it, and the core has to
-            // be told. Saying only "not scanning" left the phone holding a
-            // Bluetooth link across a Bluetooth toggle — up, preferred over
-            // nothing, and carrying no messages at all. CoreBluetooth does not
-            // send a disconnect for these: the connections simply cease to
-            // exist along with the manager's state.
+            // The radio going away takes every link with it, and CoreBluetooth
+            // sends no disconnect for these.
             for id in linkedPeers() {
                 retire(id, why: "Bluetooth was turned \(name)")
             }
@@ -309,14 +250,8 @@ extension BLETransport: CBCentralManagerDelegate {
         adoptConnected(c)
     }
 
-    /// Begin, or begin again.
-    ///
-    /// `allowDuplicates: false` is deliberate — it is the battery-cheap mode,
-    /// and a filtered scan reporting one desktop repeatedly buys nothing. The
-    /// cost is that each peripheral is reported *once* for the life of a scan,
-    /// so a desktop already seen is not announced again when it comes back
-    /// from a disconnect. Restarting the scan is what makes it announceable
-    /// again, and doing that on every disconnect is why this is a method.
+    /// `allowDuplicates: false` reports each peripheral once per scan, so the
+    /// scan must be restarted after every disconnect to see a desktop again.
     private func startScan(_ c: CBCentralManager, why: String) {
         c.scanForPeripherals(
             withServices: [serviceUUID],
@@ -326,24 +261,9 @@ extension BLETransport: CBCentralManagerDelegate {
         push(.note("scanning for the acrylius service: \(why)"))
     }
 
-    /// Pick up desktops iOS is already connected to, which a scan will never
-    /// show us.
-    ///
-    /// A peripheral stops advertising while something is connected to it, and a
-    /// scan only ever reports advertisements. So when this app is killed and
-    /// relaunched, the desktop is still on the other end of an ACL link that
-    /// nobody told it to drop — and until it times out, a scan finds nothing at
-    /// all. No amount of waiting inside this launch helps, which is why the
-    /// symptom is "it connected, then after a restart it never would again, and
-    /// restarting once more fixed it".
-    ///
-    /// Apple's answer is this method, and its own discussion is explicit that
-    /// what comes back is not usable as-is: "The list of connected peripherals
-    /// can include those that other apps have connected. You need to connect
-    /// these peripherals locally using the connect(_:options:) method before
-    /// using them." So every one of them gets a local connect, including any
-    /// already reported as connected — that call is what makes this app a party
-    /// to the connection and starts the delegate callbacks.
+    /// A connected peripheral stops advertising, so after a relaunch the scan
+    /// finds nothing while the old ACL link lingers. Each peripheral returned
+    /// here needs a local `connect` before it is usable (Apple documents this).
     private func adoptConnected(_ c: CBCentralManager) {
         let already = c.retrieveConnectedPeripherals(withServices: [serviceUUID])
         guard !already.isEmpty else {
@@ -352,42 +272,28 @@ extension BLETransport: CBCentralManagerDelegate {
         }
         push(.note("\(already.count) already connected to iOS; reconnecting"))
         for peripheral in already {
-            // Retained here, before the connect, for the reason in the trap
-            // list: a `CBPeripheral` that is released is implicitly cancelled.
+            // Retained before the connect; see the trap list.
             let p = remember(peripheral)
             if let name = peripheral.name { p.name = name }
             beginConnect(peripheral, via: c, why: "already connected to iOS")
         }
     }
 
-    /// How long a connect may sit before we stop believing in it.
-    ///
-    /// Generous, because it also has to cover service and characteristic
-    /// discovery on a slow link.
+    /// Generous: also covers service and characteristic discovery on a slow link.
     private static let connectTimeout = 10.0
 
-    /// Connect, and refuse to wait forever.
-    ///
-    /// `connect(_:options:)` has no timeout — Apple documents it as pending
-    /// indefinitely, and there is no delegate callback for "this is not
-    /// happening". That matters more than it sounds, because `didDiscover`
-    /// only acts on a peripheral that is `.disconnected`: one connect wedged
-    /// in `.connecting` makes the app ignore every advertisement that follows,
-    /// for as long as it runs. That is what a second force-quit was clearing.
-    ///
-    /// Cancelling puts the peripheral back to `.disconnected`, and the scan —
-    /// which is still running — discovers it again and retries.
+    /// `connect(_:options:)` pends forever with no failure callback, and a
+    /// peripheral wedged in `.connecting` makes `didDiscover` ignore it for the
+    /// life of the app. Cancelling returns it to `.disconnected` so the scan retries.
     private func beginConnect(_ peripheral: CBPeripheral, via c: CBCentralManager, why: String) {
         push(.note("connecting: \(why)"))
         c.connect(peripheral, options: nil)
         queue.asyncAfter(deadline: .now() + Self.connectTimeout) { [weak self, weak c] in
             guard let self, let c else { return }
-            // Done, and usable: connected *and* the characteristics arrived.
-            // Connected with nothing discovered is its own failure, and one a
-            // stale attribute cache produces, so it is not left alone either.
+            // Connected with nothing discovered (a stale attribute cache) is a
+            // failure too, so require the characteristics as well.
             let p = self.peer(peripheral.identifier)
             if peripheral.state == .connected, p?.rx != nil, p?.tx != nil { return }
-            // Already given up on, or never started.
             if peripheral.state == .disconnected { return }
             self.push(.note("connect timed out after \(Int(Self.connectTimeout))s; retrying"))
             c.cancelPeripheralConnection(peripheral)
@@ -414,8 +320,8 @@ extension BLETransport: CBCentralManagerDelegate {
         )
         push(.sighting(sighting))
         guard ours, peripheral.state == .disconnected else { return }
-        // Connecting is how identity is learned: a 43-character fingerprint does
-        // not fit in a 31-byte advertisement, so it is read over GATT instead.
+        // The fingerprint doesn't fit in a 31-byte advertisement; it is read
+        // over GATT after connecting.
         beginConnect(peripheral, via: c, why: "seen advertising")
     }
 
@@ -424,8 +330,6 @@ extension BLETransport: CBCentralManagerDelegate {
         peripheral.delegate = self
         peripheral.discoverServices([serviceUUID])
         push(.note("connected; discovering services"))
-        // Whatever was wrong is not wrong any more. An instruction left on
-        // screen after it has been carried out is worse than none.
         push(.trouble(nil))
     }
 
@@ -435,29 +339,13 @@ extension BLETransport: CBCentralManagerDelegate {
         let why = error?.localizedDescription ?? "unknown"
         push(.note("could not connect: \(why)"))
         if let remedy = Self.remedy(for: error) { push(.trouble(remedy)) }
-        // Scan again, or this desktop is never seen again.
-        //
-        // `allowDuplicates: false` means a peripheral is reported once for the
-        // life of a scan, and it has already been reported — that is how we came
-        // to be connecting to it. So a connect that fails, with nothing to
-        // restart the scan, was the end of Bluetooth for that desktop until the
-        // app was killed: no retry, no rediscovery, and a screen that said only
-        // that one connection had not worked.
+        // Restart or this desktop is never reported again; see startScan.
         startScan(c, why: "a connection failed")
     }
 
-    /// What to actually do about a failure, where there is something to do.
-    ///
-    /// These are all one shape of problem — the two Bluetooth stacks disagree
-    /// about a bond — and one shape of fix, which lives on the phone and
-    /// nowhere else. CoreBluetooth describes the state and never the remedy:
-    /// "Peer removed pairing information" is accurate and gives a person
-    /// nothing to act on, and no amount of staring at it suggests that
-    /// Settings is involved.
-    ///
-    /// Nothing in this app's GATT tree asks for encryption, so a bond should
-    /// never form at all. When one has, it is left over from something else,
-    /// and it stops every connection dead until it is cleared.
+    /// Bond mismatches between the two stacks stall every connection and only
+    /// Settings on the phone clears them; CoreBluetooth's messages never say so.
+    /// Nothing in this app's GATT tree asks for encryption, so any bond is leftover.
     static func remedy(for error: (any Error)?) -> String? {
         guard let code = (error as? CBError)?.code else { return nil }
         switch code {
@@ -487,30 +375,22 @@ extension BLETransport: CBCentralManagerDelegate {
         push(.note("disconnected\(why.map { ": \($0)" } ?? "")"))
         // A bond can fail on the way out as well as on the way in.
         if let remedy = Self.remedy(for: error) { push(.trouble(remedy)) }
-        // Without this the desktop is gone until the app is relaunched: it has
-        // already been reported once for this scan, and will not be reported
-        // again. See `startScan`.
+        // Restart or this desktop is never reported again; see startScan.
         if c.state == .poweredOn {
             startScan(c, why: "after a disconnect")
         }
         retire(peripheral.identifier, why: why)
     }
 
-    /// Let go of a peripheral we can no longer talk to, and tell the core once.
-    ///
-    /// Shared by every route to that conclusion, because more than one can
-    /// arrive for a single death and the core must hear about it exactly once.
-    /// Whoever clears the link record is the one who reports it.
-    /// Every peer this transport currently holds a link for.
-    ///
-    /// Snapshotted under the lock and returned, rather than retired in place:
-    /// `retire` takes the same lock and fires into the core, and doing that with
-    /// it held is how a transport deadlocks against the runtime.
+    /// Snapshotted and returned rather than retired in place: `retire` takes
+    /// the same lock and fires into the core, which deadlocks if held here.
     private func linkedPeers() -> [UUID] {
         lock.lock(); defer { lock.unlock() }
         return peers.compactMap { $0.value.link == nil ? nil : $0.key }
     }
 
+    /// Tell the core exactly once, however many paths report the same death:
+    /// whoever clears the link record is the one who reports it.
     @discardableResult
     private func retire(_ id: UUID, why: String?) -> Bool {
         lock.lock()
@@ -524,10 +404,8 @@ extension BLETransport: CBCentralManagerDelegate {
         p?.reassembler = nil
         p?.pending.removeAll()
         lock.unlock()
-        // Before the link check, and deliberately: a machine is announced when
-        // its identity is read, which happens whether or not the core ever
-        // opened a link to it. Withdrawing only alongside a link would leave
-        // every machine that was merely looked at on the list for good.
+        // Before the link check: a machine is announced when its identity is
+        // read, whether or not the core ever opened a link to it.
         if wasAnnounced {
             fire(.undiscovered(transport: transportId, addr: "\(Self.addrPrefix)\(id.uuidString)"))
         }
@@ -543,24 +421,9 @@ extension BLETransport: CBCentralManagerDelegate {
 // MARK: - peripheral
 
 extension BLETransport: CBPeripheralDelegate {
-    /// The desktop's GATT database changed underneath us.
-    ///
-    /// This is what stopping the daemon looks like from here, and it is the
-    /// quietest failure on this transport. The connection does not drop —
-    /// bluetoothd keeps the ACL, and the phone stays bonded and connected to
-    /// the computer — but the acrylius application is unregistered, so the
-    /// service and both characteristics stop existing. There is no disconnect.
-    /// Writes are sent without response and so report no error. Nothing else in
-    /// CoreBluetooth ever mentions it.
-    ///
-    /// Without this the app went on saying it was connected over Bluetooth to a
-    /// daemon that had exited, and — because the peer never became unreachable —
-    /// never re-asked that computer anything either, which is how the session
-    /// controls stayed empty and the media state stayed stale.
-    ///
-    /// Rediscovery is started rather than the peripheral being hung up on: the
-    /// commonest reason for this to fire is a daemon being restarted, and the
-    /// service is usually back within a second or two.
+    /// A stopped daemon looks like this and nothing else: bluetoothd keeps the
+    /// ACL, there is no disconnect, and writes without response report no error.
+    /// Rediscover rather than hang up — a restarted daemon is back within seconds.
     public func peripheral(
         _ peripheral: CBPeripheral, didModifyServices invalidatedServices: [CBService]
     ) {
@@ -579,8 +442,6 @@ extension BLETransport: CBPeripheralDelegate {
             return
         }
         guard let service = peripheral.services?.first(where: { $0.uuid == serviceUUID }) else {
-            // The exact symptom the predecessor project died on. Saying so
-            // plainly is the reason this screen exists.
             push(.note("connected, but the acrylius service was not there"))
             return
         }
@@ -656,8 +517,7 @@ extension BLETransport: CBPeripheralDelegate {
                 fire(.linkRecv(link: link, msg: msg))
             }
         } catch {
-            // A stream we cannot trust. Dropping the link is the honest answer;
-            // carrying on would feed the core torn messages.
+            // Carrying on would feed the core torn messages; drop the link.
             let why = error.localizedDescription
             push(.note("bad fragment: \(why)"))
             lock.lock(); p.link = nil; p.reassembler = nil; lock.unlock()

@@ -1,15 +1,8 @@
 //
-//  What a computer told us about waking it.
-//
-//  Kept on disk because of when it is needed: by the time somebody wants to wake
-//  a machine, that machine is asleep and cannot be asked anything. The daemon
-//  sends this the moment a session opens, precisely so it is already here.
-//
-//  It lives in the shared container, not in the Keychain. A MAC address and a
-//  broadcast address are not secrets; they have to be readable by an App Intent
-//  in a process that may be running while the phone is locked, and by a widget,
-//  which has no Keychain access of its own and needs none for this. Waking is
-//  an unauthenticated datagram — a saved target is the only thing it takes.
+//  What a computer told us about waking it, kept on disk since by the time
+//  it's needed the machine is asleep and can't be asked. Lives in the shared
+//  container, not the Keychain: a MAC/broadcast address isn't a secret, and
+//  an App Intent or widget needs to read it while the phone is locked.
 //
 
 import Foundation
@@ -23,11 +16,8 @@ public enum WakeTargets {
         return dir.appendingPathComponent(peer)
     }
 
-    /// Every peer with a target on file.
-    ///
-    /// A saved target is also the record that this peer was paired: the daemon
-    /// only sends one over an open session. Nothing else needs asking before a
-    /// wake-up goes out.
+    /// Every peer with a target on file — also the record that it was paired,
+    /// since the daemon only sends one over an open session.
     public static func known() -> Set<String> {
         guard let dir = SharedContainer.directory("wake"),
               let names = try? FileManager.default.contentsOfDirectory(

@@ -1,29 +1,11 @@
-//! The packet envelope.
-//!
-//! Two properties are load-bearing and both were corrections during design review.
-//!
-//! Field indices are explicit numbers. `minicbor`'s derive keys fields by number,
-//! not by name, so adding a field is "use index 8" and old readers skip it. A
-//! name-keyed encoding gives a much fuzzier evolution story for something that
-//! has to stay compatible across an app the user updates on a 7-day cycle and a
-//! daemon they update whenever.
-//!
-//! `body` is an opaque byte string, not an inline CBOR map. If it were, the core
-//! would have to be able to parse plugin schemas in order to route a packet,
-//! which contradicts the entire plugin design. Opaque bodies mean the
-//! core routes, queues and forwards without understanding anything, plugins may
-//! use whatever encoding they like, and handing an envelope to an out-of-process
-//! plugin later is a memcpy. This is the same layering COSE uses. It costs a few
-//! bytes of double encoding, which is the right trade.
+//! The packet envelope. Fields are keyed by explicit number so old readers skip
+//! additions; `body` is an opaque byte string so the core routes without
+//! parsing plugin schemas.
 
 use alloc::vec::Vec;
 
-/// A capability identifier carries its own major version:
-/// `org.acrylius.clipboard/1`.
-///
-/// That makes negotiation a plain string-set intersection with no separate
-/// version field to get wrong, and it makes a breaking change simply a different
-/// capability. A peer that speaks both advertises both.
+/// A capability id carries its own major version (`org.acrylius.clipboard/1`),
+/// so negotiation is a string-set intersection and a breaking change is a new capability.
 pub type Cap<'a> = &'a str;
 
 #[derive(Clone, PartialEq, Eq, Debug, minicbor::Encode, minicbor::Decode)]
@@ -46,12 +28,10 @@ pub struct Envelope<'a> {
     /// Opaque to the core. The plugin owning `cap` decodes it.
     #[cbor(b(5), with = "minicbor::bytes")]
     pub body: &'a [u8],
-    /// Reserved. No flags are defined at v1; present so adding one is not a
-    /// field addition on a hot path.
+    /// Reserved. No flags at v1; present so adding one is not a field addition.
     #[n(6)]
     pub flags: u8,
-    /// Bulk transfer this envelope refers to, if any. Bulk bytes never travel
-    /// through the envelope; see `PROTOCOL.md`.
+    /// Bulk transfer this refers to, if any; bulk bytes never travel in the envelope.
     #[n(7)]
     pub bulk: Option<u64>,
 }
@@ -90,10 +70,7 @@ impl<'a> Envelope<'a> {
     }
 }
 
-/// The body of an `err` message.
-///
-/// The code is the part a program acts on and comes from the closed vocabulary
-/// below. The message is for a human and carries no promises.
+/// The body of an `err` message: `code` is acted on, `message` is for a human.
 #[derive(Clone, PartialEq, Eq, Debug, minicbor::Encode, minicbor::Decode)]
 pub struct ErrorBody {
     #[n(0)]
@@ -102,12 +79,8 @@ pub struct ErrorBody {
     pub message: alloc::string::String,
 }
 
-/// The fixed error vocabulary.
-///
-/// Carried over as a discipline from the old project, where a closed set of
-/// error codes was what made the client's user-facing copy possible: a client can
-/// only say something useful about a failure it can name. Adding a variant is a
-/// deliberate act, not a new string literal at a call site.
+/// The fixed error vocabulary; adding a variant is a deliberate act, not a new
+/// string literal at a call site.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ErrorCode {
     /// The capability was not in the negotiated intersection for this direction.
@@ -162,8 +135,7 @@ mod tests {
 
     #[test]
     fn body_is_opaque_bytes_not_parsed_cbor() {
-        // A body that is NOT valid CBOR must survive a round trip untouched.
-        // If this ever fails, someone has made the core parse plugin schemas.
+        // A body that is not valid CBOR must survive a round trip untouched.
         let garbage: &[u8] = &[0xff, 0xfe, 0xfd, 0x00, 0x1a];
         let e = Envelope::new(1, "x/1", "y", garbage);
         let back = e.encode().unwrap();
@@ -180,8 +152,7 @@ mod tests {
 
     #[test]
     fn unknown_trailing_fields_are_skipped_by_an_old_reader() {
-        // Simulates a future peer that added field 8. Decoding must succeed:
-        // this is the whole reason for numeric indices.
+        // A future peer that added field 8; decoding must skip it.
         #[derive(minicbor::Encode)]
         struct Future<'a> {
             #[n(0)]

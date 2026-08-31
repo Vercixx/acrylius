@@ -5,25 +5,16 @@ import SwiftUI
 import UIKit
 #endif
 
-/// Files moving in either direction.
-///
-/// Sending used to live inside one computer's screen, which made the
-/// destination implicit and free. It is a picker here instead — the cost of
-/// having somewhere for an *incoming* offer to live that a person can reach
-/// from anywhere, rather than only from the root list they had navigated away
-/// from.
+/// Files moving in either direction, plus incoming offers waiting on an answer.
 struct FilesView: View {
     @Environment(AppModel.self) private var model
 
-    /// The chosen destination, by device id. Held as an id rather than a peer
-    /// so a reconnection — which replaces every `FfiPeer` — does not silently
-    /// reset the picker.
+    /// Held as a device id, not a peer, so reconnecting doesn't reset the picker.
     @State private var destination: String?
 
     private var reachable: [FfiPeer] { model.peers.filter(\.reachable) }
 
-    /// Where a file would go. Falls back rather than going nil when the chosen
-    /// peer drops, so the picker cannot get stuck pointing at nothing.
+    /// Falls back rather than going nil when the chosen peer drops.
     private var chosen: FfiPeer? {
         if let id = destination, let peer = reachable.first(where: { $0.deviceId == id }) {
             return peer
@@ -34,8 +25,7 @@ struct FilesView: View {
     var body: some View {
         NavigationStack {
             List {
-                // First, because it is the only thing here waiting on you. A
-                // transfer holds the sending computer open until it is answered.
+                // Listed first: a transfer holds the sending computer open until answered.
                 if !model.incoming.isEmpty {
                     Section {
                         ForEach(model.incoming) { offer in
@@ -49,7 +39,6 @@ struct FilesView: View {
                 }
 
                 if let peer = chosen {
-                    // Only worth asking when there is a choice to make.
                     if reachable.count > 1 {
                         Section {
                             Picker("To", selection: Binding(
@@ -65,10 +54,8 @@ struct FilesView: View {
                     SendFileSection(peer: peer)
                 } else {
                     Section {
-                        // A picker that leads to "unreachable" is worse than no
-                        // picker: the file is copied and staged before the
-                        // offer travels, so the failure would arrive well after
-                        // the part that felt like the decision.
+                        // No picker when unreachable: the file is staged before the
+                        // offer travels, so the failure would surface well after the tap.
                         ContentUnavailableView(
                             "Nothing is connected",
                             systemImage: "arrow.up.arrow.down",
@@ -93,15 +80,8 @@ private struct IncomingOfferRow: View {
             Text(ByteCountFormatter.string(fromByteCount: Int64(offer.size), countStyle: .file))
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            // Plain buttons, not `TaskButton`s.
-            //
-            // They were `TaskButton`s whose actions returned `true` without
-            // looking, so every tap drew a tick — the exact claim
-            // `TaskButton` documents itself as existing to avoid. Neither
-            // answer is knowable at the moment of the tap: accepting only
-            // submits, and the transfer ends minutes later. What is knowable
-            // is that this phone has agreed, so the row says that instead and
-            // the tick is gone.
+            // Plain buttons, not `TaskButton`: accepting only submits, the transfer
+            // finishes minutes later, so a success tick here would be a false claim.
             if model.accepting.contains(offer.transfer) {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.small)

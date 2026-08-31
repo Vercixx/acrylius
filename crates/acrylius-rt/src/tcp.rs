@@ -1,8 +1,5 @@
-//! TCP over a local network, with `mdns-sd` for discovery.
-//!
-//! Framing is `u32` big-endian length followed by that many bytes, capped at
-//! 1 MiB. That cap is not decoration: without it a peer can name a length and
-//! make us allocate it before a single byte of payload has arrived.
+//! TCP over a local network, with `mdns-sd` for discovery. Frames are `u32`
+//! big-endian length then payload, capped so a peer cannot force allocation.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -19,8 +16,7 @@ use tokio::sync::mpsc;
 
 use crate::transport::{EventSink, Transport, TransportCmd};
 
-/// The largest frame we will read. A peer that announces more is hung up on
-/// rather than believed.
+/// The largest frame we will read; a peer announcing more is hung up on.
 pub const MAX_FRAME: u32 = 1 << 20;
 
 pub struct TcpTransport {
@@ -67,40 +63,19 @@ async fn read_frame(stream: &mut tokio::net::tcp::OwnedReadHalf) -> std::io::Res
     Ok(buf)
 }
 
-/// Pump one accepted or dialled connection until it ends.
 /// How long a peer may be silent, or leave data unacknowledged, before the
-/// socket is declared dead.
-///
-/// This is a *routing* deadline, not a network one. The core picks the best
-/// transport for a peer by transport id, and TCP outranks Bluetooth — so a Wi-Fi
-/// link that is dead but still believed carries every message into a hole, and
-/// the Bluetooth link sitting right beside it, connected and working, is never
-/// chosen. Twenty seconds is how long that can last.
-/// The number now lives in the core, beside the reason both hosts need it.
+/// socket is declared dead. A routing deadline: a dead-but-believed TCP link
+/// outranks a working Bluetooth one. The number lives in the core.
 const DEAD_PEER: std::time::Duration =
     std::time::Duration::from_millis(acrylius_core::link::DEAD_PEER_MS);
 
-/// How long to wait after a failed `accept` before trying again.
-///
-/// Only so a descriptor exhaustion cannot spin the accept loop at full speed;
-/// short enough that a peer arriving a moment later is not kept waiting.
+/// Backoff after a failed `accept`, so descriptor exhaustion cannot spin the loop.
 const ACCEPT_RETRY: std::time::Duration = std::time::Duration::from_millis(100);
 
-/// Make a vanished peer show up as a broken socket in bounded time.
-///
-/// Switching Wi-Fi off on a phone does not close anything. The peer simply stops
-/// answering, and by default the kernel is extraordinarily patient about that:
-/// unacknowledged data is retransmitted for roughly fifteen minutes before the
-/// connection errors, and a connection with *nothing* outstanding is never
-/// questioned at all. Both were observed on this project — a desktop holding
-/// `ESTAB … Send-Q 4559` to a phone that had been off Wi-Fi for minutes, while
-/// the phone sat connected over Bluetooth wondering why nothing worked.
-///
-/// So both cases are bounded. Keepalive covers the idle socket; `TCP_USER_TIMEOUT`
-/// covers the one with bytes stuck in the send queue, which is the case
-/// keepalive alone does *not* answer. Failures to set either are ignored: this
-/// is an improvement to how quickly a fault is noticed, and a platform that will
-/// not have it should still carry messages.
+/// Make a vanished peer show up as a broken socket in bounded time: keepalive
+/// covers the idle socket, `TCP_USER_TIMEOUT` the one with bytes stuck in the
+/// send queue, which keepalive alone does not. Failures to set either are
+/// ignored deliberately.
 fn bound_the_wait_for_a_dead_peer(stream: &TcpStream) {
     let sock = socket2::SockRef::from(stream);
     let keepalive = socket2::TcpKeepalive::new()
@@ -111,15 +86,8 @@ fn bound_the_wait_for_a_dead_peer(stream: &TcpStream) {
     let _ = sock.set_tcp_user_timeout(Some(DEAD_PEER));
 }
 
-/// What a browse event means to the core, if anything.
-///
-/// Free rather than buried in the browse task, because everything interesting
-/// about discovery is decided here — whether a record is us, which address to
-/// prefer, whether a withdrawal names anything we ever spoke about — and none
-/// of it was reachable by a test while it lived inside a `tokio::spawn` fed by
-/// a live mDNS daemon. `reported` is the memory that makes a withdrawal
-/// possible at all, and it is threaded through rather than captured so that a
-/// test can watch it.
+/// What a browse event means to the core, if anything. A free function so a
+/// test can reach it; `reported` is the memory that makes a withdrawal possible.
 fn discovery_event(
     id: TransportId,
     mine: &Fingerprint,
@@ -127,9 +95,7 @@ fn discovery_event(
     ev: mdns_sd::ServiceEvent,
 ) -> Option<Event> {
     match ev {
-        // Only if we ever spoke about it. A removal for something never
-        // reported — our own advertisement, or one that never resolved — is
-        // not news, and the core would have nothing to take off any list.
+        // Only if we ever reported it; otherwise the core has nothing to remove.
         mdns_sd::ServiceEvent::ServiceRemoved(_, fullname) => Some(Event::Undiscovered {
             transport: id,
             addr: reported.remove(&fullname)?,
@@ -142,9 +108,7 @@ fn discovery_event(
             if fp.as_ref() == Some(mine) {
                 return None;
             }
-            // Prefer IPv4. IPv6 link-local addresses carry a scope id that has
-            // to travel with them to be dialable, and nothing in M1 needs v6 on
-            // a LAN.
+            // Prefer IPv4: IPv6 link-local needs a scope id to be dialable.
             let addrs = info.get_addresses();
             let addr = addrs
                 .iter()
@@ -200,17 +164,9 @@ async fn serve(
 
     let reason = loop {
         tokio::select! {
-            // The writer ends for exactly three reasons, and all of them mean
-            // this link is over: `Close` sent it `None`, the link was removed
-            // from `writers` so its sender dropped, or the socket stopped
-            // taking bytes.
-            //
-            // Without this arm a closed link left its read half parked in
-            // `read_frame`, holding the task and the descriptor until the peer
-            // sent a FIN of its own — and a peer that has gone silent rather
-            // than closed sends nothing, so it waited out the keepalive
-            // instead, near a minute per link. Shutting down our write half is
-            // a request, not an answer; nothing was waiting for the reply.
+            // The writer ending always means the link is over. Without this arm
+            // a closed link's read half sits parked in `read_frame` until the
+            // keepalive fires.
             _ = &mut writer => break LinkDownReason::Closed,
             frame = read_frame(&mut rd) => match frame {
                 Ok(msg) => {
@@ -269,19 +225,10 @@ impl Transport for TcpTransport {
                             accept_writers.clone(),
                         ));
                     }
-                    // One failed accept is not the end of the listener.
-                    //
-                    // Most of what lands here is about the *connection* that was
-                    // being accepted, not the socket doing the accepting:
-                    // ECONNABORTED for a peer that hung up during the handshake,
-                    // and EMFILE or ENFILE when the process is briefly out of
-                    // descriptors. Returning made the daemon stop answering TCP
-                    // for the rest of its life over a peer that changed its
-                    // mind, with one `warn` line to explain it and a phone that
-                    // could still see the mDNS advertisement.
-                    //
-                    // A descriptor exhaustion would also spin this loop at full
-                    // speed, so it pauses before trying again.
+                    // Errors here are mostly about the accepted connection
+                    // (ECONNABORTED, EMFILE), not the listener; returning would
+                    // stop answering TCP for good. The pause keeps descriptor
+                    // exhaustion from spinning the loop.
                     Err(e) => {
                         tracing::warn!(error = %e, "accept failed; still listening");
                         tokio::time::sleep(ACCEPT_RETRY).await;
@@ -344,10 +291,8 @@ impl Transport for TcpTransport {
                     if enable {
                         let host = format!("{}.local.", hostname());
                         let mut props: HashMap<String, String> = txt.into_iter().collect();
-                        // The display name belongs to the transport's
-                        // advertisement, not to the core's TXT list: it is a
-                        // discovery hint, and nothing may decide anything from
-                        // it. Identity comes from the handshake.
+                        // The name is a discovery hint only; identity comes
+                        // from the handshake.
                         props
                             .entry("n".to_string())
                             .or_insert_with(|| self.name.clone());
@@ -382,13 +327,8 @@ impl Transport for TcpTransport {
                         let id = self.id;
                         let mine = self.fingerprint.clone();
                         tokio::spawn(async move {
-                            // What was reported for each instance, so that a
-                            // withdrawal can name it the same way.
-                            //
-                            // mDNS withdraws a *name*; the core was told an
-                            // address. Nothing else can bridge the two: the
-                            // record is gone by the time it is withdrawn, so
-                            // there is nothing left to resolve.
+                            // mDNS withdraws a *name*, but the core was told an
+                            // address; only this map can bridge the two.
                             let mut reported: HashMap<String, String> = HashMap::new();
                             while let Ok(ev) = rx.recv_async().await {
                                 if let Some(event) = discovery_event(id, &mine, &mut reported, ev) {
@@ -413,9 +353,7 @@ fn hostname() -> String {
         .unwrap_or_else(|_| "acrylius".to_string())
 }
 
-/// The default listen port, exposed so a daemon can override it for a second
-/// instance on the same machine, which is exactly what the M0 two-daemon test
-/// needs.
+/// Exposed so a daemon can override it for a second instance on one machine.
 #[must_use]
 pub fn default_port() -> u16 {
     DEFAULT_PORT
@@ -497,8 +435,7 @@ mod tests {
             matches!(waiting, Some(Event::Discovered { peer, .. }) if peer.pairing),
             "a machine advertising an open window was not reported as one"
         );
-        // Anything else is not an invitation. The flag decides whether a phone
-        // offers to pair, so a value that merely exists must not do.
+        // Only `pair=1` is an invitation, not a value that merely exists.
         let not = discovery_event(
             ID,
             &fp(1),
@@ -535,10 +472,6 @@ mod tests {
 
     #[test]
     fn a_withdrawal_names_the_address_the_sighting_did() {
-        // The whole reason `reported` exists: mDNS withdraws an instance name,
-        // and by then the record is gone, so there is nothing left to resolve
-        // an address from. Only what was remembered at resolve time can say
-        // which address has stopped working.
         let mut reported = HashMap::new();
         discovery_event(
             ID,
@@ -557,10 +490,7 @@ mod tests {
 
     #[test]
     fn a_withdrawal_for_something_never_reported_is_not_news() {
-        // Our own advertisement is withdrawn on shutdown like any other, and a
-        // record can lapse having never resolved. Neither is a machine leaving,
-        // and announcing one would ask the core to remove something it was
-        // never told about.
+        // Our own advertisement, or a record that never resolved, may lapse.
         let mut reported = HashMap::new();
         let ev = discovery_event(ID, &fp(1), &mut reported, removed("someone-else"));
         assert!(ev.is_none(), "invented a departure, got {ev:?}");

@@ -1,16 +1,7 @@
 //
-//  The single serial executor.
-//
-//  ONE task owns the core. Nothing else ever touches it.
-//
-//  Every input arrives as an event on a stream this task drains one at a time,
-//  and every action it produces is carried out before the next event is read.
-//  `handle()` is therefore never called from inside an action handler.
-//
-//  This is deliberately *not* a plain `actor` method that awaits. Swift actors
-//  are reentrant: an actor method that suspends can be interleaved with another
-//  call to the same actor, which is exactly the hazard this design exists to
-//  remove. A stream with one consumer gives real serialisation.
+//  Single serial executor: one task owns the core, draining events one at a
+//  time so `handle()` is never reentered. Not a plain actor method — actors
+//  are reentrant across suspension, a single-consumer stream is not.
 //
 
 import Foundation
@@ -19,8 +10,7 @@ public actor CoreRuntime {
     private let core: AcryliusCore
     private let store: Store
     private let effector: Effector
-    /// Files this device has offered. It holds the paths so that nothing else
-    /// has to: not the core, not a plugin, and certainly not a peer.
+    /// Holds offered files' paths so the core, plugins and peers never do.
     public let outbox = FileOutbox()
     public let inbox = FileInbox()
     private weak var ui: UiSink?
@@ -48,10 +38,8 @@ public actor CoreRuntime {
         effector: Effector = NullEffector(),
         effects: [FfiEffectKind] = []
     ) throws -> CoreRuntime {
-        // `try`, deliberately. A store that cannot read the identity right now
-        // must stop this bootstrap, not fall through to the generate branch:
-        // that branch overwrites, and on a locked phone the read fails for a
-        // reason that has nothing to do with whether an identity exists.
+        // A failed read must not fall through to generate-and-overwrite: on a
+        // locked phone the read can fail even though an identity exists.
         let key: Data
         if let existing = try store.identityKey() {
             key = existing
@@ -73,8 +61,7 @@ public actor CoreRuntime {
     public func add(transport: any Transport) async {
         transports[transport.transportId] = transport
         await transport.start { [weak self] event in
-            // Transports run on their own tasks and only ever yield. This is the
-            // one-way door that makes reentrancy impossible.
+            // Transports only ever yield here: the one-way door against reentrancy.
             Task { await self?.submit(event) }
         }
     }
@@ -84,25 +71,16 @@ public actor CoreRuntime {
         events?.yield(event)
     }
 
-    /// Ask every transport to check the links it is holding.
-    ///
-    /// Called when the app comes back to the foreground. See
-    /// `Transport.revalidate`: a suspended process notices nothing, so the
-    /// links it wakes up believing in have to be questioned rather than
-    /// trusted. Whatever is retired here becomes a `LinkDown`, and the core's
-    /// reconnect heartbeat dials again.
+    /// On return to foreground: a suspended process notices nothing, so held
+    /// links are questioned rather than trusted. See `Transport.revalidate`.
     public func revalidateLinks() async {
         for t in transports.values {
             await t.revalidate()
         }
     }
 
-    /// Ask every transport to start discovery over.
-    ///
-    /// Also on the way back to the foreground, and for the same reason as
-    /// `revalidateLinks`: a suspended process notices nothing. A browse that
-    /// failed while the app was away is still failed when it comes back, and
-    /// nothing else would ever replace it — see `Transport.rediscover`.
+    /// Same reason as `revalidateLinks`: a browse that failed while the app was
+    /// suspended stays failed, and nothing else would replace it.
     public func rediscover() async {
         for t in transports.values {
             await t.rediscover()
@@ -146,12 +124,8 @@ public actor CoreRuntime {
     public func capsOut() -> [String] { core.capsOut() }
     public func capsServed() -> [String] { core.capsServed() }
 
-    /// Milliseconds since the Unix epoch.
-    ///
-    /// For the handshake timestamp only. The peer compares it against its own
-    /// clock, so it has to be a clock they can both name — an uptime means
-    /// nothing to anyone else, and sending one had every session refused as
-    /// stale.
+    /// Unix-epoch milliseconds, for the handshake timestamp only: the peer
+    /// compares it against its own clock, so an uptime would read as stale.
     private func wallMs() -> UInt64 {
         UInt64(max(0, Date().timeIntervalSince1970 * 1000))
     }
@@ -169,8 +143,7 @@ public actor CoreRuntime {
         do {
             outcome = try core.handle(monotonicMs: nowMs(), wallMs: wallMs(), event: event)
         } catch {
-            // No peer: the core refused to handle an event at all, which is
-            // this machine's problem and not a conversation with anybody.
+            // The core refused the event outright; no peer is involved.
             ui?.emit(.error(peer: nil, code: "bad_input", detail: String(describing: error)))
             return
         }
@@ -180,9 +153,8 @@ public actor CoreRuntime {
         arm(outcome.nextDeadlineMs)
     }
 
-    /// Exactly one timer, re-armed on every outcome. The core hands back a
-    /// single absolute deadline precisely so a host never has to keep a set of
-    /// timer identifiers in step with it.
+    /// One timer, re-armed on every outcome: the core hands back a single
+    /// absolute deadline so hosts never juggle timer identifiers.
     private func arm(_ deadline: UInt64?) {
         timer?.cancel()
         guard let deadline else { timer = nil; return }
@@ -200,16 +172,14 @@ public actor CoreRuntime {
             await transports[transport]?.dial(addr: addr, token: dial)
 
         case let .linkSend(link, msg):
-            // A link belongs to one transport, but the core does not track
-            // which, so offer it to each and let the owner act.
+            // The core does not track which transport owns a link; offer to each.
             for t in transports.values { await t.send(link: link, msg: msg) }
 
         case let .close(link):
             for t in transports.values { await t.close(link: link) }
 
         case let .effect(token, effect):
-            // Off to its own task so a slow effector cannot stall the pump. Its
-            // answer arrives as an ordinary event.
+            // Its own task so a slow effector cannot stall the pump.
             Task { [weak self, effector] in
                 let result = await effector.run(effect)
                 await self?.submit(.effectDone(token: token, result: result))
@@ -229,13 +199,8 @@ public actor CoreRuntime {
             await transports[transport]?.discover(enable: enable)
 
         case let .bulkSend(transfer, endpoint, key):
-            // Its own task, and a detached one: `bulkSend` is a blocking socket
-            // call that runs until the file is across, and running it on the
-            // pump would stop this device answering anything for the duration.
-            //
-            // The key comes from the core and is never worked out here. It is
-            // derived from the session, which is the core's alone — a host that
-            // could derive one could derive any of them.
+            // Detached, so a blocking transfer cannot stall the pump. The
+            // key comes from the session; anyone holding it could derive them all.
             Task.detached { [weak self, outbox] in
                 guard let path = await outbox.path(for: transfer) else {
                     await self?.submit(.bulkFinished(
@@ -256,15 +221,8 @@ public actor CoreRuntime {
             }
 
         case let .bulkListen(transfer, offeredAs, key, expectBytes):
-            // Somebody on this phone has accepted a file. Bind first and answer
-            // with the endpoint, then block on the socket in a task of its own
-            // — the same shape as sending, and for the same reason: a transfer
-            // runs until it is done and the pump has other work.
-            //
-            // The address is looked up rather than assumed. A phone that is not
-            // on Wi-Fi has nowhere a computer could dial, and saying so now is
-            // much kinder than an endpoint that is never answered, which the
-            // far end cannot tell from a slow disk.
+            // Bind and answer with the endpoint before blocking in a task of
+            // its own. A phone not on Wi-Fi has nowhere to dial, so fail now.
             guard let host = LocalAddress.wifiIPv4() else {
                 submit(.bulkFinished(
                     transfer: transfer, ok: false,
@@ -287,18 +245,12 @@ public actor CoreRuntime {
                 await inbox.forget(transfer)
                 return
             }
-            // Before the receive, not after: the sender cannot connect until it
-            // has been told where, and nothing is listening for it until this
-            // has gone back through the core.
+            // Before the receive: the sender cannot connect until told where.
             submit(.bulkListening(transfer: transfer, endpoint: listener.endpoint()))
             Task.detached { [weak self, inbox] in
                 do {
-                    // Waiting and receiving, told apart. Only this end knows
-                    // when the computer actually dialled, and the core needs
-                    // that: it gives up on a sender that never arrives, and must
-                    // never give up on a file that is still coming.
-                    // The sender's number, not ours: it writes the greeting and
-                    // knows only its own numbering.
+                    // accept/receive split: gives up on a sender that never
+                    // dials, not on a file still coming. `offeredAs` is the sender's id, not ours.
                     try listener.accept(transfer: offeredAs)
                     await self?.submit(.bulkStarted(transfer: transfer))
                     let got = try listener.receive(
@@ -313,9 +265,8 @@ public actor CoreRuntime {
             }
 
         case let .bulkUnsupported(transfer):
-            // Everything the core cannot ask this host to do. Answered rather
-            // than ignored: a peer waiting on a transfer that is never coming
-            // cannot tell that from one that is merely slow.
+            // Answered rather than ignored: a peer can't tell "never coming"
+            // from "merely slow".
             submit(.bulkFinished(
                 transfer: transfer,
                 ok: false,

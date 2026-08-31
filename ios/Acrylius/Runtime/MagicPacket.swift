@@ -1,16 +1,8 @@
 //
-//  Sending a magic packet from the phone.
-//
-//  The packet itself is built in Rust, so there is one definition of it. This
-//  only puts the bytes on the wire.
-//
-//  Unicast is the primary path and not a fallback. A network interface matches a
-//  magic packet by its payload and pays no attention to the destination address,
-//  so a datagram aimed at the machine's last known address wakes it exactly as
-//  well as a broadcast, and iOS gates broadcast behind an entitlement a free
-//  developer account cannot get. The requirement is that the router still holds
-//  an ARP entry for the sleeping machine, which in practice means a DHCP
-//  reservation and a static ARP entry.
+//  Sending a magic packet from the phone; built in Rust, this only puts the
+//  bytes on the wire. Unicast is primary, not a fallback — a NIC matches a
+//  magic packet by payload regardless of destination, and iOS gates broadcast
+//  behind an entitlement a free account can't get.
 //
 
 #if canImport(Network)
@@ -33,19 +25,12 @@ private final class Once: @unchecked Sendable {
 }
 
 public enum MagicPacketSender {
-    /// How long one destination may take before it is given up on.
-    ///
-    /// Per destination, and there are at most two — the last known address and
-    /// the broadcast — so the whole call is bounded by twice this. It has to
-    /// stay well inside the moment a person expects a button press to finish.
+    /// How long one destination may take before it is given up on. At most
+    /// two destinations are tried, so the whole call is bounded by twice this.
     static let sendTimeout: TimeInterval = 2
 
     /// Send to every destination in order. Returns true if any send succeeded.
-    ///
-    /// Every destination is tried even after one succeeds, because a send
-    /// completing only means the datagram left. Whether the machine woke is not
-    /// knowable from here, which is why the caller confirms by looking for the
-    /// machine to come back.
+    /// A send succeeding only means the datagram left, not that the machine woke.
     public static func send(_ packet: Data, to destinations: [String], port: UInt16) async -> Bool {
         var any = false
         for destination in destinations {
@@ -58,30 +43,16 @@ public enum MagicPacketSender {
         guard let p = NWEndpoint.Port(rawValue: port) else { return false }
         let connection = NWConnection(host: .init(host), port: p, using: .udp)
         return await withCheckedContinuation { continuation in
-            // Not a captured `var`. Two Network.framework callbacks can arrive
-            // concurrently (a send completing while the state handler reports
-            // `.cancelled`, say), and resuming a continuation twice is a crash,
-            // not a warning. `Once` makes the winner unambiguous.
+            // Not a captured `var`: two Network.framework callbacks can arrive
+            // concurrently, and resuming a continuation twice crashes.
             let once = Once()
             let finish: @Sendable (Bool) -> Void = { ok in
                 guard once.claim() else { return }
                 connection.cancel()
                 continuation.resume(returning: ok)
             }
-            // Bounded, because nothing else here is.
-            //
-            // `stateUpdateHandler` only resolves this on `.ready`, `.failed`
-            // or `.cancelled`, and a connection can sit in `.waiting`
-            // indefinitely — which is exactly what happens where there is no
-            // Local Network permission to send with. The continuation was then
-            // never resumed, so `perform()` never returned, so the Control
-            // Centre button stayed lit with no dialog and no way to clear it
-            // but pressing it again.
-            //
-            // Failing is the right answer as well as a bounded one: a datagram
-            // that has not left in two seconds is not going to, and the caller
-            // confirms a wake by watching for the machine to come back rather
-            // than by believing this.
+            // Bounded because `stateUpdateHandler` never fires without Local
+            // Network permission — the connection just sits in `.waiting` forever.
             let timeout = DispatchWorkItem { finish(false) }
             DispatchQueue.global().asyncAfter(deadline: .now() + Self.sendTimeout, execute: timeout)
 
@@ -89,9 +60,8 @@ public enum MagicPacketSender {
                 switch state {
                 case .ready:
                     connection.send(content: packet, completion: .contentProcessed { error in
-                        // EACCES here is iOS refusing a broadcast, which is
-                        // expected without the multicast entitlement. The
-                        // unicast attempt is the one that matters.
+                        // EACCES here is iOS refusing broadcast without the
+                        // multicast entitlement; the unicast attempt is what matters.
                         finish(error == nil)
                     })
                 case .failed, .cancelled:

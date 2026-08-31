@@ -1,23 +1,8 @@
 //! `org.acrylius.media/1`: control whatever is playing.
 //!
-//! The protocol half only. Which player a machine has, and what "the active
-//! one" means there, is the host's business — on Linux that is MPRIS, and on
-//! another host it would be something else entirely.
-//!
-//! Two things are decided here rather than in the host, because a second host
-//! would have to make the same promises:
-//!
-//! * A command with no player named goes to the active one. A remote whose
-//!   buttons stop working because a second player appeared is worse than one
-//!   that occasionally guesses, and the guess is visible: `state` says which
-//!   player is active, so a caller that cares can name one.
-//! * `position` is reported, never counted. A phone that ticked a position
-//!   forward on its own would drift, and would keep ticking after the media
-//!   stopped somewhere it could not see.
-//!
-//! Album art is deliberately absent. MPRIS hands over a URL, usually to a file
-//! on the machine the phone cannot read, and the image itself is far past what
-//! an envelope should carry — it belongs on the bulk channel, once there is one.
+//! Protocol half only; which player a machine has is the host's business.
+//! A command with no player named goes to the active one, and `position` is
+//! reported, never counted forward: a receiver that ticked it would drift.
 
 use std::collections::BTreeMap;
 
@@ -28,58 +13,29 @@ use crate::vocab::{Effect, EffectKind, EffectResult, EffectToken, MediaAction, U
 
 pub const CAP: &str = "org.acrylius.media/1";
 
-/// How long a host may spend waiting for a command to show up in a reading
-/// before it answers with whatever it has.
-///
-/// A player acts on an MPRIS call asynchronously, so the first reading after one
-/// is routinely the state we started from. Short, because most players act in
-/// well under a tenth of a second, and a player that has not moved by now was
-/// probably never going to.
+/// How long a host may wait for a command to show up in a reading before it
+/// answers with whatever it has; players act on MPRIS calls asynchronously.
 pub const CONTROL_CONFIRM_MS: u64 = 1_500;
 
-/// How long a client waits for the answer to a media command.
-///
-/// The host's budget plus [`crate::plugin::REPLY_SLACK_MS`], for the reason
-/// spelled out on [`crate::plugins::session::LOCK_REPLY_BUDGET_MS`].
+/// Client-side reply budget: the host's window plus
+/// [`crate::plugin::REPLY_SLACK_MS`]. See
+/// [`crate::plugins::session::LOCK_REPLY_BUDGET_MS`].
 pub const CONTROL_REPLY_BUDGET_MS: u64 = CONTROL_CONFIRM_MS + crate::plugin::REPLY_SLACK_MS;
 
-// The same rule as the session budgets, refused at compile time. See
-// `plugins::session` for the bug it exists to prevent.
 const _: () = assert!(CONTROL_REPLY_BUDGET_MS > CONTROL_CONFIRM_MS);
 
-/// How often a client re-reads a peer's media while it is watching something
-/// play.
-///
-/// A position is reported and never counted forward, and a peer does not
-/// broadcast a state for a position change alone — otherwise anything playing
-/// would send a message a second, forever, to every device connected. So the
-/// side that wants a moving clock asks for it, and the interval is the whole of
-/// how live it feels.
-///
-/// Here rather than in the view that sleeps for it, next to the budgets it has
-/// to stay sensible against: this must comfortably exceed
-/// [`CONTROL_REPLY_BUDGET_MS`]'s worst case being *shorter* than it, or a poll
-/// lands on top of every command and the two race to write the same state.
+/// How often a client re-reads a peer's media while watching it play. Peers do
+/// not broadcast position changes, so this interval is how live it feels.
 pub const WATCH_INTERVAL_MS: u64 = 700;
 
-/// The same, over a link where a round trip is expensive.
-///
-/// Bluetooth carries a couple of hundred bytes per fragment and a query and its
-/// answer are several. Polling it three times a fast link's rate would spend
-/// the transport that exists so the phone keeps working when Wi-Fi does not.
+/// The same, over a link (BLE) where a round trip is expensive.
 pub const WATCH_INTERVAL_SLOW_MS: u64 = 2_000;
 
 /// How often to re-read when nothing is playing.
-///
-/// A paused track's position does not move, so the only thing a poll can
-/// discover is that somebody started something — which is worth noticing, and
-/// not worth noticing quickly.
 pub const IDLE_INTERVAL_MS: u64 = 5_000;
 
-// A poll that can arrive while a command is still being confirmed makes two
-// writers of one reading. The watch interval is deliberately shorter than the
-// host's confirm window, so this asserts the relationship that actually
-// matters: the *idle* rate is the one that must not sit inside it.
+// A poll arriving inside the confirm window makes two writers of one reading;
+// the idle rate is the one that must stay outside it.
 const _: () = assert!(IDLE_INTERVAL_MS > CONTROL_CONFIRM_MS);
 const _: () = assert!(WATCH_INTERVAL_SLOW_MS > WATCH_INTERVAL_MS);
 
@@ -112,9 +68,8 @@ pub struct MediaPlayer {
     /// Milliseconds. Zero when the player does not say, common for streams.
     #[n(6)]
     pub length_ms: u64,
-    /// Milliseconds, as read at the moment the state was taken. Never counted
-    /// forward by a receiver: it would drift, and would keep counting after the
-    /// media stopped somewhere the receiver cannot see.
+    /// Milliseconds at the moment the state was taken; never counted forward
+    /// by a receiver.
     #[n(7)]
     pub position_ms: u64,
     /// 0 to 100, or absent when the player has no volume of its own.
@@ -126,8 +81,7 @@ pub struct MediaPlayer {
     pub can_go_previous: bool,
     #[n(11)]
     pub can_seek: bool,
-    /// False for a player that only reports. Sending it commands is refused
-    /// rather than attempted, so a dead button is visibly dead.
+    /// False for a player that only reports; commands to it are refused.
     #[n(12)]
     pub can_control: bool,
 }
@@ -141,13 +95,8 @@ pub struct MediaState {
     /// nothing playing anywhere.
     #[n(1)]
     pub active: String,
-    /// The machine's own output volume, 0 to 100, or `None` where there is no
-    /// mixer to ask.
-    ///
-    /// Separate from a player's, and not the same question. MPRIS gives every
-    /// player a writable `Volume` that a great many of them ignore, so a remote
-    /// that offered only that would have a slider working for some of what you
-    /// play and silently not for the rest. This one always moves something.
+    /// The machine's own output volume, 0 to 100, `None` with no mixer to ask.
+    /// Separate from a player's `Volume`, which many players ignore.
     #[n(2)]
     pub system_volume: Option<u8>,
 }
@@ -199,23 +148,9 @@ fn simple_action(ty: &str) -> Option<MediaAction> {
 }
 
 /// Whether a reading taken after `action` shows the player having acted on it.
-///
-/// Here rather than in either host for the same reason `safe_name` is in
-/// `acrylius_proto`: both ends need this answer and they do not share a runtime.
-/// A desktop waits on it before it answers a command, and a phone uses it to
-/// decide whether the command it sent landed. A second implementation of "did it
-/// land" is how one of them ends up reporting success for something that did
-/// nothing — which is the failure this project keeps running into.
-///
-/// `player` is the id the command named, or empty for "whichever was active",
-/// which is resolved against `before` because that is the reading the command
-/// was aimed at.
-///
-/// `None` means a reading cannot answer the question, and a caller that gets it
-/// must stop waiting rather than guess. A seek moves a position that also moves
-/// on its own, so nothing in a later reading tells a seek that worked from one
-/// that was ignored; a volume set is confirmed by the host that wrote it,
-/// against the value it asked for, which is not something a reading shows.
+/// Shared by both ends so "did it land" has one definition. Empty `player`
+/// means "whichever was active", resolved against `before`. `None` means a
+/// reading cannot answer (seek, volume); the caller must stop waiting.
 #[must_use]
 pub fn landed(
     action: &MediaAction,
@@ -230,8 +165,7 @@ pub fn landed(
     };
     let find = |s: &MediaState| s.players.iter().find(|p| p.id == target).cloned();
     let was = find(before);
-    // A player that has gone away since is not going to report anything. It has
-    // certainly stopped; it has certainly not started.
+    // A player that has gone away has certainly stopped and not started.
     let Some(now) = find(now) else {
         return Some(matches!(action, MediaAction::Stop));
     };
@@ -248,8 +182,7 @@ pub fn landed(
         MediaAction::Play => Some(now.status == PLAYING),
         MediaAction::Pause => Some(now.status == PAUSED),
         MediaAction::Stop => Some(now.status == STOPPED),
-        // Nothing absolute to compare against: the answer is whichever way it
-        // was pointing before.
+        // Nothing absolute to compare against: judged by whether it flipped.
         MediaAction::PlayPause => was.map(|w| w.status != now.status),
         MediaAction::Next | MediaAction::Previous => was.map(|w| track(&w) != track(&now)),
         MediaAction::Seek { .. }
@@ -258,16 +191,8 @@ pub fn landed(
     }
 }
 
-/// Whether a new reading is worth telling anyone about.
-///
-/// Everything except where the track has got to. A playing track's position
-/// changes with every reading, so comparing whole states would find a
-/// difference every time and broadcast a message a second, forever, to every
-/// connected device. What a listener actually needs to hear about is a track
-/// change, a pause, a volume move, or a player coming and going.
-///
-/// A phone still gets a position: it is in the state it receives, and it asks
-/// again when someone is looking at it.
+/// Whether a new reading is worth telling anyone about. Position alone is not:
+/// a playing track differs on every reading and would broadcast forever.
 fn worth_announcing(before: Option<&MediaState>, now: &MediaState) -> bool {
     let Some(before) = before else {
         return true;
@@ -312,18 +237,14 @@ impl MediaPlugin {
         }
     }
 
-    /// Turn a message into an effect, refusing what cannot be honoured.
-    ///
-    /// Free rather than private, because a client needs the same mapping to ask
-    /// [`landed`] whether the verb it sent has taken effect, and a second copy of
-    /// "what does `playpause` mean" is how the two ends come to disagree.
+    /// Turn a message into an effect, refusing what cannot be honoured. Public
+    /// because a client needs the same mapping to ask [`landed`] about its verb.
     pub fn action_for(ty: &str, cmd: &MediaCommand) -> Result<MediaAction, PluginError> {
         if let Some(a) = simple_action(ty) {
             return Ok(a);
         }
         match ty {
-            // Relative, because that is what a skip button means and it needs
-            // no agreement about where the track currently is.
+            // Relative: what a skip button means, needing no agreed position.
             "seek" => Ok(MediaAction::Seek {
                 offset_ms: cmd.value,
             }),
@@ -332,9 +253,7 @@ impl MediaPlugin {
                 Ok(MediaAction::SetPosition { ms })
             }
             "volume" => {
-                // Range-checked here rather than at the host: every host would
-                // otherwise have to remember, and one that forgot would hand a
-                // player something it may or may not check itself.
+                // Range-checked here so every host does not have to remember.
                 if !(0..=100).contains(&cmd.value) {
                     return Err(PluginError::NotAllowed);
                 }
@@ -356,8 +275,7 @@ impl Plugin for MediaPlugin {
         if !self.connected.contains(peer) {
             self.connected.push(peer.clone());
         }
-        // Say what is playing without being asked. A remote that shows nothing
-        // until you press something is a remote people assume is broken.
+        // Say what is playing without being asked.
         if let Some(state) = self.last.clone()
             && let Ok(body) = minicbor::to_vec(&state)
         {
@@ -399,8 +317,7 @@ impl Plugin for MediaPlugin {
                 Ok(())
             }
             ty => {
-                // An empty body is a bare verb: `next` needs no arguments, and
-                // requiring an empty map for it would be ceremony.
+                // An empty body is a bare verb: `next` needs no arguments.
                 let cmd: MediaCommand = if env.body.is_empty() {
                     MediaCommand::default()
                 } else {
@@ -411,10 +328,8 @@ impl Plugin for MediaPlugin {
                     player: cmd.player,
                     action,
                 });
-                // Answered with the state afterwards rather than an
-                // acknowledgement. What a caller wants to know is what happened
-                // to the music, and reading it back is the only honest answer:
-                // a player may ignore a command, or clamp a seek, or stop.
+                // Answered with the state afterwards, not an acknowledgement:
+                // a player may ignore a command, clamp a seek, or stop.
                 self.pending.insert(
                     token,
                     Pending {
@@ -454,8 +369,7 @@ impl Plugin for MediaPlugin {
                 Ok(())
             }
             ty => {
-                // A local UI sends the same verbs a peer does, so the same
-                // validation applies and there is one place it lives.
+                // A local UI sends the same verbs a peer does; one validation.
                 let cmd: MediaCommand = if body.is_empty() {
                     MediaCommand::default()
                 } else {
@@ -489,10 +403,8 @@ impl Plugin for MediaPlugin {
                     }
                     return;
                 }
-                // A reply is not a broadcast, but it is a fresh reading, and it
-                // has already updated the dedupe cache above — so the next poll
-                // would find nothing changed and tell nobody. One phone pressing
-                // pause left every other device still showing it playing.
+                // A reply is also a fresh reading that already updated the
+                // dedupe cache; the other peers must still hear about it.
                 if changed {
                     self.broadcast_except(cx, &state, Some(&p.peer));
                 }
@@ -559,8 +471,8 @@ mod tests {
 
     #[test]
     fn a_broadcast_skips_the_peer_that_left_and_reaches_the_one_that_stayed() {
-        // See the twin of this in `plugins::session`. The third of three
-        // identical untested `retain`s that mutation testing turned up.
+        // Mutation testing found the same untested `retain` in every plugin
+        // that keeps a peer list.
         let mut p = MediaPlugin::default();
         let gone = peer();
         let stayed = DeviceId::of(&[9u8; 32]);
@@ -588,10 +500,8 @@ mod tests {
 
     #[test]
     fn a_pause_has_landed_only_once_the_player_says_paused() {
-        // The whole point: a reading taken before the player acted looks exactly
-        // like a player that ignored the command, and answering the first one
-        // with "done" is how a phone ends up showing a running timeline on a
-        // track that is already paused.
+        // A reading taken before the player acted looks exactly like a player
+        // that ignored the command.
         let before = state(PLAYING);
         assert_eq!(
             landed(&MediaAction::Pause, "", &before, &state(PLAYING)),
@@ -606,9 +516,8 @@ mod tests {
 
     #[test]
     fn a_position_that_moved_on_its_own_is_not_a_command_landing() {
-        // The bug this function exists to remove: comparing whole states makes a
-        // playing track answer "landed" for any command at all, because its
-        // position moves between any two readings.
+        // Comparing whole states would answer "landed" for any command at all,
+        // because position moves between any two readings.
         let before = MediaState {
             players: vec![player(PLAYING, 1_000)],
             ..state(PLAYING)
@@ -627,10 +536,8 @@ mod tests {
 
     #[test]
     fn play_and_stop_are_answered_from_the_status_the_player_reports() {
-        // The other two absolute verbs, each needing both answers. A test that
-        // only checks the success case passes just as happily when the
-        // comparison has been inverted — which is how the pause arm ended up
-        // being the only one of the three that was really pinned.
+        // Both answers checked: a success-only test passes just as happily
+        // with the comparison inverted.
         let paused = state(PAUSED);
         assert_eq!(
             landed(&MediaAction::Play, "", &paused, &state(PAUSED)),
@@ -709,8 +616,8 @@ mod tests {
 
     #[test]
     fn what_a_reading_cannot_answer_is_not_guessed_at() {
-        // A caller that gets `None` stops waiting. Returning `false` here would
-        // make every seek wait out its deadline and then report a failure.
+        // Returning `false` here would make every seek wait out its deadline
+        // and then report a failure.
         let s = state(PLAYING);
         for action in [
             MediaAction::Seek { offset_ms: 30_000 },
@@ -723,8 +630,7 @@ mod tests {
 
     #[test]
     fn a_named_player_is_answered_and_not_the_active_one() {
-        // A command that names a player must be judged on that player, or a
-        // second player happening to pause would answer for it.
+        // Judged on the named player, or a second player pausing answers for it.
         let before = MediaState {
             players: vec![
                 MediaPlayer {
@@ -763,8 +669,6 @@ mod tests {
 
     #[test]
     fn a_bare_verb_needs_no_body() {
-        // `next` with an empty body is the common case, and requiring an empty
-        // map for it would be ceremony a hand-written client would get wrong.
         let mut p = MediaPlugin::default();
         let r = run(0, |cx| {
             p.on_message(cx, &peer(), &envelope(1, CAP, "next", b""))
@@ -796,8 +700,6 @@ mod tests {
 
     #[test]
     fn a_volume_outside_the_range_is_refused_here() {
-        // Refused in the plugin so every host does not have to remember, and so
-        // a host that forgot cannot hand a player something out of range.
         let mut p = MediaPlugin::default();
         for bad in [-1, 101] {
             let body = command(&MediaCommand {
@@ -850,9 +752,8 @@ mod tests {
 
     #[test]
     fn a_command_is_answered_with_what_happened_to_the_music() {
-        // Not an acknowledgement. A player may ignore a command, clamp a seek,
-        // or stop of its own accord, and only reading it back afterwards says
-        // which.
+        // Not an acknowledgement: only reading the state back says what the
+        // player actually did.
         let mut p = MediaPlugin::default();
         let r = run(0, |cx| {
             p.on_message(cx, &peer(), &envelope(7, CAP, "playpause", b""))
@@ -881,8 +782,6 @@ mod tests {
 
     #[test]
     fn nothing_is_broadcast_when_nothing_changed() {
-        // A player reports its position, so a poll that broadcast every answer
-        // would send a message a second forever.
         let mut p = MediaPlugin::default();
         run(0, |cx| p.on_peer_connected(cx, &peer()));
 
@@ -904,10 +803,8 @@ mod tests {
 
     #[test]
     fn a_track_playing_on_does_not_announce_itself_every_second() {
-        // The case that matters, and the one identical states do not cover: a
-        // playing track's position moves with every reading, so comparing whole
-        // states would broadcast to every connected device once a second for as
-        // long as anything is playing.
+        // The case identical states do not cover: position moves with every
+        // reading, so comparing whole states would broadcast once a second.
         let mut p = MediaPlugin::default();
         run(0, |cx| p.on_peer_connected(cx, &peer()));
 

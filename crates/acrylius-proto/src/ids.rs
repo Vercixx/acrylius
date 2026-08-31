@@ -1,16 +1,6 @@
-//! Device identities, derived from a Noise static public key.
-//!
-//! Two invariants carried over from `pc-helper-ios`, both earned:
-//!
-//! 1. Identifiers are derived by the receiver, never self-asserted. A peer
-//!    sends its public key; the receiver computes the id. That is why two
-//!    devices cannot collide onto one record by claiming the same name.
-//! 2. Base64url decoding is strict. See [`crate::b64`]: a lenient decoder would
-//!    turn an identifier into a set of spellings rather than a value.
-//!
-//! Both derivations are domain-tagged. The old project tagged its per-message
-//! canonical strings but not its identifiers; tagging both means a fingerprint
-//! can never be confused for a device id even if the truncation changed.
+//! Device identities, derived by the receiver from a Noise static public key,
+//! never self-asserted. Both derivations are domain-tagged so a fingerprint can
+//! never be read as a device id.
 
 use alloc::string::String;
 use sha2::{Digest, Sha256};
@@ -23,19 +13,13 @@ pub type PublicKey = [u8; 32];
 const FP_TAG: &[u8] = b"acrylius/v1/fp";
 const DID_TAG: &[u8] = b"acrylius/v1/did";
 
-/// Full fingerprint: 32 bytes of SHA-256, 43 base64url chars.
-///
-/// This is what a human compares and what the mDNS TXT record publishes. The
-/// raw public key is deliberately not published (see `PROTOCOL.md`); keeping it
-/// secret is what lets the `IKpsk2` first message stay opaque to an observer.
+/// Full fingerprint: 32 bytes of SHA-256, 43 base64url chars. What a human
+/// compares; the raw public key itself is never published (`PROTOCOL.md`).
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct Fingerprint(String);
 
-/// Truncated identifier: first 16 bytes of a distinct hash, 22 base64url chars.
-///
-/// Short enough to sit in a TXT record and a log line. 128 bits of a
-/// second-preimage-resistant hash over a key nobody else holds is ample; this
-/// is an index, and [`Fingerprint`] remains the thing that is compared.
+/// Truncated identifier: first 16 bytes of a distinct hash, 22 base64url
+/// chars. An index; [`Fingerprint`] is what gets compared.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct DeviceId(String);
 
@@ -47,11 +31,8 @@ macro_rules! str_id {
                 &self.0
             }
 
-            /// Parse an id received over the wire or read from disk.
-            ///
-            /// Round-trips through the strict decoder rather than pattern-matching
-            /// the string, so a non-canonical spelling is rejected here and not
-            /// three layers deeper where it would already be a map key.
+            /// Parse an id from the wire or disk; the strict decoder rejects
+            /// non-canonical spellings here rather than deeper in a map key.
             pub fn parse(s: &str) -> Result<Self, b64::B64Error> {
                 let n = b64::decode(s)?.len();
                 if n != Self::BYTES {
@@ -105,8 +86,7 @@ str_id!(DeviceId);
 mod tests {
     use super::*;
 
-    /// The key of all zeroes. A fixed, boring vector that any other
-    /// implementation can reproduce with `sha256sum`.
+    /// A fixed vector any other implementation can reproduce with `sha256sum`.
     const ZERO: PublicKey = [0u8; 32];
 
     #[test]
@@ -117,8 +97,7 @@ mod tests {
 
     #[test]
     fn domain_tags_actually_separate_the_two() {
-        // Without distinct tags, device_id would be a prefix of the fingerprint
-        // and the two namespaces would leak into each other.
+        // Without distinct tags the device id would be a prefix of the fingerprint.
         let fp = Fingerprint::of(&ZERO);
         let did = DeviceId::of(&ZERO);
         assert!(
@@ -154,8 +133,7 @@ mod tests {
 
     #[test]
     fn parse_rejects_non_canonical_spelling() {
-        // Flip the last char to one carrying stray low bits: same decoded value,
-        // different spelling. It must not become a second valid identifier.
+        // Same decoded value, different spelling: must not become a second valid id.
         let fp = Fingerprint::of(&ZERO);
         let mut s = alloc::string::String::from(fp.as_str());
         s.pop();

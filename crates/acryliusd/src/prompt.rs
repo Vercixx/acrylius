@@ -1,21 +1,7 @@
-//! Asking a person, where they will actually see the question.
-//!
-//! Two questions land here: a file offered to this machine, and a device asking
-//! to pair with it. Until now the only way to answer either was a terminal,
-//! which meant the answer arrived whenever that person next thought to look and
-//! the far end waited in the meantime. This is a desktop, and a question for the
-//! person at it belongs on their screen.
-//!
-//! Nothing here decides anything. It puts a question up, reports which button
-//! was pressed, and turns that into the same local command `acryliusctl` sends.
-//! A machine with no notification daemon loses the notifications and keeps the
-//! CLI, which is why none of this is required for either to work.
-//!
-//! **The pairing prompt is a security boundary and the file prompt is not.**
-//! Pairing runs plain `XX`, so the six digits shown here are the only thing
-//! separating the machine somebody tapped from something relaying between two
-//! handshakes. A change that made this notification easier to dismiss, or that
-//! auto-answered it, would remove the authentication rather than streamline it.
+//! Asking a person where they'll see the question: a file offer or a pairing
+//! request, turned into the same command `acryliusctl` sends.
+//! The pairing prompt is a security boundary (plain `XX`; these six digits are
+//! all that authenticates it) — the file prompt is not.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -39,18 +25,13 @@ pub struct Prompter {
     asked: Mutex<BTreeMap<u32, (String, u64)>>,
     /// Which directory a finished notification would open.
     finished: Mutex<BTreeMap<u32, std::path::PathBuf>>,
-    /// The pairing question currently on screen, if any.
-    ///
-    /// One, because the core answers one pairing at a time. Kept so it can be
-    /// taken down when the pairing resolves some other way — the far end gave
-    /// up, somebody used the CLI, it lapsed — rather than leaving a stale
-    /// question that pairs whoever presses it next.
+    /// The pairing question currently on screen, if any (only one, since the
+    /// core handles one pairing at a time). Cleared when it resolves any other
+    /// way, so a stale question can't pair whoever presses it next.
     pairing: Mutex<Option<u32>>,
     /// Where a file would go, when this machine accepts files at all.
     ///
-    /// `None` with `[share] enabled = false`. That used to skip building the
-    /// whole prompter, which silently cost every desktop question including
-    /// this one's pairing half — and pairing has nothing to do with sharing.
+    /// `None` when `[share] enabled = false`; unrelated to the pairing half of this type.
     bulk: Option<Arc<FileBulk>>,
     events: mpsc::UnboundedSender<Event>,
 }
@@ -58,8 +39,8 @@ pub struct Prompter {
 impl Prompter {
     /// Connect and start listening for pressed buttons.
     ///
-    /// `None` where there is no notification daemon — a headless machine, or a
-    /// session this did not start inside. Not an error: the CLI is unaffected.
+    /// Returns `None` with no notification daemon (headless, or wrong
+    /// session) — not an error, the CLI is unaffected.
     pub async fn start(
         events: mpsc::UnboundedSender<Event>,
         bulk: Option<Arc<FileBulk>>,
@@ -85,20 +66,16 @@ impl Prompter {
 
     /// Put a pairing question on the screen.
     ///
-    /// The digits are the whole point, so they go in the body where they are
-    /// large and selectable rather than in the summary where a long device name
-    /// could push them off the end.
+    /// The digits go in the body, not the summary, so a long device name
+    /// can't push them off the end.
     pub async fn ask_pair(&self, name: &str, fingerprint: &str, sas: &str) {
-        // Take down a previous one first. The core refuses a second pairing
-        // while one is pending, so two of these on screen at once would mean
-        // one of them can no longer be answered.
+        // Take down any previous one: the core only allows one pending pairing at a time.
         self.close_pair().await;
 
         let body = if self.notifier.has_buttons() {
             format!("{sas}\n{fingerprint}")
         } else {
-            // No buttons on this desktop, so say what to type rather than
-            // pretending to be answerable.
+            // No buttons on this desktop; say what to type instead.
             format!("{sas}\n{fingerprint}\nRun: acryliusctl pair approve")
         };
         let buttons = [
@@ -111,9 +88,7 @@ impl Prompter {
                 label: "They don't",
             },
         ];
-        // Zero: it stays until answered. A pairing that expired off the screen
-        // while somebody was reading the digits off their phone is one they
-        // would have to start again.
+        // Timeout zero: stays until answered, so reading the digits off a phone doesn't race a timeout.
         if let Some(id) = self
             .notifier
             .show(&format!("{name} wants to pair"), &body, &buttons, 0)
@@ -135,8 +110,7 @@ impl Prompter {
         let body = if self.notifier.has_buttons() {
             format!("{} · {}", offer.name, human(offer.size))
         } else {
-            // No buttons on this desktop, so the notification has to say what
-            // to type instead of pretending to be answerable.
+            // No buttons here; say what to type instead.
             format!(
                 "{} · {}\nRun: acryliusctl file accept {}",
                 offer.name,
@@ -154,9 +128,7 @@ impl Prompter {
                 label: "Deny",
             },
         ];
-        // Zero: it stays until answered. A question that expired off the screen
-        // while somebody was in another room is one the sender is still waiting
-        // on, and there would be nothing left to say yes to.
+        // Timeout zero: stays until answered, since the sender is still waiting either way.
         let Some(id) = self
             .notifier
             .show(&format!("{from} wants to send a file"), &body, &buttons, 0)
@@ -172,8 +144,7 @@ impl Prompter {
 
     /// Say how a transfer ended, and where the file went.
     pub async fn done(&self, bulk: &FileBulk, transfer: u64, ok: bool, detail: &str) {
-        // Take down the question, if it is still up: it has been answered, and
-        // an answered question left on screen is one that gets answered twice.
+        // Take the question down if still up: an answered one left on screen could be answered twice.
         let mut asked = self.asked.lock().await;
         let stale: Vec<u32> = asked
             .iter()
@@ -186,9 +157,7 @@ impl Prompter {
         }
         drop(asked);
 
-        // Only a transfer this machine was asked about. Both ends announce a
-        // result, so without this a machine would report the arrival of a file
-        // it had itself sent.
+        // Only for transfers this machine was asked about; both ends announce a result.
         if stale.is_empty() {
             return;
         }
@@ -211,9 +180,7 @@ impl Prompter {
             key: SHOW,
             label: "Show",
         }];
-        // The full path in the body, because the point of this notification is
-        // that somebody could not find their file. The button is the shortcut;
-        // the text is the answer.
+        // Full path in the body: the point is helping someone find the file; the button is just a shortcut.
         if let Some(id) = self
             .notifier
             .show(
@@ -245,8 +212,7 @@ impl Prompter {
             *pairing = None;
             drop(pairing);
 
-            // The same command `acryliusctl pair approve` sends. A button and a
-            // command are two ways to say one thing, not two things.
+            // The same command `acryliusctl pair approve` sends.
             let _ = self
                 .events
                 .send(Event::Local(LocalCommand::ConfirmPairing { accept }));
@@ -267,8 +233,7 @@ impl Prompter {
             detail: String::new(),
         })
         .unwrap_or_default();
-        // The same request `acryliusctl file accept` makes. A button and a command
-        // are two ways to say one thing, not two things.
+        // The same request `acryliusctl file accept` makes.
         let _ = self.events.send(Event::Local(LocalCommand::Plugin {
             peer: acrylius_core::proto::ids::DeviceId::parse(&peer)
                 .unwrap_or_else(|_| acrylius_core::proto::ids::DeviceId::of(&[0u8; 32])),
@@ -291,15 +256,10 @@ fn is_pair_answer(action: &str) -> bool {
 
 /// What a pressed button means for the pairing question, or `None` to ignore it.
 ///
-/// A free function because everything around it needs a D-Bus connection and
-/// this does not, and because it is the one piece here that must not be wrong:
-/// getting the comparison backwards would pair a device on **They don't**, and
-/// the digits are the only thing authenticating a pairing at all. Mutation
-/// testing flipped both `==`s below with nothing objecting until this existed.
-///
-/// `showing` is the notification the pairing question is currently on. A press
-/// for anything else is stale — that pairing has already been settled — and
-/// acting on it would answer whatever question came next.
+/// Getting either `==` backwards would pair on **They don't** — the digits
+/// are all that authenticates a pairing, and mutation testing caught exactly
+/// that before this existed. `showing` is the notification currently up; a
+/// press for anything else is stale and must be ignored.
 fn pair_answer(action: &str, pressed: u32, showing: Option<u32>) -> Option<bool> {
     if showing != Some(pressed) {
         return None;
@@ -313,9 +273,8 @@ fn pair_answer(action: &str, pressed: u32, showing: Option<u32>) -> Option<bool>
 
 /// Open a directory in whatever this desktop uses for one.
 ///
-/// A subprocess, and the right call: "which application handles a directory" is
-/// a question with a standard answer and no library that gives it without
-/// pulling in a desktop toolkit. It runs only when somebody presses a button.
+/// A subprocess: no library answers "which app handles this" without pulling
+/// in a full desktop toolkit.
 async fn open(path: &std::path::Path) {
     let _ = tokio::process::Command::new("xdg-open")
         .arg(path)
@@ -355,19 +314,14 @@ mod tests {
 
     #[test]
     fn the_two_pairing_buttons_mean_opposite_things() {
-        // The one assertion in this file that is about security rather than
-        // presentation. Six digits are all that authenticates a pairing, so a
-        // button that said "They don't" and confirmed anyway would hand a
-        // person's refusal straight to whoever they were refusing.
+        // Security-critical: confirming on "They don't" would hand a refusal straight to whoever was refused.
         assert_eq!(pair_answer(MATCH, 7, Some(7)), Some(true));
         assert_eq!(pair_answer(DIFFER, 7, Some(7)), Some(false));
     }
 
     #[test]
     fn a_press_for_a_question_that_is_gone_answers_nothing() {
-        // Notification ids are reused, and a pairing can be settled from the
-        // CLI or simply lapse while its notification is still on screen. A
-        // press arriving afterwards must not confirm the *next* pairing.
+        // Notification ids get reused; a stale press must not confirm the next pairing.
         assert_eq!(pair_answer(MATCH, 7, Some(9)), None, "a different question");
         assert_eq!(pair_answer(MATCH, 7, None), None, "no question at all");
         assert_eq!(pair_answer(DIFFER, 7, None), None);
@@ -375,9 +329,7 @@ mod tests {
 
     #[test]
     fn only_the_pairing_buttons_are_pairing_answers() {
-        // The file-offer buttons share this handler. `accept` reaching the
-        // pairing branch would confirm a pairing because somebody accepted a
-        // file.
+        // File-offer buttons share this handler; `accept` must not fall into the pairing branch.
         assert!(is_pair_answer(MATCH) && is_pair_answer(DIFFER));
         for other in [ACCEPT, REJECT, SHOW, "", "matchx"] {
             assert!(!is_pair_answer(other), "{other} is not a pairing answer");

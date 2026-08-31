@@ -1,29 +1,21 @@
-//! The BLE fragmentation codec, handed to Swift.
-//!
-//! Swift does not reimplement this. `acrylius-proto` owns where a message ends
-//! on a BLE link, exactly as it owns where a bulk chunk ends, and a phone that
-//! disagreed with the daemon by one byte would produce a link that handshakes
-//! and then quietly corrupts everything after it.
-//!
-//! The seam stays what it is everywhere else: synchronous, one-directional, no
-//! callbacks. Swift calls in; nothing calls back out.
+//! The BLE fragmentation codec, handed to Swift rather than reimplemented
+//! there: `acrylius-proto` owns where a message ends. Synchronous; Swift calls
+//! in and nothing calls back out.
 
 use acrylius_proto::ble;
 
 use crate::types::FfiError;
 
-/// Cut a whole message into fragments that fit one write or one notification.
-///
+/// Cut a message into fragments that fit one write or one notification.
 /// `fragment` is the ATT payload the link can carry — on iOS,
-/// `maximumWriteValueLength(for:)`, which is the negotiated MTU minus three.
-/// It is asked for, never assumed.
+/// `maximumWriteValueLength(for:)` — asked for, never assumed.
 #[uniffi::export]
 #[must_use]
 pub fn ble_fragment(msg: Vec<u8>, fragment: u32) -> Vec<Vec<u8>> {
     ble::fragment(&msg, fragment as usize)
 }
 
-/// How much header every fragment carries, so a host can size its writes.
+/// Header bytes per fragment.
 #[uniffi::export]
 #[must_use]
 pub fn ble_header_len() -> u32 {

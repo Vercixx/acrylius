@@ -1,14 +1,8 @@
 //
-//  What each peer has told us it can do.
-//
-//  A device does not learn a peer's abilities from the handshake. The handshake
-//  says which capabilities may be exchanged; what a peer actually has is what it
-//  announces on connect: a session state, a list of commands, wake targets. A
-//  computer with no commands configured sends no list, and the phone shows no
-//  button. That is the whole discovery mechanism, and it means a screen never
-//  offers something that cannot work.
-//
-//  Platform-free on purpose, so it can be tested on Linux.
+//  What each peer has told us it can do. The handshake only says which
+//  capabilities may be exchanged; what a peer actually has is announced on
+//  connect (session state, commands, wake targets). Platform-free, so it can
+//  be tested on Linux.
 //
 
 import Foundation
@@ -23,38 +17,17 @@ public struct PeerFeatures: Equatable, Sendable {
     public var wake: FfiWolConfig?
     /// The last clipboard value this peer handed over.
     public var clipboard: String?
-    /// When that value arrived, by this device's clock.
-    ///
-    /// Kept for the same reason as `mediaAt`, but answering a different
-    /// question: whether a *reply* landed. Asking for the same text twice
-    /// leaves `clipboard` identical both times, so a caller comparing values
-    /// cannot tell a second success from no answer at all — which is exactly
-    /// the mistake the media plugin made before `landed()` existed.
+    /// When that value arrived, by this device's clock. Needed because asking
+    /// twice can return an identical value, which alone can't signal a reply landed.
     public var clipboardAt: Date?
     /// What is playing there. Present once the peer has described its players,
     /// which it does on connect and after every command.
     public var media: FfiMediaState?
-    /// When that reading was taken, by this device's clock.
-    ///
-    /// A position is only true at the instant it was measured. Keeping the
-    /// instant is what lets a screen show a track advancing without inventing
-    /// where it has got to: the elapsed time is the reported position plus how
-    /// long ago this was measured, and nothing else.
-    ///
-    /// *Measured*, not *arrived* — the difference is a bug that shipped. The
-    /// desktop reads the player when the query reaches it, so a reading is
-    /// already one leg of the round trip old by the time it lands here.
-    /// Stamping arrival made the clock sit exactly that far behind, for as long
-    /// as the track played, and pulled it backwards again on every poll. Tens
-    /// of milliseconds on Wi-Fi and invisible; over Bluetooth a round trip is
-    /// several fragments each way and the poll is only every two seconds, which
-    /// is where it became "the clock is a second behind".
+    /// When that reading was taken (not when it arrived) by this device's
+    /// clock. Stamping arrival instead skews the position by a round trip.
     public var mediaAt: Date?
-    /// When the outstanding media query was sent, if one is.
-    ///
-    /// Half the round trip is the best estimate available of how long ago the
-    /// far end actually looked, and it needs nothing on the wire and no
-    /// agreement between two machines' clocks.
+    /// When the outstanding media query was sent, if one is. Half the round
+    /// trip estimates how long ago the far end looked, with no clock agreement needed.
     public var mediaQuerySentAt: Date?
     /// The most recent refusal, for showing why a button did nothing.
     public var lastError: String?
@@ -65,11 +38,8 @@ public struct PeerFeatures: Equatable, Sendable {
     public var canWake: Bool { wake?.macs.isEmpty == false }
     public var canRunCommands: Bool { !commands.isEmpty }
 
-    /// Something worth showing a transport control for.
-    ///
-    /// Not merely "the peer has media": a machine with no players open sends an
-    /// empty list, and a remote with nothing to control is a remote that looks
-    /// broken.
+    /// Something worth showing a transport control for — not merely "the peer
+    /// has media", since a remote with nothing to control looks broken.
     public var canControlMedia: Bool { activePlayer != nil }
 
     /// The player a command with no name goes to, as the peer named it.
@@ -79,35 +49,19 @@ public struct PeerFeatures: Equatable, Sendable {
             ?? media.players.first
     }
 
-    /// How old a reading may be before its position stops being counted forward.
-    ///
-    /// The desktop broadcasts every two seconds and a screen asks again while it
-    /// is open, so anything older than a few of those means the readings have
-    /// stopped coming rather than that the track is long. Generous enough to ride
-    /// out a slow Bluetooth notification without the timeline stuttering.
+    /// How old a reading may be before its position stops being counted
+    /// forward. Generous enough to ride out a slow Bluetooth notification.
     static let staleReading: TimeInterval = 10
 
-    /// Where the active track has got to, as of now.
-    ///
-    /// The reported position plus the time since it was reported, and only
-    /// while the player said it was playing. A paused track stays where it was
-    /// put, and a reading with no timestamp is returned untouched rather than
-    /// guessed at.
-    ///
-    /// This is an estimate and is treated as one: it is never sent anywhere,
-    /// never stored, and is corrected by the next reading, which the screen
-    /// asks for every couple of seconds while someone is looking at it.
+    /// Where the active track has got to, as of now: the reported position
+    /// plus elapsed time, only while playing. Never sent or stored — an
+    /// estimate corrected by the next reading.
     public func positionMs(at now: Date = Date()) -> UInt64 {
         guard let player = activePlayer else { return 0 }
         guard player.status == "playing", let mediaAt else { return player.positionMs }
         let elapsed = max(0, now.timeIntervalSince(mediaAt))
-        // Only while the readings are still arriving. `position` is reported and
-        // never counted — the core says so twice, and gives the reason: a
-        // receiver that keeps counting goes on counting after the media stopped
-        // somewhere it cannot see. That is not hypothetical here. Readings come
-        // every couple of seconds while a screen is open, so one this old means
-        // nobody is refreshing any more: the peer went away, the link died, or
-        // the app was backgrounded. Freeze rather than invent.
+        // Only while readings are still arriving — one this stale means nobody
+        // is refreshing any more, so freeze rather than invent a position.
         guard elapsed <= Self.staleReading else { return player.positionMs }
         let estimate = player.positionMs + UInt64(elapsed * 1000)
         // Never past the end. A track that finished while nobody was asking
@@ -128,40 +82,29 @@ public struct PeerCatalog: Equatable, Sendable {
 
     public var peers: [String] { Array(byPeer.keys).sorted() }
 
-    /// Record a failure the core reported against a particular peer.
-    ///
-    /// `UiEvent.error` carries who it was about since M3; before that the only
-    /// place such a failure could land was one app-wide string, so a refusal
-    /// from one computer was displayed on the screen of another. It clears the
-    /// same way a refusal that arrived over the wire does — on the next thing
-    /// that peer says.
+    /// Record a failure the core reported against a particular peer. Clears
+    /// the same way a wire refusal does — on the next thing that peer says.
     public mutating func note(error: String, for peer: String) {
         var features = byPeer[peer] ?? PeerFeatures()
         features.lastError = error
         byPeer[peer] = features
     }
 
-    /// Note that a media reading has just been asked for.
-    ///
-    /// Paired with the arrival in `ingest`, which uses the two to place the
-    /// reading halfway between them rather than at the moment it landed.
+    /// Note that a media reading has just been asked for, paired with the
+    /// arrival in `ingest` to place the reading halfway between the two.
     public mutating func noteMediaQuery(for peer: String, at sent: Date = Date()) {
         var features = byPeer[peer] ?? PeerFeatures()
         features.mediaQuerySentAt = sent
         byPeer[peer] = features
     }
 
-    /// When a reading that arrived `now` was most likely taken.
-    ///
-    /// The midpoint of the round trip, which assumes the two legs are about
-    /// equal — wrong in detail, right on average, and much closer than assuming
-    /// the far end looked at the instant its answer arrived here.
+    /// When a reading that arrived `now` was most likely taken: the midpoint
+    /// of the round trip, assuming both legs are roughly equal.
     static func measuredAt(sent: Date?, arrived: Date) -> Date {
         guard let sent, sent <= arrived else { return arrived }
         let round = arrived.timeIntervalSince(sent)
-        // A reply this late is not a round trip, it is a reply to something
-        // else, or a query that was queued behind a reconnect. Halving it would
-        // put the reading seconds into the past and run the clock fast.
+        // A reply this late isn't a round trip — likely queued behind a
+        // reconnect. Halving it would run the clock fast.
         guard round <= PeerFeatures.staleReading else { return arrived }
         return sent.addingTimeInterval(round / 2)
     }
@@ -171,25 +114,17 @@ public struct PeerCatalog: Equatable, Sendable {
     public mutating func ingest(_ event: FfiUiEvent, at now: Date = Date()) -> Bool {
         guard case let .plugin(peer, cap, ty, body) = event else {
             if case let .revoked(peer) = event {
-                // Everything here was something that device told us about
-                // itself. Forgetting the device and keeping its command list,
-                // its wake targets and whatever went wrong with it last would
-                // leave all of that to be handed straight back if it were ever
-                // paired again.
+                // Forgetting the device rather than keeping stale commands,
+                // wake targets etc. that would resurface if paired again.
                 byPeer.removeValue(forKey: peer)
                 return true
             }
             if case let .peerUnreachable(peer) = event {
-                // Keep what the peer told us. A wake target is only useful once
-                // the machine is gone, and a command list does not change while
-                // nobody is looking.
+                // Keep what the peer told us — a wake target only matters once
+                // the machine is gone.
                 byPeer[peer]?.session = nil
-                // The track stays; the clock under it does not. Dropping the
-                // timestamp is what `positionMs` already treats as "no idea when
-                // this was read", so the timeline freezes where it was last
-                // actually seen instead of running on for as long as the app is
-                // open. A stream reports no length, so nothing would have capped
-                // it either.
+                // `positionMs` treats a nil timestamp as "unknown", so this
+                // freezes the timeline instead of counting it forward forever.
                 byPeer[peer]?.mediaAt = nil
                 return true
             }
@@ -203,11 +138,8 @@ public struct PeerCatalog: Equatable, Sendable {
             features.lastError = (try? decodeError(body: body)) ?? "refused"
             changed = true
         } else if features.lastError != nil {
-            // Anything else arriving from this peer means it is answering again,
-            // and whatever went wrong before is over. Nothing ever cleared this,
-            // so one refusal — a file declined, a player that would not take a
-            // command — stayed on that device's screen for the life of the app,
-            // outliving the thing it described by hours.
+            // Anything else from this peer means it's answering again, so
+            // whatever went wrong before is over.
             features.lastError = nil
             changed = true
         }

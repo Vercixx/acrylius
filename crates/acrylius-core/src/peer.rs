@@ -19,12 +19,11 @@ pub struct PeerRecord {
     /// Derived from the pairing handshake hash, never transmitted.
     #[cbor(n(4), with = "minicbor::bytes")]
     pub session_psk: Vec<u8>,
-    /// The replay watermark. Persisting this is the point: a daemon that forgot
-    /// it would accept a recorded session opener again after a restart.
+    /// Replay watermark; persisted so a restart cannot accept a recorded
+    /// session opener again.
     #[n(5)]
     pub greatest_seen: u64,
-    /// What the peer last told us it can send and receive. A cache for the UI;
-    /// the live handshake is what any routing decision uses.
+    /// Last-known capabilities; a UI cache. Routing uses the live handshake.
     #[n(6)]
     pub caps_out: Vec<String>,
     #[n(7)]
@@ -53,12 +52,8 @@ impl PeerRecord {
     }
 }
 
-/// Whether we can currently reach a peer.
-///
-/// The core models reachability, never a role. On iOS a peer is reachable only
-/// while the app is foregrounded, and that is an ordinary state rather than an
-/// error, which is why a plugin sending to an unreachable peer gets a plain
-/// outcome and not a failure path.
+/// Whether we can currently reach a peer. Unreachable is an ordinary state,
+/// not an error: on iOS a peer is reachable only while the app is foregrounded.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PeerState {
     Unreachable,

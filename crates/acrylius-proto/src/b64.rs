@@ -1,10 +1,5 @@
-//! Strict base64url, no padding.
-//!
-//! Carried over from `pc-helper-ios` deliberately. A lenient decoder lets the
-//! same key or fingerprint be spelled several ways, which turns an identifier
-//! into a set rather than a value, and identifiers get compared, indexed and used
-//! as map keys. So this rejects padding, non-alphabet bytes, impossible lengths,
-//! and non-canonical trailing bits.
+//! Strict base64url, no padding: rejects non-alphabet bytes, impossible
+//! lengths, and non-canonical trailing bits, so every value has one spelling.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -66,8 +61,7 @@ pub fn decode(input: &str) -> Result<Vec<u8>, B64Error> {
             }
             n |= (v as u32) << (18 - 6 * i);
         }
-        // A partial chunk of n chars carries n-1 whole bytes; the bits below
-        // those must be zero or the same value has two spellings.
+        // A partial chunk of n chars carries n-1 whole bytes; trailing bits must be zero.
         let whole = chunk.len() - 1;
         for i in 0..whole {
             out.push(((n >> (16 - 8 * i)) & 0xFF) as u8);
@@ -83,7 +77,6 @@ pub fn decode(input: &str) -> Result<Vec<u8>, B64Error> {
     Ok(out)
 }
 
-/// Decode and require an exact length, which is what identifiers actually want.
 pub fn decode_exact<const N: usize>(input: &str) -> Result<[u8; N], B64Error> {
     let v = decode(input)?;
     <[u8; N]>::try_from(v.as_slice()).map_err(|_| B64Error::WrongSize {
@@ -119,7 +112,6 @@ mod tests {
 
     #[test]
     fn rejects_standard_base64_alphabet() {
-        // '+' and '/' are base64, not base64url. They must not decode.
         assert_eq!(decode("ab+d"), Err(B64Error::BadByte(2)));
         assert_eq!(decode("ab/d"), Err(B64Error::BadByte(2)));
     }
@@ -132,11 +124,9 @@ mod tests {
 
     #[test]
     fn rejects_non_canonical_trailing_bits() {
-        // One byte 0x00 encodes as "AA". "AB" would decode to the same byte
-        // while carrying a stray low bit, so it is a second spelling.
+        // "AB" decodes to the same byte as "AA" but carries a stray low bit.
         assert_eq!(decode("AA").unwrap(), vec![0x00]);
         assert_eq!(decode("AB"), Err(B64Error::NonCanonical));
-        // Two bytes: "AAA" is canonical, "AAB" is not.
         assert_eq!(decode("AAA").unwrap(), vec![0x00, 0x00]);
         assert_eq!(decode("AAB"), Err(B64Error::NonCanonical));
     }

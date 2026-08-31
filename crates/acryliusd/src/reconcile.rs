@@ -1,33 +1,15 @@
-//! Bringing an existing config file up to date without trampling it.
-//!
-//! Adding a setting to the daemon should not mean a user finds out by reading
-//! release notes. `serde(default)` means an old file keeps working, so nothing
-//! breaks — but a setting nobody can see is a setting nobody uses, which is how
-//! `session.unlock_command` would have gone unnoticed by everyone who needed it.
-//!
-//! So an update fills in what is missing and touches nothing else. That rules
-//! out the obvious implementation: parse to a `Config`, serialise it back, done.
-//! It would work, and it would silently delete every comment the user wrote and
-//! reorder everything they arranged. `toml_edit` keeps the document as written
-//! and edits it in place, which is the whole reason it is a dependency.
-//!
-//! Two rules, and both matter:
-//!
-//! * A key that is present is never touched, whatever its value. Someone who
-//!   set `send = false` meant it, and an "update" that reset it to the default
-//!   would be a bug with a very long feedback loop.
-//! * A table the user owns is never filled in. `[commands]` is theirs; a
-//!   default has nothing to say about it.
+//! Brings a config file up to date without trampling it: adds settings the
+//! schema has and the file lacks, via `toml_edit`. Existing keys are never touched, and `[commands]` (user-owned) is never filled in.
 
 use std::collections::BTreeMap;
 use std::path::Path;
 
 use toml_edit::{DocumentMut, Table};
 
-/// Tables whose contents belong to the user, not to the schema.
+/// Tables whose contents belong to the user, not the schema.
 ///
-/// Their absence is filled in — an empty `[commands]` is a useful thing to see —
-/// but what is inside them is never added to.
+/// Their absence is still filled in (an empty `[commands]` is useful), but
+/// nothing inside them is ever added.
 const USER_OWNED: &[&str] = &["commands"];
 
 /// What an update changed, so it can be reported rather than done silently.
@@ -70,8 +52,7 @@ fn merge_table(into: &mut Table, from: &Table, prefix: &str, added: &mut Added) 
         };
 
         match into.get_mut(key) {
-            // Present already. Leave it exactly as the user wrote it, value and
-            // comments alike, and recurse only to reach settings nested deeper.
+            // Present already: leave it exactly as written, recurse only to reach nested settings.
             Some(existing) => {
                 if USER_OWNED.contains(&path.as_str()) {
                     continue;
@@ -192,8 +173,7 @@ pub fn update_file(path: &Path, reference: &str) -> anyhow::Result<Added> {
     if added.is_empty() {
         return Ok(added);
     }
-    // Write beside and rename, so an interrupted update leaves the old config
-    // rather than half of one.
+    // Write beside and rename, so an interrupted update can't leave a half-written config.
     let tmp = path.with_extension("toml.new");
     std::fs::write(&tmp, text)?;
     std::fs::rename(&tmp, path)?;
@@ -276,9 +256,7 @@ unlock_command = []
 
     #[test]
     fn a_whole_table_the_file_lacks_is_added() {
-        // Reported as the table, not as each key inside it: it arrives as one
-        // unit, and listing five children of something that did not exist reads
-        // as more churn than happened.
+        // Reported as the whole table, not each key: listing every child reads as more churn than happened.
         let existing = "port = 1971\n\n[clipboard]\nsend = true\nreceive = true\n";
         let (text, added) = reconcile(existing, REFERENCE).unwrap();
         assert!(added.keys.contains(&"session".to_string()));
@@ -288,8 +266,7 @@ unlock_command = []
 
     #[test]
     fn a_single_setting_added_to_a_table_that_already_exists() {
-        // The case that actually happens when a version adds one option: the
-        // table is there, one key inside it is not.
+        // The common case: the table exists, one key inside it doesn't.
         let existing = "\
 port = 1971
 
@@ -316,9 +293,7 @@ lock_command = [\"my-locker\"]
 
     #[test]
     fn a_value_the_user_set_is_never_reset() {
-        // The failure this prevents is quiet and long-lived: an update that
-        // "helpfully" restored a default would undo a deliberate choice, and
-        // nothing would say so.
+        // Prevents a quiet, long-lived bug: an "update" that restores a default would silently undo a deliberate choice.
         let existing = "port = 4242\n\n[clipboard]\nsend = false\nreceive = false\n";
         let (text, _) = reconcile(existing, REFERENCE).unwrap();
         let parsed: DocumentMut = text.parse().unwrap();

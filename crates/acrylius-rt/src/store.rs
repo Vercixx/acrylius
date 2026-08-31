@@ -1,12 +1,5 @@
-//! Persistence, for a Rust host.
-//!
-//! Plain files, no database. Peers number under ten, and the old project's
-//! SQLite was there for a nonce table that the Noise session and a one-`u64`
-//! watermark have made unnecessary.
-//!
-//! Every write is a create-then-rename, so a crash mid-write leaves the previous
-//! record intact rather than a truncated one. A peer record with half a key in
-//! it would be indistinguishable from a corrupted pairing.
+//! Persistence, for a Rust host. Plain files; every write is create-then-
+//! rename, so a crash mid-write leaves the previous record intact.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -36,9 +29,8 @@ impl FileStore {
         &self.root
     }
 
-    /// Keys are `peer/<device-id>`. A device id is strict base64url, which
-    /// contains no `/` and no `.`, so it cannot climb out of the directory, but
-    /// reject anything unexpected anyway rather than rely on that.
+    /// Keys are `peer/<device-id>`. A device id is strict base64url and cannot
+    /// climb out of the directory, but reject anything unexpected anyway.
     fn path_for(&self, key: &str) -> io::Result<PathBuf> {
         if key.contains("..") || key.starts_with('/') || key.matches('/').count() != 1 {
             return Err(io::Error::new(
@@ -72,12 +64,8 @@ impl Store for FileStore {
         };
         let tmp = path.with_extension("tmp");
         {
-            // Written and flushed to the disk before the rename, not merely to
-            // the page cache. A rename is atomic with respect to *readers*, and
-            // that is all it is: the kernel is free to commit the rename before
-            // the bytes, so a machine that lost power here came back with a peer
-            // file that existed and was empty. A paired phone became a stranger,
-            // and the only way back was to pair it again.
+            // Synced to disk before the rename: the kernel may commit the
+            // rename before the bytes, leaving an empty file after power loss.
             let file = std::fs::File::create(&tmp)?;
             if sensitivity == Sensitivity::Secret {
                 #[cfg(unix)]
@@ -91,12 +79,8 @@ impl Store for FileStore {
             std::io::Write::write_all(&mut file, bytes)?;
             file.sync_all()?;
         }
-        // Rename is atomic within a filesystem, so a reader sees either the old
-        // record or the new one and never a partial write.
         std::fs::rename(&tmp, &path)?;
-        // And the directory entry itself, or the rename is the thing that can be
-        // lost. Best effort: a filesystem that will not open a directory for
-        // this is not a reason to fail a write that has otherwise succeeded.
+        // Sync the directory too, or the rename itself can be lost. Best effort.
         if let Ok(dir) = std::fs::File::open(&self.root) {
             let _ = dir.sync_all();
         }
@@ -114,9 +98,7 @@ impl Store for FileStore {
             let bytes = std::fs::read(&path)?;
             match minicbor::decode::<PeerRecord>(&bytes) {
                 Ok(r) => out.push(r),
-                // A record we cannot read is a record we must not silently
-                // treat as absent, because "absent" means "this peer is a
-                // stranger" and that is a security-relevant difference.
+                // An unreadable record must not silently become "stranger".
                 Err(e) => {
                     tracing::error!(path = %path.display(), error = %e, "unreadable peer record");
                 }
@@ -167,9 +149,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn a_directory_holding_a_private_key_is_not_readable_by_anyone_else() {
-        // Mutation testing found this: `set_private` could be replaced with a
-        // no-op and nothing objected. It is the only thing standing between the
-        // device's long-term identity and every other account on the machine.
+        // `set_private` is all that keeps the identity key from other accounts.
         use std::os::unix::fs::PermissionsExt;
         let dir = scratch("perms");
         let mut s = FileStore::open(&dir).unwrap();
@@ -191,9 +171,6 @@ mod tests {
 
     #[test]
     fn a_key_that_could_leave_its_directory_is_refused() {
-        // `path_for`'s guard, which nothing asserted. A device id is strict
-        // base64url and cannot contain any of these, so this is about the guard
-        // surviving a future caller rather than about today's ids.
         let dir = scratch("paths");
         let mut s = FileStore::open(&dir).unwrap();
         for bad in [
@@ -202,16 +179,10 @@ mod tests {
             "peer/a/b",
             "nodir",
             "..",
-            // One separator, no leading slash, and it climbs out anyway —
-            // `root/peer/..` is `root`. The only clause that refuses this is
-            // the `contains("..")` one, so without it here that clause could be
-            // weakened and the other two would cover for it.
+            // One separator and no leading slash, yet `root/peer/..` is `root`;
+            // only the `contains("..")` clause refuses it.
             "peer/..",
         ] {
-            // The *reason* matters. `root/peer/..` is `root`, which the
-            // filesystem refuses on its own for being a directory — so an
-            // `is_err()` here passed just as well with the key check weakened,
-            // and the guard could have been broken without a word.
             let e = s.put(bad, Some(b"x"), Sensitivity::Ordinary).unwrap_err();
             assert_eq!(
                 e.kind(),
@@ -250,9 +221,7 @@ mod tests {
         )
         .unwrap();
 
-        // A half-written temporary, left by a crash mid-`put`. It is not a peer
-        // and must not be read as one: a truncated record either fails to decode
-        // or, worse, decodes into something with the wrong key in it.
+        // A `.tmp` left by a crash mid-`put` must not be read as a peer.
         std::fs::write(dir.join("peer").join("leftover.tmp"), b"half a record").unwrap();
 
         let back = s.load_peers().unwrap();
@@ -260,8 +229,7 @@ mod tests {
         assert_eq!(back[0].device_id, rec.device_id);
         assert_eq!(back[0].public_key, rec.public_key);
 
-        // Deleting is a `put` of nothing, and deleting twice is not an error:
-        // revoking a peer that is already gone is a thing that happens.
+        // Deleting is a `put` of nothing, and deleting twice is not an error.
         s.put(&key, None, Sensitivity::Secret).unwrap();
         assert!(s.load_peers().unwrap().is_empty());
         s.put(&key, None, Sensitivity::Secret)
@@ -271,9 +239,6 @@ mod tests {
 
     #[test]
     fn the_in_memory_store_keeps_the_same_promises() {
-        // It stands in for the file one in tests and on a host with nowhere to
-        // write, so a version of it that quietly kept nothing would make every
-        // test above it pass while proving nothing.
         let mut s = MemoryStore::default();
         assert!(s.load_peers().unwrap().is_empty());
         let rec = PeerRecord {

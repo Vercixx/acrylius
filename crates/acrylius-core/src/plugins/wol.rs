@@ -1,13 +1,5 @@
-//! `org.acrylius.wol/1`: wake a sleeping computer.
-//!
-//! Almost all of the interesting behaviour involves no messages at all. A
-//! sleeping computer is not running this daemon, so nothing on it can receive
-//! "please wake up", so the phone sends the magic packet. What travels over the
-//! session, while the computer is still awake, is the information the phone will
-//! need later.
-//!
-//! `relay` exists only to ask a computer that is awake to wake a different one.
-//! It is allowlisted, because otherwise it would be an open UDP relay.
+//! `org.acrylius.wol/1`: wake a sleeping computer with a magic packet.
+//! `relay` asks an awake computer to wake another; allowlisted so it isn't an open UDP relay.
 
 use std::collections::BTreeMap;
 
@@ -27,12 +19,8 @@ pub struct WolConfig {
     pub broadcast: String,
     #[n(2)]
     pub port: u16,
-    /// The address to try first.
-    ///
-    /// A network interface matches a magic packet by its payload, not its
-    /// destination address, so a unicast datagram wakes the machine just as
-    /// well as a broadcast. That matters because iOS gates UDP broadcast behind
-    /// an entitlement a free developer account cannot get.
+    /// The address to try first: unicast wakes a machine as well as broadcast
+    /// does, which matters since iOS gates UDP broadcast behind an entitlement.
     #[n(3)]
     pub last_ipv4: String,
 }

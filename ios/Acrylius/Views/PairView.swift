@@ -5,31 +5,18 @@ import SwiftUI
 import UIKit
 #endif
 
-/// Pick a computer. That is the whole thing.
-///
-/// There is nothing to type and nothing to scan. Tapping a machine runs the
-/// handshake, six digits appear here and on that machine's screen, and a person
-/// at each end says whether they match. This screen used to open on an empty
-/// text field and an IP address to type on a phone keyboard; then on a field for
-/// an eight-character code read off the other screen. Both were asking somebody
-/// to be at the computer already, which is the one thing pairing a phone to a
-/// computer across the room cannot assume.
+/// Pick a computer. Tapping one runs the handshake; six digits appear here
+/// and on that machine's screen, and a person at each end says whether they match.
 struct PairView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
     @State private var addr = ""
-    /// Whether this screen has asked for a pairing yet.
-    ///
-    /// Only so that an error arriving from somewhere else — a transfer, a
-    /// media reading — does not close a screen the person is still reading.
+    /// Set once a pairing is requested, so an unrelated error elsewhere
+    /// doesn't close this screen while it's still being read.
     @State private var asked = false
 
-    /// Machines seen recently enough to still be worth offering.
-    ///
-    /// mDNS resolves a service once and then says nothing until something
-    /// changes, so an entry is never withdrawn — a computer switched off an
-    /// hour ago would otherwise sit here looking available for the life of the
-    /// app.
+    /// mDNS never withdraws an entry once resolved, so this filters out
+    /// machines not seen recently.
     private var fresh: [AppModel.Nearby] {
         model.nearby.filter { Date().timeIntervalSince($0.seen) < 300 }
     }
@@ -51,8 +38,6 @@ struct PairView: View {
                     Section {
                         ForEach(fresh) { pc in
                             Button {
-                                // The whole gesture. Everything a pairing needs
-                                // comes from the handshake this starts.
                                 asked = true
                                 Task { await model.pair(at: pc.addr, transport: pc.transport) }
                             } label: {
@@ -71,9 +56,7 @@ struct PairView: View {
                                     }
                                 }
                             }
-                            // A machine already showing somebody else six
-                            // digits will refuse this one, so offering the tap
-                            // would only produce a failure to explain.
+                            // A machine mid-handshake with someone else will refuse this one.
                             .disabled(pc.pairing)
                         }
                     } header: {
@@ -85,9 +68,7 @@ struct PairView: View {
                     }
                 }
 
-                // Not an expandable section: `Section(isExpanded:)` has no
-                // initializer that takes a footer, and the footer is the part
-                // that says when this is for.
+                // Not `Section(isExpanded:)`: it has no initializer taking a footer.
                 Section {
                     TextField("192.168.1.10:1971", text: $addr)
                         .textInputAutocapitalization(.never)
@@ -101,10 +82,6 @@ struct PairView: View {
                 } header: {
                     Text("Enter an address")
                 } footer: {
-                    // An address is a route, not a secret. Typing one still
-                    // ends at the same six digits, so this is a convenience for
-                    // a network mDNS cannot cross rather than a way around the
-                    // comparison.
                     Text("Only needed if this \(deviceKind()) cannot find the computer by itself.")
                 }
             }
@@ -114,16 +91,13 @@ struct PairView: View {
                     Button("Cancel") { dismiss() }
                 }
             }
-            // The sheet closes itself when the digits arrive: `RootView` puts
-            // `ConfirmPairingView` up on `pairingSas`, and two sheets at once
-            // would leave the confirmation behind this one.
+            // Closes itself when digits arrive: `RootView` presents `ConfirmPairingView`
+            // on `pairingSas`, and two sheets at once would hide the confirmation.
             .onChange(of: model.pairingSas) {
                 if model.pairingSas != nil { dismiss() }
             }
-            // And when the answer is no. A refusal — the far end busy, or
-            // cooling down after a mismatch — reaches `RootView`'s alert, which
-            // is *behind* this sheet and cannot be seen until it closes. Without
-            // this a tap that was turned away looks like a tap that did nothing.
+            // And on refusal: `RootView`'s error alert is behind this sheet
+            // and invisible until it closes.
             .onChange(of: model.lastErrorAt) {
                 if asked { dismiss() }
             }
@@ -139,17 +113,12 @@ struct PairView: View {
     }
 }
 
-/// Both ends show the same six digits. The user compares them.
+/// Both ends show the same six digits and the user compares them.
 ///
-/// **This is the security boundary.** Pairing runs plain `XX` with no shared
-/// secret, so anybody who can reach a device can complete a handshake with it —
-/// and an attacker who can relay traffic completes two, one with each side.
-/// What gives that away is that the two handshake hashes differ, so the digits
-/// differ, and a person notices. Nothing else is checking.
-///
-/// So: never auto-confirm, never make "they match" the easier press by accident,
-/// and never let this be dismissed by a swipe. A person who did not look has not
-/// authenticated anything.
+/// This is the security boundary: pairing has no shared secret, so a relaying
+/// attacker can complete a handshake with each side, but the two SAS codes
+/// would differ. Never auto-confirm and never allow swipe-to-dismiss — an
+/// unread screen authenticates nothing.
 struct ConfirmPairingView: View {
     @Environment(AppModel.self) private var model
 

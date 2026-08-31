@@ -1,12 +1,7 @@
 //! `org.acrylius.command/1`: run a named command on the computer.
 //!
-//! One rule makes this a command runner and not a remote shell. The wire carries
-//! an `id` from the computer's own configuration, never a command string.
-//!
-//! An id that is not in the allowlist is refused. Everything about what actually
-//! runs (the absolute path, the argv vector, the timeout, the output cap) lives
-//! on the machine that will run it, where the person who owns that machine put
-//! it. A peer cannot influence any of it beyond choosing from the list.
+//! The wire carries an id from the computer's own allowlist, never a command
+//! string; path, argv, timeout, and output cap live on the machine that runs it.
 
 use std::collections::BTreeMap;
 
@@ -23,8 +18,7 @@ pub struct CommandEntry {
     pub id: String,
     #[n(1)]
     pub name: String,
-    /// A hint for the user interface. It is not enforcement: a peer that
-    /// ignores it still only reaches an allowlisted id.
+    /// A UI hint, not enforcement: a peer still only reaches an allowlisted id.
     #[n(2)]
     pub needs_confirm: bool,
 }
@@ -47,8 +41,7 @@ pub struct Exited {
     pub run_id: u32,
     #[n(1)]
     pub code: i32,
-    /// Set when the output cap was reached, so a reader knows it is not seeing
-    /// everything.
+    /// Set when the output cap was reached.
     #[n(2)]
     pub truncated: bool,
 }
@@ -64,12 +57,8 @@ static MANIFEST: PluginManifest = PluginManifest {
 pub struct CommandPlugin {
     /// What this machine is willing to run. Empty means nothing.
     catalog: Vec<CommandEntry>,
-    /// What each peer told us it is willing to run.
-    ///
-    /// A catalogue arrives unprompted when a peer connects, which is the right
-    /// time to send it and the wrong time for anyone to be listening. Keeping
-    /// it means a user interface that opens later can still show the list
-    /// without a round trip.
+    /// What each peer told us it is willing to run; kept so a UI that opens
+    /// later can show the list without a round trip.
     remote: BTreeMap<DeviceId, Vec<CommandEntry>>,
     pending: BTreeMap<EffectToken, (DeviceId, u32)>,
 }
@@ -112,7 +101,6 @@ impl Plugin for CommandPlugin {
             "run" => {
                 let req: RunRequest =
                     minicbor::decode(env.body).map_err(|_| PluginError::BadBody)?;
-                // The only decision this plugin makes, and the one that matters.
                 if !self.catalog.iter().any(|c| c.id == req.id) {
                     return Err(PluginError::NotAllowed);
                 }
@@ -157,8 +145,7 @@ impl Plugin for CommandPlugin {
                 cx.send(peer, CAP, "run", body.to_vec());
                 Ok(())
             }
-            // Answer from what the peer already told us, rather than asking
-            // again for something that does not change.
+            // Answered from what the peer already told us.
             "list" => {
                 let commands = self.remote.get(peer).cloned().unwrap_or_default();
                 let Ok(encoded) = minicbor::to_vec(CommandList { commands }) else {
@@ -181,8 +168,7 @@ impl Plugin for CommandPlugin {
             return;
         };
         match result {
-            // The host returns an encoded `Exited`. Output streaming is a
-            // version 2 concern; version 1 answers once, when it is over.
+            // The host returns an encoded `Exited`; version 1 answers once.
             EffectResult::Ok(bytes) => cx.send_reply(&peer, CAP, "exited", bytes.clone(), request),
             EffectResult::Failed(detail) => {
                 cx.send_error(&peer, CAP, request, "effect_failed", detail);
@@ -263,8 +249,7 @@ mod tests {
 
     #[test]
     fn an_id_that_is_not_in_the_catalog_never_reaches_the_host() {
-        // This is the whole difference between a command runner and a remote
-        // shell, so it is checked before anything else can happen.
+        // The whole difference between a command runner and a remote shell.
         let mut p = plugin();
         for id in [
             "rm",
