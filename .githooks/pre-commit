@@ -1,12 +1,7 @@
 #!/usr/bin/env bash
 #
-# Refuse to commit anything that looks like a credential.
-#
-# Deliberately pattern-based rather than entropy-based. This repository is full
-# of keys, fingerprints and base64 test vectors that any entropy heuristic would
-# flag constantly, and a check people learn to ignore is worse than no check.
-# Every pattern below matches a credential *format*, not merely a random-looking
-# string.
+# Refuse to commit anything that looks like a credential. Pattern-based, not entropy-based:
+# the repo is full of test keys and base64 vectors an entropy heuristic would flag constantly.
 set -euo pipefail
 
 fail=0
@@ -39,11 +34,33 @@ check 'AIza[0-9A-Za-z_-]{35}'                     "a Google API key"
 check "(api[_-]?key|secret|password|token)[\"' ]*[:=][\"' ]*[A-Za-z0-9/+_-]{24,}" \
                                                   "a hard-coded credential"
 
+# No comment blocks over 2 lines: keep the invariant, drop the essay.
+while IFS= read -r path; do
+    case "$path" in
+        *.rs|*.swift|*.c|*.h) re='^[[:space:]]*(//|/[*]|[*])'
+                              bare='^[[:space:]]*(/?/+!?|[*])[[:space:]]*$' ;;
+        *.sh|.githooks/*)     re='^[[:space:]]*#'
+                              bare='^[[:space:]]*#[[:space:]]*$' ;;
+        *) continue ;;
+    esac
+    block=$(git diff --cached -U0 -- "$path" | awk -v re="$re" -v bare="$bare" '
+        /^\+\+\+/ {next}
+        /^\+/ {line=substr($0,2)
+               if (line ~ bare) next
+               if (line ~ re) {run++; if (run>max) max=run; next}}
+        {run=0}
+        END {print max+0}')
+    if [ "$block" -gt 2 ]; then
+        note "$path adds a comment block of $block lines (max 2)"
+    fi
+done < <(git diff --cached --name-only --diff-filter=ACM)
+
 if [ "$fail" -ne 0 ]; then
     cat >&2 <<'EOF'
 
-Nothing here should carry a credential. If this is a false positive — a test
-vector, say — commit with --no-verify and say so in the message.
+Nothing here should carry a credential, and comments stay under 3 lines. If
+this is a false positive — a test vector, a sanctioned block — commit with
+--no-verify and say so in the message.
 EOF
     exit 1
 fi
