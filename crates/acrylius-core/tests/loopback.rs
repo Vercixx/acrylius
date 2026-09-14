@@ -871,6 +871,155 @@ fn a_better_transport_is_taken_even_while_a_worse_one_is_working() {
 }
 
 #[test]
+fn reconsider_routes_dials_a_strictly_better_route_set_locally() {
+    // The shape a USB-attach watcher uses: no discovery event, just
+    // `SetPeerAddress` then `ReconsiderRoutes`, both sent locally.
+    let (a, b) = (core("phone"), core("pc"));
+    let b_id = b.device_id();
+    let mut net = Net::new(a, b);
+    net.local(
+        Side::A,
+        LocalCommand::RequestPairing {
+            transport: SLOWER,
+            addr: Side::B.addr().to_string(),
+        },
+    );
+    net.local(Side::A, LocalCommand::ConfirmPairing { accept: true });
+    net.local(Side::B, LocalCommand::ConfirmPairing { accept: true });
+    // The armed heartbeat wakes the runtime immediately; this is that tick.
+    net.queue.push_back((Side::A, Event::Tick));
+    net.run();
+    assert_eq!(net.a.peer_state(&b_id), PeerState::Reachable);
+
+    net.dialed.clear();
+    net.local(
+        Side::A,
+        LocalCommand::SetPeerAddress {
+            peer: b_id.clone(),
+            transport: TRANSPORT,
+            addr: "B".to_string(),
+        },
+    );
+    assert!(
+        net.dialed.is_empty(),
+        "recording an address must not dial anything on its own"
+    );
+
+    net.local(Side::A, LocalCommand::ReconsiderRoutes);
+    assert_eq!(
+        net.dialed,
+        vec![(TRANSPORT, "B".to_string())],
+        "a strictly better route recorded locally is dialled with no discovery involved"
+    );
+}
+
+#[test]
+fn reconsider_routes_leaves_a_worse_route_alone() {
+    // The reason a new transport must sit below whatever it should be able to
+    // upgrade from: a route no better than what already carries is never tried.
+    let (mut net, _a_id, b_id) = paired();
+    discover(&mut net, Side::A, Side::B);
+    assert_eq!(net.a.transport_for(&b_id), Some(TransportKind::UnixLoopback));
+
+    net.local(
+        Side::A,
+        LocalCommand::SetPeerAddress {
+            peer: b_id.clone(),
+            transport: SLOWER,
+            addr: "B".to_string(),
+        },
+    );
+    net.dialed.clear();
+    net.local(Side::A, LocalCommand::ReconsiderRoutes);
+
+    assert!(
+        net.dialed.is_empty(),
+        "SLOWER is not strictly better than what already carries, so nothing is tried"
+    );
+}
+
+#[test]
+fn a_plain_connect_does_not_dial_a_better_route_while_already_reachable() {
+    // Only `ReconsiderRoutes` may act on a route becoming available; `Connect`
+    // is what a person pressing "try again" sends, not an upgrade request.
+    let (a, b) = (core("phone"), core("pc"));
+    let b_id = b.device_id();
+    let mut net = Net::new(a, b);
+    net.local(
+        Side::A,
+        LocalCommand::RequestPairing {
+            transport: SLOWER,
+            addr: Side::B.addr().to_string(),
+        },
+    );
+    net.local(Side::A, LocalCommand::ConfirmPairing { accept: true });
+    net.local(Side::B, LocalCommand::ConfirmPairing { accept: true });
+    net.queue.push_back((Side::A, Event::Tick));
+    net.run();
+    assert_eq!(net.a.peer_state(&b_id), PeerState::Reachable);
+
+    net.local(
+        Side::A,
+        LocalCommand::SetPeerAddress {
+            peer: b_id.clone(),
+            transport: TRANSPORT,
+            addr: "B".to_string(),
+        },
+    );
+    net.dialed.clear();
+    net.local(Side::A, LocalCommand::Connect { peer: b_id.clone() });
+
+    assert!(
+        net.dialed.is_empty(),
+        "a plain Connect must not try a better route on its own"
+    );
+}
+
+#[test]
+fn forgetting_a_route_removes_it_from_the_fallback_chain() {
+    let (mut net, _a_id, b_id) = paired();
+    lose_link(&mut net, TRANSPORT);
+    assert_eq!(net.a.peer_state(&b_id), PeerState::Unreachable);
+
+    // The route pairing left on file is broken, and a fallback is added, then
+    // withdrawn before anything dials it.
+    net.local(
+        Side::A,
+        LocalCommand::SetPeerAddress {
+            peer: b_id.clone(),
+            transport: TRANSPORT,
+            addr: "not-listening".to_string(),
+        },
+    );
+    net.local(
+        Side::A,
+        LocalCommand::SetPeerAddress {
+            peer: b_id.clone(),
+            transport: SLOWER,
+            addr: "B".to_string(),
+        },
+    );
+    net.local(
+        Side::A,
+        LocalCommand::ForgetPeerAddress {
+            peer: b_id.clone(),
+            transport: SLOWER,
+            addr: "B".to_string(),
+        },
+    );
+
+    net.dialed.clear();
+    net.local(Side::A, LocalCommand::Connect { peer: b_id.clone() });
+
+    assert_eq!(
+        net.dialed,
+        vec![(TRANSPORT, "not-listening".to_string())],
+        "the forgotten route must not be tried as a fallback"
+    );
+    assert_eq!(net.a.peer_state(&b_id), PeerState::Unreachable);
+}
+
+#[test]
 fn a_hello_no_newer_than_the_last_one_is_refused() {
     // `Noise_IKpsk2` message 1 is replayable, so every opener carries a
     // timestamp and a peer's watermark only ever moves forward (PROTOCOL.md
@@ -2870,6 +3019,51 @@ fn a_file_sends_again_once_wi_fi_takes_over_from_bluetooth() {
             UiEvent::Plugin { ty, .. } if ty == "offer"
         )),
         "the offer reaches the far end over the better link"
+    );
+}
+
+#[test]
+fn a_bulk_transfer_is_offered_even_when_the_freshest_link_cannot_carry_it() {
+    // A link with no side channel (BLE, or USB) can still be the freshest;
+    // an older link that has one must still be found for a bulk transfer.
+    let (a, b) = (sharing_core("phone"), sharing_core("pc"));
+    let b_id = b.device_id();
+    let mut net = Net::new(a, b);
+    // Stands in for USB: preferred (lower id) but no side channel of its own.
+    net.ble_transport = Some(TRANSPORT);
+    net.local(
+        Side::A,
+        LocalCommand::RequestPairing {
+            transport: SLOWER,
+            addr: Side::B.addr().to_string(),
+        },
+    );
+    net.local(Side::A, LocalCommand::ConfirmPairing { accept: true });
+    net.local(Side::B, LocalCommand::ConfirmPairing { accept: true });
+    net.queue.push_back((Side::A, Event::Tick));
+    net.run();
+    assert_eq!(net.a.peer_state(&b_id), PeerState::Reachable);
+
+    // TRANSPORT then takes over as the freshest link, but it cannot carry bulk.
+    net.wall += 1_000;
+    discover_via(&mut net, Side::A, Side::B, TRANSPORT, "B");
+    assert_eq!(
+        net.a.transport_for(&b_id),
+        Some(TransportKind::BleGatt),
+        "the freshest link is the one with no side channel"
+    );
+
+    plugin(&mut net, Side::A, &b_id, "offer", offer_body(1, 4096));
+    assert!(
+        !net.saw(Side::A, |e| matches!(e, UiEvent::Error { .. })),
+        "an older link with a side channel must still be found"
+    );
+    assert!(
+        net.saw(Side::B, |e| matches!(
+            e,
+            UiEvent::Plugin { ty, .. } if ty == "offer"
+        )),
+        "the offer reached the far end over the link that can carry it"
     );
 }
 

@@ -137,6 +137,11 @@ final class AppModel {
                 serviceType: serviceType(),
                 port: defaultPort()
             ))
+            #if canImport(Network)
+                // Transport 0, matching the daemon: lower than Wi-Fi, so a
+                // cable plugged in while already connected still takes over.
+                await rt.add(transport: USBTransport())
+            #endif
             #if canImport(CoreBluetooth)
                 // Transport 2, matching the daemon; routes are tried in
                 // ascending transport order, so Wi-Fi wins. Must be added

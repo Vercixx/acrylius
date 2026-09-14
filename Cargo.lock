@@ -42,6 +42,7 @@ dependencies = [
  "minicbor",
  "serde",
  "serde_json",
+ "socket2",
  "tokio",
  "tracing",
  "wl-clipboard-rs",

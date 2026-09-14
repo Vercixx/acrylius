@@ -139,6 +139,12 @@ pub enum LocalCommand {
         transport: TransportId,
         addr: String,
     },
+    /// Withdraw a route set by `SetPeerAddress`, when it stops being reachable.
+    ForgetPeerAddress {
+        peer: DeviceId,
+        transport: TransportId,
+        addr: String,
+    },
     Connect {
         peer: DeviceId,
     },

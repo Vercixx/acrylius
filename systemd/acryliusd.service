@@ -38,6 +38,8 @@ PrivateDevices=yes
 # One real device let through the private /dev, for the virtual touchpad.
 # Access past this is still gated by /dev/uinput's own root:input 0660.
 BindPaths=/dev/uinput
+# usbmuxd's socket, for the USB transport's iproxy tunnel.
+BindReadOnlyPaths=/run/usbmuxd
 ProtectClock=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes

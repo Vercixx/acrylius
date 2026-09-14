@@ -34,6 +34,9 @@ const TCP: TransportId = TransportId(1);
 /// Higher than TCP on purpose: the core tries routes in ascending order, so
 /// Wi-Fi is preferred and BLE is the fallback.
 const BLE: TransportId = TransportId(2);
+/// Lower than TCP: `connect_peer` only auto-upgrades a `Reachable` peer to a
+/// *strictly lower* transport id, so a mid-session cable plug needs this.
+const USB: TransportId = TransportId(0);
 
 #[derive(Parser, Debug)]
 #[command(name = "acryliusd", version, about = "The acrylius daemon")]
@@ -172,6 +175,19 @@ fn wake_config(cfg: &config::WolConfig) -> wol::WolConfig {
 /// no single peer attached; this is an obviously-not-real one.
 fn broadcast_placeholder() -> acrylius_core::proto::ids::DeviceId {
     acrylius_core::proto::ids::DeviceId::of(&[0u8; 32])
+}
+
+/// First UDID `idevice_id -l` reports, if any device is attached over USB.
+async fn usb_udid() -> Option<String> {
+    let out = tokio::process::Command::new("idevice_id")
+        .arg("-l")
+        .output()
+        .await
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .map(|l| l.trim().to_string())
 }
 
 fn snapshot_devices(core: &acrylius_core::core::Core) -> Vec<control::Device> {
@@ -493,6 +509,9 @@ async fn main() -> anyhow::Result<()> {
                 as Arc<dyn Transport>,
         );
     }
+    if cfg.usb.enabled {
+        rt.add_transport(Arc::new(acrylius_linux::usb::UsbTransport::new(USB)) as Arc<dyn Transport>);
+    }
 
     // UI events go out over a broadcast channel so multiple acryliusctl
     // invocations can watch at once.
@@ -619,6 +638,8 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    let devices_for_usb = devices.clone();
+
     let _sock = control::serve(
         control::socket_path(&state, explicit_state),
         control::Handles {
@@ -701,6 +722,52 @@ async fn main() -> anyhow::Result<()> {
                 {
                     return;
                 }
+            }
+        });
+    }
+
+    if cfg.usb.enabled {
+        let events = events.clone();
+        let devices = devices_for_usb;
+        tokio::spawn(async move {
+            let mut last: Option<String> = None;
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
+            loop {
+                interval.tick().await;
+                let seen = usb_udid().await;
+                let peers: Vec<acrylius_core::proto::ids::DeviceId> = devices
+                    .lock()
+                    .await
+                    .iter()
+                    .filter_map(|d| acrylius_core::proto::ids::DeviceId::parse(&d.device_id).ok())
+                    .collect();
+                // Re-sent every tick while attached, not just on the edge, so
+                // a peer paired after the cable went in still gets offered USB.
+                if let Some(udid) = &seen {
+                    for peer in &peers {
+                        let _ = events.send(acrylius_core::vocab::Event::Local(
+                            acrylius_core::vocab::LocalCommand::SetPeerAddress {
+                                peer: peer.clone(),
+                                transport: USB,
+                                addr: udid.clone(),
+                            },
+                        ));
+                    }
+                    let _ = events.send(acrylius_core::vocab::Event::Local(
+                        acrylius_core::vocab::LocalCommand::ReconsiderRoutes,
+                    ));
+                } else if let Some(udid) = &last {
+                    for peer in &peers {
+                        let _ = events.send(acrylius_core::vocab::Event::Local(
+                            acrylius_core::vocab::LocalCommand::ForgetPeerAddress {
+                                peer: peer.clone(),
+                                transport: USB,
+                                addr: udid.clone(),
+                            },
+                        ));
+                    }
+                }
+                last = seen;
             }
         });
     }

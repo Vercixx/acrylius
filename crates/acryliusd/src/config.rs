@@ -19,6 +19,7 @@ pub struct Config {
     pub session: SessionConfig,
     pub share: ShareConfig,
     pub ble: BleConfig,
+    pub usb: UsbConfig,
     pub pair: PairConfig,
     /// Commands a paired device may run, keyed by the id that travels.
     pub commands: BTreeMap<String, CommandSpec>,
@@ -46,6 +47,19 @@ pub struct BleConfig {
 }
 
 impl Default for BleConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
+/// Whether to dial a phone over `iproxy` when one is plugged in and paired.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UsbConfig {
+    pub enabled: bool,
+}
+
+impl Default for UsbConfig {
     fn default() -> Self {
         Self { enabled: true }
     }
@@ -195,6 +209,7 @@ impl Default for Config {
             session: SessionConfig::default(),
             share: ShareConfig::default(),
             ble: BleConfig::default(),
+            usb: UsbConfig::default(),
             pair: PairConfig::default(),
             commands: BTreeMap::new(),
         }

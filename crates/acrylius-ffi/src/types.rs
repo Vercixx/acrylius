@@ -149,6 +149,24 @@ pub fn tcp_lan_attrs(transport: u16) -> FfiLinkAttrs {
     }
 }
 
+/// Attributes of the USB link: loopback-latency but no bulk side channel of
+/// its own, since the tunnel is one TCP stream, not a socket the host can bind.
+#[uniffi::export]
+#[must_use]
+pub fn usb_attrs(transport: u16) -> FfiLinkAttrs {
+    FfiLinkAttrs {
+        transport,
+        kind: FfiTransportKind::Custom {
+            name: "usb".to_string(),
+        },
+        max_message: 1 << 20,
+        reliable: true,
+        ordered: true,
+        latency: FfiLatency::Loopback,
+        bulk: FfiBulk::None,
+    }
+}
+
 #[derive(uniffi::Enum, Clone, Debug)]
 pub enum FfiLinkDown {
     Closed,

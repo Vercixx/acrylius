@@ -1429,8 +1429,21 @@ impl Core {
         });
     }
 
+    /// Any up link with a side channel, not just the freshest: the bulk
+    /// listener is bound to the host's address, not to whichever link is busiest.
     fn bulk_support_for(&self, peer: &DeviceId) -> Option<BulkSupport> {
-        self.best_link(peer).map(|(_, u)| u.bulk)
+        let mut best = None;
+        for st in self.links.values() {
+            let LinkState::Up(u) = st else { continue };
+            if &u.peer != peer {
+                continue;
+            }
+            if u.bulk == BulkSupport::SideChannel {
+                return Some(BulkSupport::SideChannel);
+            }
+            best = Some(u.bulk);
+        }
+        best
     }
 
     /// The link a message to this peer would take: most recently heard from
@@ -1576,6 +1589,15 @@ impl Core {
                         code: ErrorCode::NotPaired,
                         detail: format!("{peer} is not a paired device"),
                     });
+                }
+            }
+            LocalCommand::ForgetPeerAddress {
+                peer,
+                transport,
+                addr,
+            } => {
+                if let Some(routes) = self.addrs.get_mut(&peer) {
+                    routes.forget(transport, &addr);
                 }
             }
             LocalCommand::Connect { peer } => self.connect_peer(now_ms, peer, out, true),
