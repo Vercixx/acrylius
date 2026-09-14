@@ -141,10 +141,22 @@ static LIVE_WRITER: tokio::sync::Mutex<Option<(LinkId, Writer)>> =
 /// while up would open a second tunnel and make the phone drop the first.
 static BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// The current `iproxy` supervisor, so a redialled UDID replaces it instead
-/// of racing it for the same local port.
-static IPROXY: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>> =
+/// The UDID `iproxy` runs for, and its supervisor: only replaced when the
+/// UDID changes, since a link dying is not evidence iproxy itself is bad.
+static IPROXY: tokio::sync::Mutex<Option<(String, tokio::task::JoinHandle<()>)>> =
     tokio::sync::Mutex::const_new(None);
+
+/// Start (or keep) the `iproxy` supervisor for this UDID.
+async fn ensure_iproxy(udid: &str) {
+    let mut guard = IPROXY.lock().await;
+    if guard.as_ref().is_some_and(|(u, _)| u == udid) {
+        return;
+    }
+    if let Some((_, old)) = guard.take() {
+        old.abort();
+    }
+    *guard = Some((udid.to_string(), tokio::spawn(run_iproxy(udid.to_string()))));
+}
 
 /// Keeps `iproxy 1972:1972 -u <udid>` running, restarting it if it exits —
 /// a cable reseat or a usbmuxd hiccup should heal without a daemon restart.
@@ -192,13 +204,7 @@ impl Transport for UsbTransport {
                     let sink = sink.clone();
                     let me = self.clone();
                     tokio::spawn(async move {
-                        {
-                            let mut guard = IPROXY.lock().await;
-                            if let Some(old) = guard.take() {
-                                old.abort();
-                            }
-                            *guard = Some(tokio::spawn(run_iproxy(udid.clone())));
-                        }
+                        ensure_iproxy(&udid).await;
                         let mut last_err = String::new();
                         for attempt in 0..20 {
                             match TcpStream::connect(("127.0.0.1", PORT)).await {
