@@ -137,6 +137,15 @@ type Writer = mpsc::UnboundedSender<Option<Vec<u8>>>;
 static LIVE_WRITER: tokio::sync::Mutex<Option<(LinkId, Writer)>> =
     tokio::sync::Mutex::const_new(None);
 
+/// Set for as long as a dial is in flight or a link is live. A repeat dial
+/// while up would open a second tunnel and make the phone drop the first.
+static BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The current `iproxy` supervisor, so a redialled UDID replaces it instead
+/// of racing it for the same local port.
+static IPROXY: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>> =
+    tokio::sync::Mutex::const_new(None);
+
 /// Keeps `iproxy 1972:1972 -u <udid>` running, restarting it if it exits —
 /// a cable reseat or a usbmuxd hiccup should heal without a daemon restart.
 async fn run_iproxy(udid: String) {
@@ -174,12 +183,22 @@ impl Transport for UsbTransport {
         while let Some(cmd) = cmds.recv().await {
             match cmd {
                 TransportCmd::Dial { dial, addr } => {
+                    if BUSY.swap(true, Ordering::AcqRel) {
+                        tracing::debug!(udid = %addr, "already up or dialling; ignoring a repeat dial");
+                        continue;
+                    }
                     let udid = addr;
                     tracing::info!(%udid, "USB dial requested");
                     let sink = sink.clone();
                     let me = self.clone();
                     tokio::spawn(async move {
-                        tokio::spawn(run_iproxy(udid));
+                        {
+                            let mut guard = IPROXY.lock().await;
+                            if let Some(old) = guard.take() {
+                                old.abort();
+                            }
+                            *guard = Some(tokio::spawn(run_iproxy(udid.clone())));
+                        }
                         let mut last_err = String::new();
                         for attempt in 0..20 {
                             match TcpStream::connect(("127.0.0.1", PORT)).await {
@@ -187,6 +206,7 @@ impl Transport for UsbTransport {
                                     tracing::info!(attempt, "connected to iproxy's local port");
                                     let link = me.next_link();
                                     serve(link, s, me.attrs(), sink.clone()).await;
+                                    BUSY.store(false, Ordering::Release);
                                     return;
                                 }
                                 Err(e) => {
@@ -197,6 +217,7 @@ impl Transport for UsbTransport {
                             }
                         }
                         tracing::warn!(error = %last_err, "giving up on the USB dial");
+                        BUSY.store(false, Ordering::Release);
                         let _ = sink.send(Event::DialFailed {
                             dial,
                             reason: format!("could not reach iproxy: {last_err}"),
