@@ -286,7 +286,9 @@ mod tests {
         assert!(r.sent("avail").is_some());
 
         let mut p2 = TouchpadPlugin::default();
-        let r2 = run_on(0, EffectSet::new([]), |cx| p2.on_peer_connected(cx, &peer(1)));
+        let r2 = run_on(0, EffectSet::new([]), |cx| {
+            p2.on_peer_connected(cx, &peer(1))
+        });
         assert!(r2.sent("avail").is_none());
     }
 

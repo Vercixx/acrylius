@@ -199,7 +199,10 @@ pub enum Effect {
     },
     /// Drive this machine's virtual touchpad. `order` is plugin-assigned per
     /// message and strictly increasing, since effects run in their own tasks.
-    Touchpad { order: u32, op: TouchpadOp },
+    Touchpad {
+        order: u32,
+        op: TouchpadOp,
+    },
     /// Escape hatch so adding a plugin never means editing this enum. A host
     /// that does not recognise `ns` answers [`EffectResult::Unsupported`].
     Custom {

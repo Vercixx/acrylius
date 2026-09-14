@@ -77,7 +77,11 @@ impl Slots {
         for slot in 0..SLOTS {
             let Some(id) = self.held[slot] else { continue };
             if !points.iter().any(|p| p.id == id) {
-                out.push(Ev::new(EV_ABS, AbsoluteAxis::MultitouchSlot as u16, slot as i32));
+                out.push(Ev::new(
+                    EV_ABS,
+                    AbsoluteAxis::MultitouchSlot as u16,
+                    slot as i32,
+                ));
                 out.push(Ev::new(
                     EV_ABS,
                     AbsoluteAxis::MultitouchTrackingId as u16,
@@ -101,7 +105,11 @@ impl Slots {
                     None => continue,
                 },
             };
-            out.push(Ev::new(EV_ABS, AbsoluteAxis::MultitouchSlot as u16, slot as i32));
+            out.push(Ev::new(
+                EV_ABS,
+                AbsoluteAxis::MultitouchSlot as u16,
+                slot as i32,
+            ));
             if fresh {
                 out.push(Ev::new(
                     EV_ABS,
@@ -135,7 +143,11 @@ impl Slots {
             out.push(Ev::new(EV_ABS, AbsoluteAxis::Y as u16, i32::from(p.y)));
         }
 
-        out.push(Ev::new(EV_KEY, Key::ButtonTouch as u16, i32::from(down > 0)));
+        out.push(Ev::new(
+            EV_KEY,
+            Key::ButtonTouch as u16,
+            i32::from(down > 0),
+        ));
         // More fingers than tool keys saturates at the highest one, rather
         // than leaving every bit clear with `BTN_TOUCH` still set.
         let capped = down.min(TOOL_KEYS.len());
@@ -372,7 +384,21 @@ mod tests {
         let f = s.frame(&[point(8, 300, 400)]);
         assert_eq!(abs(&f, AbsoluteAxis::MultitouchTrackingId), vec![-1]);
         assert_eq!(abs(&f, AbsoluteAxis::MultitouchSlot), vec![0, 1]);
-        assert_eq!(s.held, [None, Some(8), None, None, None, None, None, None, None, None]);
+        assert_eq!(
+            s.held,
+            [
+                None,
+                Some(8),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None
+            ]
+        );
     }
 
     #[test]

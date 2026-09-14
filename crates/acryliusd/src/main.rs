@@ -510,7 +510,9 @@ async fn main() -> anyhow::Result<()> {
         );
     }
     if cfg.usb.enabled {
-        rt.add_transport(Arc::new(acrylius_linux::usb::UsbTransport::new(USB)) as Arc<dyn Transport>);
+        rt.add_transport(
+            Arc::new(acrylius_linux::usb::UsbTransport::new(USB)) as Arc<dyn Transport>
+        );
     }
 
     // UI events go out over a broadcast channel so multiple acryliusctl

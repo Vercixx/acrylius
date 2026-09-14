@@ -132,7 +132,8 @@ type Writer = mpsc::UnboundedSender<Option<Vec<u8>>>;
 
 /// The one outstanding USB link's sender, so `TransportCmd::Send`/`Close` can
 /// reach it without a broadcast map — USB never holds more than one at a time.
-static LIVE_WRITER: tokio::sync::Mutex<Option<(LinkId, Writer)>> = tokio::sync::Mutex::const_new(None);
+static LIVE_WRITER: tokio::sync::Mutex<Option<(LinkId, Writer)>> =
+    tokio::sync::Mutex::const_new(None);
 
 /// Keeps `iproxy 1972:1972 -u <udid>` running, restarting it if it exits —
 /// a cable reseat or a usbmuxd hiccup should heal without a daemon restart.

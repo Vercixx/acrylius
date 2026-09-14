@@ -919,7 +919,10 @@ fn reconsider_routes_leaves_a_worse_route_alone() {
     // upgrade from: a route no better than what already carries is never tried.
     let (mut net, _a_id, b_id) = paired();
     discover(&mut net, Side::A, Side::B);
-    assert_eq!(net.a.transport_for(&b_id), Some(TransportKind::UnixLoopback));
+    assert_eq!(
+        net.a.transport_for(&b_id),
+        Some(TransportKind::UnixLoopback)
+    );
 
     net.local(
         Side::A,
