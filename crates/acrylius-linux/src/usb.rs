@@ -85,12 +85,6 @@ async fn serve(link: LinkId, stream: TcpStream, attrs: LinkAttrs, sink: EventSin
 
     let (mut rd, mut wr) = stream.into_split();
     let (tx, mut rx) = mpsc::unbounded_channel::<Option<Vec<u8>>>();
-    tracing::info!(?link, "USB link up");
-    let _ = sink.send(Event::LinkUp {
-        link,
-        attrs,
-        dial: None,
-    });
 
     let mut writer = tokio::spawn(async move {
         while let Some(Some(msg)) = rx.recv().await {
@@ -104,8 +98,15 @@ async fn serve(link: LinkId, stream: TcpStream, attrs: LinkAttrs, sink: EventSin
         let _ = wr.shutdown().await;
     });
 
-    // Owned by this task, not shared: only one USB link exists at a time.
+    // Registered before the event fires: the core answers a LinkUp with a
+    // send immediately, and that send must find a writer already here.
     LIVE_WRITER.lock().await.replace((link, tx));
+    tracing::info!(?link, "USB link up");
+    let _ = sink.send(Event::LinkUp {
+        link,
+        attrs,
+        dial: None,
+    });
 
     let reason = loop {
         tokio::select! {
