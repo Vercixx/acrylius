@@ -15,7 +15,7 @@ use acrylius_core::config::CoreConfig;
 use acrylius_core::core::{Core, CoreBuilder};
 use acrylius_core::noise::Identity;
 use acrylius_core::peer::{PeerRecord, PeerState};
-use acrylius_core::plugins::{clipboard, command, media, ping, session, share, wol};
+use acrylius_core::plugins::{clipboard, command, media, ping, session, share, touchpad, wol};
 
 pub use bodies::*;
 pub use types::*;
@@ -164,6 +164,8 @@ impl AcryliusCore {
         .plugin(media::MediaPlugin::default())
         // No Share effect registered: an offer gets an explicit refusal, not silence.
         .plugin(share::SharePlugin::default())
+        // No Touchpad effect registered: a phone has none of its own to serve.
+        .plugin(touchpad::TouchpadPlugin::default())
         .restore(records)
         .build();
         Ok(Self {
