@@ -24,6 +24,7 @@ pub struct LinuxEffector {
     catalog: CommandCatalog,
     wol: WolSettings,
     has_wayland: bool,
+    touchpad: Option<crate::touchpad::TouchpadEffector>,
     run_counter: std::sync::atomic::AtomicU32,
 }
 
@@ -54,12 +55,19 @@ impl LinuxEffector {
         if !has_wayland {
             tracing::debug!("no WAYLAND_DISPLAY; clipboard is off");
         }
+        // Usually a permission problem: /dev/uinput is root:input, and this
+        // needs the `input` group and BindPaths= past the unit's private /dev.
+        let touchpad = crate::touchpad::available().then(Default::default);
+        if touchpad.is_none() {
+            tracing::debug!("cannot open /dev/uinput; the touchpad is off");
+        }
         Self {
             session,
             media,
             catalog,
             wol,
             has_wayland,
+            touchpad,
             run_counter: std::sync::atomic::AtomicU32::new(0),
         }
     }
@@ -100,6 +108,9 @@ impl Effector for LinuxEffector {
         // plays, or the phone would renegotiate constantly.
         if self.media.is_some() {
             kinds.push(EffectKind::Media);
+        }
+        if self.touchpad.is_some() {
+            kinds.push(EffectKind::Touchpad);
         }
         kinds
     }
@@ -190,6 +201,14 @@ impl Effector for LinuxEffector {
                 Some(m) => match m.control_and_settle(&player, action).await {
                     Ok(state) => Self::encode(&state),
                     Err(e) => EffectResult::Failed(e.to_string()),
+                },
+                None => EffectResult::Unsupported,
+            },
+
+            Effect::Touchpad { order, op } => match &self.touchpad {
+                Some(t) => match t.run(order, op).await {
+                    Ok(()) => EffectResult::Ok(Vec::new()),
+                    Err(e) => EffectResult::Failed(e),
                 },
                 None => EffectResult::Unsupported,
             },

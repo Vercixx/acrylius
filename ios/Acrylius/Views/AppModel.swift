@@ -170,6 +170,12 @@ final class AppModel {
     /// Retained because `UiSink` is held weakly by the runtime.
     private var sink: Sink?
 
+    /// When a ping went out, per peer, so the matching pong can be timed.
+    private var pingSentAt: [String: Date] = [:]
+    /// The last ping round trip, in milliseconds. `TouchpadView` reads this to
+    /// show whether Wi-Fi jitter is worth chasing with a USB transport.
+    var lastPingRTTms: Double?
+
     /// Start pairing; six digits come back and each end confirms they match.
     func pair(at addr: String, transport: UInt16 = 1) async {
         await runtime?.submit(.requestPairing(transport: transport, addr: addr))
@@ -198,6 +204,7 @@ final class AppModel {
     }
 
     func ping(_ peer: FfiPeer) async {
+        pingSentAt[peer.deviceId] = Date()
         await send(peer, cap: capPing(), ty: "ping", body: Data("hello".utf8))
     }
 
@@ -279,6 +286,22 @@ final class AppModel {
 
     func refreshSession(_ peer: FfiPeer) async {
         await send(peer, cap: capSession(), ty: "query", body: Data())
+    }
+
+    func touchpadBegin(_ peer: FfiPeer, wMm: UInt16, hMm: UInt16) async {
+        let body = encodeTouchpadBegin(wMm: wMm, hMm: hMm)
+        await send(peer, cap: capTouchpad(), ty: "begin", body: body)
+    }
+
+    /// The hottest call in the app: driven off a display link, never off a
+    /// touch callback directly. See `TouchpadView`.
+    func touchpadFrame(_ peer: FfiPeer, seq: UInt32, ids: Data, xs: [UInt16], ys: [UInt16]) async {
+        let body = encodeTouchpadFrame(seq: seq, ids: ids, xs: xs, ys: ys)
+        await send(peer, cap: capTouchpad(), ty: "frame", body: body)
+    }
+
+    func touchpadEnd(_ peer: FfiPeer) async {
+        await send(peer, cap: capTouchpad(), ty: "end", body: Data())
     }
 
     /// Re-query a peer that has just come back: `PeerCatalog.ingest` clears
@@ -483,6 +506,10 @@ final class AppModel {
             // the row that draws it.
             Task { await refresh() }
         case let .plugin(peer, cap, ty, body):
+            if cap == capPing(), ty == "pong", let sent = pingSentAt[peer] {
+                pingSentAt[peer] = nil
+                lastPingRTTms = Date().timeIntervalSince(sent) * 1000
+            }
             // Recorded twice: the inbox settles where the file lands (name
             // collisions resolved before agreeing); this list is what is shown.
             if cap == capShare(), ty == "offer",

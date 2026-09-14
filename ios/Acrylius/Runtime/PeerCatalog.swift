@@ -31,12 +31,16 @@ public struct PeerFeatures: Equatable, Sendable {
     public var mediaQuerySentAt: Date?
     /// The most recent refusal, for showing why a button did nothing.
     public var lastError: String?
+    /// Whether the peer has announced it can serve the touchpad. Set once, on
+    /// connect, the same as the command catalogue and the wake config.
+    public var touchpadAvailable = false
 
     public init() {}
 
     public var canLock: Bool { session != nil }
     public var canWake: Bool { wake?.macs.isEmpty == false }
     public var canRunCommands: Bool { !commands.isEmpty }
+    public var canTouchpad: Bool { touchpadAvailable }
 
     /// Something worth showing a transport control for — not merely "the peer
     /// has media", since a remote with nothing to control looks broken.
@@ -188,6 +192,11 @@ public struct PeerCatalog: Equatable, Sendable {
                 // Answered, so the next reading gets its own round trip rather
                 // than being measured against this one.
                 features.mediaQuerySentAt = nil
+                changed = true
+            }
+        } else if cap == capTouchpad() {
+            if ty == "avail" {
+                features.touchpadAvailable = true
                 changed = true
             }
         }

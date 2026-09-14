@@ -71,6 +71,13 @@ case ":${PATH}:" in
     *) warn "$BIN_DIR is not on your PATH; add it or use the full path" ;;
 esac
 
+# Not fixed here: adding a group only takes effect on the next login, so
+# telling and doing would still leave the touchpad off until you log out.
+if [ -e /dev/uinput ] && ! id -nG | grep -qw input; then
+    warn "you are not in the 'input' group; the phone touchpad will be unavailable"
+    warn "sudo usermod -aG input \$USER, then log out and back in"
+fi
+
 # --- config ------------------------------------------------------------------
 
 step "Config"

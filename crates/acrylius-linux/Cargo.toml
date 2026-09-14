@@ -20,6 +20,7 @@ tracing.workspace = true
 wl-clipboard-rs.workspace = true
 zbus.workspace = true
 futures-lite.workspace = true
+input-linux.workspace = true
 
 [lints]
 workspace = true

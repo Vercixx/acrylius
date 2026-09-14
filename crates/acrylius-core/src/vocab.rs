@@ -191,6 +191,9 @@ pub enum Effect {
         dests: Vec<String>,
         port: u16,
     },
+    /// Drive this machine's virtual touchpad. `order` is plugin-assigned per
+    /// message and strictly increasing, since effects run in their own tasks.
+    Touchpad { order: u32, op: TouchpadOp },
     /// Escape hatch so adding a plugin never means editing this enum. A host
     /// that does not recognise `ns` answers [`EffectResult::Unsupported`].
     Custom {
@@ -223,6 +226,28 @@ pub enum MediaAction {
     },
 }
 
+/// One finger. `x` and `y` are normalised over the touch surface, `0..=65535`,
+/// origin top left.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct TouchPoint {
+    pub id: u8,
+    pub x: u16,
+    pub y: u16,
+}
+
+/// What to do to the virtual touchpad.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum TouchpadOp {
+    /// Open a stream. The surface's physical size sets the device's axis
+    /// resolution, which is what libinput measures scroll and pinch against.
+    Begin { w_mm: u16, h_mm: u16 },
+    /// Every finger currently down, not a delta: frames may be lost or
+    /// reordered, and an absent finger is a lifted one.
+    Frame { points: Vec<TouchPoint> },
+    /// Close the stream, lifting every finger.
+    End,
+}
+
 /// Coarse classes of effect, declared by a host at construction. A host that
 /// cannot provide what a plugin requires has that plugin's capabilities left
 /// out of the handshake; every host registers the identical plugin set.
@@ -236,6 +261,7 @@ pub enum EffectKind {
     /// Somewhere to put an incoming file. Gates receiving only; offering needs
     /// no capability, since the sender reads its own bytes.
     Share,
+    Touchpad,
     Custom,
 }
 
@@ -275,6 +301,7 @@ impl Effect {
             Self::ListCommands | Self::RunCommand { .. } => EffectKind::Command,
             Self::SendMagicPacket { .. } => EffectKind::Wol,
             Self::MediaQuery | Self::MediaControl { .. } => EffectKind::Media,
+            Self::Touchpad { .. } => EffectKind::Touchpad,
             Self::Custom { .. } => EffectKind::Custom,
         }
     }

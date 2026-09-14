@@ -21,7 +21,7 @@ use acrylius_core::core::CoreBuilder;
 use acrylius_core::link::TransportId;
 use acrylius_core::noise::Identity;
 use acrylius_core::peer::PeerState;
-use acrylius_core::plugins::{clipboard, command, media, ping, session, share, wol};
+use acrylius_core::plugins::{clipboard, command, media, ping, session, share, touchpad, wol};
 use acrylius_linux::effector::LinuxEffector;
 use acrylius_rt::effector::Effector;
 use acrylius_rt::store::{FileStore, Store};
@@ -433,6 +433,7 @@ async fn main() -> anyhow::Result<()> {
     .plugin(command::CommandPlugin::new(effector.catalog().manifest()))
     .plugin(media::MediaPlugin::default())
     .plugin(share::SharePlugin::default())
+    .plugin(touchpad::TouchpadPlugin::default())
     .restore(peers)
     .build();
 

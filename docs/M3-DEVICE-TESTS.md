@@ -269,6 +269,32 @@ run it with `ACRYLIUS_M3_PHONE=1` to print the phone half as a checklist.
 - [V] Run a configured command.
 - [V] A transfer over Bluetooth is refused with a clear reason, not a hang.
 
+## 8. Touchpad
+
+Prototyped standalone against `/dev/uinput` before any of this was wired up:
+`ID_INPUT_TOUCHPAD=1`, Hyprland picked up the device hotplugged from an
+unprivileged process, a one-finger drag moved the pointer, and a two-finger
+drag scrolled instead. The checklist below is the same behaviour end to end,
+through the daemon and the phone.
+
+- [ ] The pointer follows one finger 1:1, no drift, no jitter, no jump when a
+      second finger lands.
+- [ ] A tap clicks, a two-finger tap right-clicks, and a tap-hold-drag does not
+      fire a click as the drag starts.
+- [ ] Two fingers scroll in both directions at a sane speed, and stop the
+      instant both fingers lift.
+- [ ] Three and four finger swipes reach Hyprland as workspace gestures, and
+      pinch zooms in an app that supports it.
+- [ ] Leaving the screen, backgrounding the app, or an incoming call lifts
+      every finger; nothing is left held.
+- [ ] `systemctl --user restart acryliusd` mid-touch leaves no stuck input
+      device behind.
+- [ ] A user not in the `input` group sees the touchpad simply unavailable,
+      with the reason findable, and nothing else breaks.
+- [ ] Wi-Fi jitter is visible or it is not — read the latency figure during
+      ordinary use and write down what it does. Decides whether the USB
+      transport is ever worth building.
+
 ---
 
 ## Deliberately not built

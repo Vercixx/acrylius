@@ -35,6 +35,9 @@ ProtectSystem=strict
 ProtectHome=read-only
 PrivateTmp=yes
 PrivateDevices=yes
+# One real device let through the private /dev, for the virtual touchpad.
+# Access past this is still gated by /dev/uinput's own root:input 0660.
+BindPaths=/dev/uinput
 ProtectClock=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes

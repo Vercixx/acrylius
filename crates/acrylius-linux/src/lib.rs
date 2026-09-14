@@ -12,6 +12,7 @@ pub mod media;
 pub mod mixer;
 pub mod notify;
 pub mod session;
+pub mod touchpad;
 pub mod wol;
 
 /// This process's real uid, from `/proc` rather than `libc`.

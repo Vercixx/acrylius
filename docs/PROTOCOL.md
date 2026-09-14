@@ -594,6 +594,39 @@ A command runs as an argv vector with an absolute path and no shell. It has a
 timeout, 10 seconds by default, and its captured output is capped, 64 KiB by
 default, with `truncated` set when the cap was reached.
 
+### org.acrylius.touchpad/1
+
+```
+->  begin    body: [0 w_mm:u16, 1 h_mm:u16]
+->  frame    body: [0 seq:u32, 1 points:[[0 id:u8, 1 x:u16, 2 y:u16]]]
+->  end      body: []
+<-  avail    body: []
+```
+
+Turns the phone's screen into a touchpad: fingers go in, and a compositor's own
+gesture handling comes out, unchanged. The desktop replays `points` onto a
+virtual multitouch touchpad; every gesture (tap, scroll, pinch, swipe) is
+libinput's and the compositor's to derive, exactly as it would from real
+hardware. Nothing here recognises a gesture.
+
+`begin` opens a stream, naming the touch surface's physical size in
+millimetres — the only place it matters, since it sets the virtual device's axis
+resolution, which is what libinput measures scroll and pinch thresholds against.
+`x` and `y` are normalised to the surface, `0..=65535`, origin top left.
+
+`points` in `frame` is every finger down right now, not a delta: a lost or
+reordered `frame` costs one sample and never desyncs the device, since the next
+one restates the whole set. `seq` orders frames against each other on the wire;
+a receiver applies whatever it judges newest and may discard the rest.
+
+`end` closes the stream and lifts every finger. A session ending or a link
+dropping does the same without waiting for one.
+
+`avail` is sent once, on connect, when the desktop can actually serve this
+capability — the same pattern as the command catalogue and the wake config: what
+a device announces at connect time is what a remote may act on, regardless of
+what `caps_in`/`caps_out` merely say is understood.
+
 ### org.acrylius.share/1
 
 Send a file. The envelope is the wrong place for one — a session frame is capped

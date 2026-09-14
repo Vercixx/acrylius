@@ -391,6 +391,7 @@ pub enum FfiEffectKind {
     Wol,
     Media,
     Share,
+    Touchpad,
     Custom,
 }
 
@@ -403,6 +404,7 @@ impl From<FfiEffectKind> for cv::EffectKind {
             FfiEffectKind::Wol => Self::Wol,
             FfiEffectKind::Media => Self::Media,
             FfiEffectKind::Share => Self::Share,
+            FfiEffectKind::Touchpad => Self::Touchpad,
             FfiEffectKind::Custom => Self::Custom,
         }
     }
@@ -435,11 +437,27 @@ pub enum FfiEffect {
         dests: Vec<String>,
         port: u16,
     },
+    /// Never reached on a phone, which serves no touchpad; here so the
+    /// conversion below stays total.
+    Touchpad {
+        verb: String,
+        order: u32,
+        w_mm: u16,
+        h_mm: u16,
+        points: Vec<FfiTouchPoint>,
+    },
     Custom {
         ns: String,
         verb: String,
         payload: Vec<u8>,
     },
+}
+
+#[derive(uniffi::Record, Clone, Debug)]
+pub struct FfiTouchPoint {
+    pub id: u8,
+    pub x: u16,
+    pub y: u16,
 }
 
 impl From<cv::Effect> for FfiEffect {
@@ -476,6 +494,33 @@ impl From<cv::Effect> for FfiEffect {
             }
             cv::Effect::SendMagicPacket { macs, dests, port } => {
                 Self::SendMagicPacket { macs, dests, port }
+            }
+            cv::Effect::Touchpad { order, op } => {
+                use cv::TouchpadOp as T;
+                let (verb, w_mm, h_mm, points) = match op {
+                    T::Begin { w_mm, h_mm } => ("begin", w_mm, h_mm, Vec::new()),
+                    T::Frame { points } => (
+                        "frame",
+                        0,
+                        0,
+                        points
+                            .into_iter()
+                            .map(|p| FfiTouchPoint {
+                                id: p.id,
+                                x: p.x,
+                                y: p.y,
+                            })
+                            .collect(),
+                    ),
+                    T::End => ("end", 0, 0, Vec::new()),
+                };
+                Self::Touchpad {
+                    verb: verb.to_string(),
+                    order,
+                    w_mm,
+                    h_mm,
+                    points,
+                }
             }
             cv::Effect::Custom { ns, verb, payload } => Self::Custom { ns, verb, payload },
         }

@@ -74,6 +74,14 @@ struct DeviceView: View {
 
             MediaSection(peer: peer)
 
+            if features.canTouchpad, peer.reachable {
+                Section {
+                    NavigationLink("Use as touchpad") {
+                        TouchpadView(peer: peer)
+                    }
+                }
+            }
+
             // Read off disk, not the live catalogue: a sleeping machine never
             // fills the catalogue in.
             if !peer.reachable, WakeTargets.load(for: peer.deviceId) != nil {

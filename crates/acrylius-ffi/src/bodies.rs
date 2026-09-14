@@ -2,7 +2,7 @@
 //!
 //! Message bodies are opaque CBOR in the core; these decoders turn them into plain records so hosts don't reimplement the wire format.
 
-use acrylius_core::plugins::{clipboard, command, media, session, share, wol};
+use acrylius_core::plugins::{clipboard, command, media, session, share, touchpad, wol};
 
 use crate::FfiError;
 
@@ -420,6 +420,32 @@ pub fn cap_share() -> String {
 #[must_use]
 pub fn cap_ping() -> String {
     acrylius_core::plugins::ping::CAP.to_string()
+}
+
+#[uniffi::export]
+#[must_use]
+pub fn cap_touchpad() -> String {
+    touchpad::CAP.to_string()
+}
+
+#[uniffi::export]
+#[must_use]
+pub fn encode_touchpad_begin(w_mm: u16, h_mm: u16) -> Vec<u8> {
+    minicbor::to_vec(touchpad::Begin { w_mm, h_mm }).unwrap_or_default()
+}
+
+/// Flat columns rather than a record: UniFFI would otherwise serialise every
+/// field of every point only for this to re-encode it, once per refresh.
+#[uniffi::export]
+#[must_use]
+pub fn encode_touchpad_frame(seq: u32, ids: Vec<u8>, xs: Vec<u16>, ys: Vec<u16>) -> Vec<u8> {
+    let points = ids
+        .into_iter()
+        .zip(xs)
+        .zip(ys)
+        .map(|((id, x), y)| touchpad::Point { id, x, y })
+        .collect();
+    minicbor::to_vec(touchpad::Frame { seq, points }).unwrap_or_default()
 }
 
 #[cfg(test)]

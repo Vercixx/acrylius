@@ -47,6 +47,9 @@ zbus = "5.19"
 # re-export it, and a signal stream is only useful with a `StreamExt` in scope.
 futures-lite = "2"
 wl-clipboard-rs = "0.9"
+# uinput's ioctls and struct layouts. Hand-rolling them over `libc` is about the
+# same amount of code, but a wrong field order corrupts an ioctl silently.
+input-linux = "0.7"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
