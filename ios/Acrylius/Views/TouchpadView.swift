@@ -14,6 +14,12 @@ struct TouchpadView: View {
     @Environment(\.dismiss) private var dismiss
     let peer: FfiPeer
 
+    /// Looked up live, not from `peer`: that is a snapshot from when this
+    /// screen opened, and a takeover mid-session must still show here.
+    private var liveTransport: FfiTransportKind? {
+        model.peers.first { $0.deviceId == peer.deviceId }?.transport
+    }
+
     var body: some View {
         TouchSurface(peer: peer, model: model)
             .background(.black)
@@ -32,14 +38,21 @@ struct TouchpadView: View {
                 .padding()
             }
             .overlay(alignment: .topTrailing) {
-                if let ms = model.lastPingRTTms {
-                    Text("\(Int(ms)) ms")
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(.white.opacity(0.6))
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(.black.opacity(0.3), in: Capsule())
-                        .padding()
+                if model.lastPingRTTms != nil || liveTransport != nil {
+                    HStack(spacing: 6) {
+                        if let over = carrying(liveTransport) {
+                            Text(over)
+                        }
+                        if let ms = model.lastPingRTTms {
+                            Text("\(Int(ms)) ms")
+                        }
+                    }
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.white.opacity(0.6))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(.black.opacity(0.3), in: Capsule())
+                    .padding()
                 }
             }
             .task {

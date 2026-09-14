@@ -5,6 +5,17 @@ import SwiftUI
 import UIKit
 #endif
 
+/// How a link kind reads to a person; `nil` when nothing carries the session.
+func carrying(_ kind: FfiTransportKind?) -> String? {
+    switch kind {
+    case .tcpLan: "Wi-Fi"
+    case .bleGatt: "Bluetooth"
+    case .unixLoopback: "This device"
+    case let .custom(name): name
+    case nil: nil
+    }
+}
+
 /// One paired computer. Every section is conditional on something the peer
 /// announced, so the screen never offers what cannot work.
 struct DeviceView: View {
@@ -16,17 +27,6 @@ struct DeviceView: View {
     @State private var confirmingForget = false
 
     private var features: PeerFeatures { model.catalog[peer.deviceId] }
-
-    /// How a link kind reads to a person; `nil` when nothing carries the session.
-    private static func carrying(_ kind: FfiTransportKind?) -> String? {
-        switch kind {
-        case .tcpLan: "Wi-Fi"
-        case .bleGatt: "Bluetooth"
-        case .unixLoopback: "This device"
-        case let .custom(name): name
-        case nil: nil
-        }
-    }
 
     var body: some View {
         List {
@@ -46,7 +46,7 @@ struct DeviceView: View {
                     LabeledContent("Status", value: "Not connected")
                     TaskButton("Try again") { await model.retry(peer) }
                 }
-                if let over = Self.carrying(peer.transport) {
+                if let over = carrying(peer.transport) {
                     LabeledContent("Transport", value: over)
                 }
             } footer: {

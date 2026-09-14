@@ -113,6 +113,7 @@ async fn serve(link: LinkId, stream: TcpStream, attrs: LinkAttrs, sink: EventSin
             _ = &mut writer => break LinkDownReason::Closed,
             frame = read_frame(&mut rd) => match frame {
                 Ok(msg) => {
+                    tracing::info!(?link, bytes = msg.len(), "USB recv");
                     if sink.send(Event::LinkRecv { link, msg }).is_err() {
                         break LinkDownReason::Closed;
                     }
@@ -236,7 +237,10 @@ impl Transport for UsbTransport {
                     if let Some((held, tx)) = guard.as_ref()
                         && *held == link
                     {
+                        tracing::info!(?link, bytes = msg.len(), "USB send");
                         let _ = tx.send(Some(msg));
+                    } else if link.transport() == self.id {
+                        tracing::warn!(?link, "USB send for a link this transport does not hold");
                     }
                 }
                 TransportCmd::Close { link } => {
