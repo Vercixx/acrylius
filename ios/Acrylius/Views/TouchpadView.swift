@@ -74,6 +74,11 @@ private struct TouchSurface: UIViewRepresentable {
         private let peer: FfiPeer
         private let model: AppModel
 
+        /// A tick that lands mid-send overwrites this, so a stall drops stale
+        /// frames rather than replaying a backlog late.
+        private var pendingFrame: (seq: UInt32, ids: [UInt8], xs: [UInt16], ys: [UInt16])?
+        private var sending = false
+
         init(peer: FfiPeer, model: AppModel) {
             self.peer = peer
             self.model = model
@@ -85,10 +90,26 @@ private struct TouchSurface: UIViewRepresentable {
         }
 
         func frame(seq: UInt32, ids: [UInt8], xs: [UInt16], ys: [UInt16]) {
-            Task { await model.touchpadFrame(peer, seq: seq, ids: Data(ids), xs: xs, ys: ys) }
+            pendingFrame = (seq, ids, xs, ys)
+            guard !sending else { return }
+            drain()
+        }
+
+        private func drain() {
+            guard let next = pendingFrame else {
+                sending = false
+                return
+            }
+            pendingFrame = nil
+            sending = true
+            Task {
+                await model.touchpadFrame(peer, seq: next.seq, ids: Data(next.ids), xs: next.xs, ys: next.ys)
+                drain()
+            }
         }
 
         func end() {
+            pendingFrame = nil
             Task { await model.touchpadEnd(peer) }
         }
     }
@@ -106,10 +127,16 @@ final class TouchpadUIView: UIView {
     private var points: [ObjectIdentifier: CGPoint] = [:]
     private var displayLink: CADisplayLink?
     private var seq: UInt32 = 0
-    private var sentBegin = false
+    /// Re-sent periodically, not just once: a silent reconnect never touches
+    /// this view's window, so a one-shot `begin` would need a reopen to heal.
+    private var lastBeginAt: Date?
+    private static let beginInterval: TimeInterval = 3
     /// Set once an empty frame has gone out, so idling with no fingers down
     /// does not spam the wire every refresh.
     private var sentEmptyFrame = true
+    /// Held until the next tick reports it down once: a tap shorter than one
+    /// refresh must not let libinput see a lift with no press before it.
+    private var pendingRelease: Set<ObjectIdentifier> = []
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -133,17 +160,18 @@ final class TouchpadUIView: UIView {
             displayLink?.invalidate()
             displayLink = nil
             UIApplication.shared.isIdleTimerDisabled = false
-            if sentBegin { onEnd?() }
+            if lastBeginAt != nil { onEnd?() }
             reset()
         }
     }
 
     private func reset() {
-        sentBegin = false
+        lastBeginAt = nil
         sentEmptyFrame = true
         seq = 0
         points.removeAll()
         slots = Array(repeating: nil, count: slots.count)
+        pendingRelease.removeAll()
     }
 
     private func slot(for touch: UITouch) -> UInt8? {
@@ -181,24 +209,29 @@ final class TouchpadUIView: UIView {
 
     private func release(_ touches: Set<UITouch>) {
         for touch in touches {
-            let id = ObjectIdentifier(touch)
-            points[id] = nil
-            if let owned = slots.firstIndex(of: id) { slots[owned] = nil }
+            pendingRelease.insert(ObjectIdentifier(touch))
         }
     }
 
     @objc private func tick() {
         guard bounds.width > 0, bounds.height > 0 else { return }
-        if !sentBegin {
-            sentBegin = true
-            onBegin?(bounds.size)
-        }
         if points.isEmpty {
+            // Healed only while idle: resending mid-drag would tear the
+            // device down under a live touch.
+            let now = Date()
+            if lastBeginAt == nil || now.timeIntervalSince(lastBeginAt!) > Self.beginInterval {
+                lastBeginAt = now
+                onBegin?(bounds.size)
+            }
             guard !sentEmptyFrame else { return }
             sentEmptyFrame = true
             seq += 1
             onFrame?(seq, [], [], [])
             return
+        }
+        if lastBeginAt == nil {
+            lastBeginAt = Date()
+            onBegin?(bounds.size)
         }
         sentEmptyFrame = false
 
@@ -213,6 +246,12 @@ final class TouchpadUIView: UIView {
         }
         seq += 1
         onFrame?(seq, ids, xs, ys)
+
+        for id in pendingRelease {
+            points[id] = nil
+            if let owned = slots.firstIndex(of: id) { slots[owned] = nil }
+        }
+        pendingRelease.removeAll()
     }
 
     private static func normalize(_ value: CGFloat, extent: CGFloat) -> UInt16 {
