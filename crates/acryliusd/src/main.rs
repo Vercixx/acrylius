@@ -179,11 +179,24 @@ fn broadcast_placeholder() -> acrylius_core::proto::ids::DeviceId {
 
 /// First UDID `idevice_id -l` reports, if any device is attached over USB.
 async fn usb_udid() -> Option<String> {
-    let out = tokio::process::Command::new("idevice_id")
+    let out = match tokio::process::Command::new("idevice_id")
         .arg("-l")
         .output()
         .await
-        .ok()?;
+    {
+        Ok(out) => out,
+        Err(e) => {
+            tracing::debug!(error = %e, "could not run idevice_id; is libimobiledevice installed?");
+            return None;
+        }
+    };
+    if !out.status.success() {
+        tracing::debug!(
+            status = %out.status,
+            stderr = %String::from_utf8_lossy(&out.stderr),
+            "idevice_id -l did not succeed"
+        );
+    }
     String::from_utf8_lossy(&out.stdout)
         .lines()
         .find(|l| !l.trim().is_empty())
@@ -743,6 +756,9 @@ async fn main() -> anyhow::Result<()> {
                     .iter()
                     .filter_map(|d| acrylius_core::proto::ids::DeviceId::parse(&d.device_id).ok())
                     .collect();
+                if seen != last {
+                    tracing::info!(udid = ?seen, was = ?last, peers = peers.len(), "USB attach state changed");
+                }
                 // Re-sent every tick while attached, not just on the edge, so
                 // a peer paired after the cable went in still gets offered USB.
                 if let Some(udid) = &seen {

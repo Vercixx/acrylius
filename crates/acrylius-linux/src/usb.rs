@@ -85,6 +85,7 @@ async fn serve(link: LinkId, stream: TcpStream, attrs: LinkAttrs, sink: EventSin
 
     let (mut rd, mut wr) = stream.into_split();
     let (tx, mut rx) = mpsc::unbounded_channel::<Option<Vec<u8>>>();
+    tracing::info!(?link, "USB link up");
     let _ = sink.send(Event::LinkUp {
         link,
         attrs,
@@ -125,6 +126,7 @@ async fn serve(link: LinkId, stream: TcpStream, attrs: LinkAttrs, sink: EventSin
 
     LIVE_WRITER.lock().await.take();
     writer.abort();
+    tracing::info!(?link, ?reason, "USB link down");
     let _ = sink.send(Event::LinkDown { link, reason });
 }
 
@@ -138,6 +140,7 @@ static LIVE_WRITER: tokio::sync::Mutex<Option<(LinkId, Writer)>> =
 /// Keeps `iproxy 1972:1972 -u <udid>` running, restarting it if it exits —
 /// a cable reseat or a usbmuxd hiccup should heal without a daemon restart.
 async fn run_iproxy(udid: String) {
+    tracing::info!(%udid, port = PORT, "starting iproxy");
     loop {
         match tokio::process::Command::new("iproxy")
             .arg(format!("{PORT}:{PORT}"))
@@ -147,9 +150,9 @@ async fn run_iproxy(udid: String) {
             .status()
             .await
         {
-            Ok(status) => tracing::debug!(%status, "iproxy exited; restarting"),
+            Ok(status) => tracing::info!(%status, "iproxy exited; restarting"),
             Err(e) => {
-                tracing::warn!(error = %e, "could not spawn iproxy");
+                tracing::warn!(error = %e, "could not spawn iproxy; is libimobiledevice installed?");
                 tokio::time::sleep(RETRY * 4).await;
             }
         }
@@ -172,24 +175,28 @@ impl Transport for UsbTransport {
             match cmd {
                 TransportCmd::Dial { dial, addr } => {
                     let udid = addr;
+                    tracing::info!(%udid, "USB dial requested");
                     let sink = sink.clone();
                     let me = self.clone();
                     tokio::spawn(async move {
                         tokio::spawn(run_iproxy(udid));
                         let mut last_err = String::new();
-                        for _ in 0..20 {
+                        for attempt in 0..20 {
                             match TcpStream::connect(("127.0.0.1", PORT)).await {
                                 Ok(s) => {
+                                    tracing::info!(attempt, "connected to iproxy's local port");
                                     let link = me.next_link();
                                     serve(link, s, me.attrs(), sink.clone()).await;
                                     return;
                                 }
                                 Err(e) => {
+                                    tracing::debug!(attempt, error = %e, "not up yet; retrying");
                                     last_err = e.to_string();
                                     tokio::time::sleep(RETRY).await;
                                 }
                             }
                         }
+                        tracing::warn!(error = %last_err, "giving up on the USB dial");
                         let _ = sink.send(Event::DialFailed {
                             dial,
                             reason: format!("could not reach iproxy: {last_err}"),

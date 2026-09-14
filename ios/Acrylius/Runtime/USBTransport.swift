@@ -64,6 +64,7 @@ public final class USBTransport: Transport, @unchecked Sendable {
     /// USB has no discovery of its own — `iproxy` on the desktop is what
     /// finds this phone. Listening starts and stops with this call instead.
     public func discover(enable: Bool) async {
+        NSLog("acrylius usb: discover(\(enable)) on port \(port)")
         guard enable else {
             stopListening()
             return
@@ -92,17 +93,25 @@ public final class USBTransport: Transport, @unchecked Sendable {
         lock.lock()
         guard listener == nil else { lock.unlock(); return }
         lock.unlock()
-        // Loopback only: reachable exclusively through the desktop's own
-        // `iproxy` tunnel, never over Wi-Fi.
-        let params = NWParameters.tcp
-        params.requiredInterfaceType = .loopback
-        guard let l = try? NWListener(using: params, on: port) else { return }
+        // No `requiredInterfaceType` here — it can fail the bind silently.
+        // Loopback-only is enforced in `accept` instead, per connection.
+        let l: NWListener
+        do {
+            l = try NWListener(using: .tcp, on: port)
+        } catch {
+            NSLog("acrylius usb: could not create listener on port \(port): \(error)")
+            return
+        }
         lock.lock(); listener = l; lock.unlock()
+        l.stateUpdateHandler = { state in
+            NSLog("acrylius usb: listener state \(state)")
+        }
         l.newConnectionHandler = { [weak self] conn in self?.accept(conn) }
         l.start(queue: queue)
     }
 
     private func stopListening() {
+        NSLog("acrylius usb: stopping the listener")
         lock.lock()
         let l = listener
         listener = nil
@@ -113,8 +122,20 @@ public final class USBTransport: Transport, @unchecked Sendable {
         }
     }
 
+    /// True only for a connection that terminates at this device's own
+    /// loopback interface — the shape `iproxy`'s tunnel always arrives as.
+    private func isLoopback(_ conn: NWConnection) -> Bool {
+        guard case let .hostPort(host, _) = conn.endpoint else { return false }
+        switch host {
+        case .ipv4(let a): return a == IPv4Address("127.0.0.1")!
+        case .ipv6(let a): return a == IPv6Address("::1")!
+        default: return false
+        }
+    }
+
     /// A second tunnel connecting replaces whatever link is already held.
     private func accept(_ conn: NWConnection) {
+        NSLog("acrylius usb: inbound connection from \(conn.endpoint)")
         if let old = release(link ?? 0) {
             old.cancel()
             fire(.linkDown(link: link ?? 0, reason: .closed))
@@ -123,8 +144,15 @@ public final class USBTransport: Transport, @unchecked Sendable {
         lock.lock(); link = newLink; connection = conn; lock.unlock()
         conn.stateUpdateHandler = { [weak self] state in
             guard let self else { return }
+            NSLog("acrylius usb: connection state \(state)")
             switch state {
             case .ready:
+                guard self.isLoopback(conn) else {
+                    NSLog("acrylius usb: refusing a non-loopback peer")
+                    self.retire(newLink, .closed)
+                    conn.cancel()
+                    return
+                }
                 self.fire(.linkUp(link: newLink, attrs: usbAttrs(transport: self.transportId), dial: nil))
                 self.receiveHeader(conn, link: newLink)
             case let .failed(error):
