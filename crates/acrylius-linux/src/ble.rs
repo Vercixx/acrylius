@@ -363,6 +363,7 @@ fn reconcile(central: Option<bool>, want_advertising: bool, instances: u8) -> Re
 struct Advertisement {
     name: String,
     shared: Arc<Shared>,
+    runtime: tokio::runtime::Handle,
 }
 
 #[zbus::interface(name = "org.bluez.LEAdvertisement1")]
@@ -373,7 +374,8 @@ impl Advertisement {
         tracing::warn!("bluetoothd dropped the advertisement; going back on the air");
         let conn = conn.clone();
         let shared = self.shared.clone();
-        tokio::spawn(async move { readvertise(&conn, &shared).await });
+        self.runtime
+            .spawn(async move { readvertise(&conn, &shared).await });
     }
 
     /// `"peripheral"` is what makes it connectable; the adapter's own
@@ -755,6 +757,7 @@ impl Transport for BleTransport {
                 Advertisement {
                     name: self.name.clone(),
                     shared: shared.clone(),
+                    runtime: tokio::runtime::Handle::current(),
                 },
             )
             .await?;
@@ -964,8 +967,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn the_advertisement_never_stops_being_discoverable() {
+    #[tokio::test]
+    async fn the_advertisement_never_stops_being_discoverable() {
         // Anything but zero makes the desktop silently vanish minutes after it
         // appears; see `discoverable_timeout`.
         let adv = Advertisement {
@@ -980,6 +983,7 @@ mod tests {
                 last_central: Mutex::new(None),
                 last_advert: Mutex::new(None),
             }),
+            runtime: tokio::runtime::Handle::current(),
         };
         assert!(adv.discoverable(), "or no Flags element is emitted at all");
         assert_eq!(
