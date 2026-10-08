@@ -40,6 +40,9 @@ pub struct Frame {
     /// Every finger down right now, not a delta.
     #[n(1)]
     pub points: Vec<Point>,
+    /// When the phone sampled it, in microseconds on its own clock; wraps.
+    #[n(2)]
+    pub t_us: Option<u32>,
 }
 
 static MANIFEST: PluginManifest = PluginManifest {
@@ -202,7 +205,7 @@ mod tests {
         let mut p = TouchpadPlugin::default();
         let body = minicbor::to_vec(Frame {
             seq: 1,
-            points: vec![],
+            ..Default::default()
         })
         .unwrap();
         let env = envelope(1, CAP, "frame", &body);
@@ -225,7 +228,7 @@ mod tests {
         let mut p = TouchpadPlugin::default();
         let body = minicbor::to_vec(Frame {
             seq: 1,
-            points: vec![],
+            ..Default::default()
         })
         .unwrap();
         let env = envelope(1, CAP, "frame", &body);
@@ -239,7 +242,12 @@ mod tests {
         let points = (0..=MAX_POINTS as u8)
             .map(|id| Point { id, x: 0, y: 0 })
             .collect();
-        let body = minicbor::to_vec(Frame { seq: 1, points }).unwrap();
+        let body = minicbor::to_vec(Frame {
+            seq: 1,
+            points,
+            t_us: None,
+        })
+        .unwrap();
         let env = envelope(1, CAP, "frame", &body);
         let r = run(0, |cx| {
             let e = p.on_message(cx, &peer(1), &env).unwrap_err();
@@ -298,7 +306,7 @@ mod tests {
         let begin = minicbor::to_vec(Begin { w_mm: 1, h_mm: 1 }).unwrap();
         let frame = minicbor::to_vec(Frame {
             seq: 1,
-            points: vec![],
+            ..Default::default()
         })
         .unwrap();
 
@@ -380,6 +388,7 @@ mod tests {
         let body = minicbor::to_vec(Frame {
             seq: 1,
             points: at_max,
+            t_us: None,
         })
         .unwrap();
         let env = envelope(1, CAP, "frame", &body);
@@ -392,6 +401,7 @@ mod tests {
         let body2 = minicbor::to_vec(Frame {
             seq: 2,
             points: over,
+            t_us: None,
         })
         .unwrap();
         let env2 = envelope(2, CAP, "frame", &body2);

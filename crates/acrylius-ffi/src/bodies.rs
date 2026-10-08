@@ -435,17 +435,23 @@ pub fn encode_touchpad_begin(w_mm: u16, h_mm: u16) -> Vec<u8> {
 }
 
 /// Flat columns rather than a record: UniFFI would otherwise serialise every
-/// field of every point only for this to re-encode it, once per refresh.
+/// field of every point only for this to re-encode it, once per touch sample.
 #[uniffi::export]
 #[must_use]
-pub fn encode_touchpad_frame(seq: u32, ids: Vec<u8>, xs: Vec<u16>, ys: Vec<u16>) -> Vec<u8> {
+pub fn encode_touchpad_frame(
+    seq: u32,
+    ids: Vec<u8>,
+    xs: Vec<u16>,
+    ys: Vec<u16>,
+    t_us: Option<u32>,
+) -> Vec<u8> {
     let points = ids
         .into_iter()
         .zip(xs)
         .zip(ys)
         .map(|((id, x), y)| touchpad::Point { id, x, y })
         .collect();
-    minicbor::to_vec(touchpad::Frame { seq, points }).unwrap_or_default()
+    minicbor::to_vec(touchpad::Frame { seq, points, t_us }).unwrap_or_default()
 }
 
 #[cfg(test)]

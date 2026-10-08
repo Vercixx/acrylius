@@ -1,6 +1,7 @@
 //! Touchpad over USB: the phone listens on loopback, `iproxy` forwards a local
 //! port to it, and this end connects, says hello, then replays touches.
 
+use std::collections::VecDeque;
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -8,6 +9,8 @@ use acrylius_core::plugins::touchpad::{Begin, Frame, MAX_POINTS};
 use acrylius_core::vocab::TouchPoint;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::net::tcp::OwnedReadHalf;
+use tokio::time::Instant;
 
 use crate::touchpad::Device;
 
@@ -19,15 +22,48 @@ const MAX_MESSAGE: u32 = 4096;
 const NO_DEVICE: Duration = Duration::from_secs(2);
 const RETRY: Duration = Duration::from_secs(1);
 
-/// The phone sends every display refresh while touched, so this much silence
-/// with fingers down means it was suspended or unplugged mid-drag.
+/// The phone repeats a held frame every 100 ms, so this much silence with
+/// fingers down means it was suspended or unplugged mid-drag.
 const STALL: Duration = Duration::from_millis(300);
+
+/// Covers one batch of samples: iOS delivers a 120 Hz digitizer's samples in
+/// pairs once per 60 Hz frame.
+const PLAYOUT: Duration = Duration::from_millis(10);
 
 #[derive(Debug, PartialEq, Eq)]
 enum Msg {
-    Begin { w_mm: u16, h_mm: u16 },
-    Frame(Vec<TouchPoint>),
+    Begin {
+        w_mm: u16,
+        h_mm: u16,
+    },
+    Frame {
+        points: Vec<TouchPoint>,
+        t_us: Option<u32>,
+    },
     End,
+}
+
+/// Replays a batch that arrived at once at the spacing it was sampled at,
+/// `PLAYOUT` behind the quickest sample seen so far.
+#[derive(Default)]
+struct Pacer {
+    anchor: Option<(Instant, u32)>,
+}
+
+impl Pacer {
+    fn due(&mut self, t_us: u32, arrived: Instant) -> Instant {
+        let predicted = self
+            .anchor
+            .map(|(at, t0)| at + Duration::from_micros(u64::from(t_us.wrapping_sub(t0))));
+        let predicted = match predicted {
+            Some(p) if p <= arrived => p,
+            _ => {
+                self.anchor = Some((arrived, t_us));
+                arrived
+            }
+        };
+        (predicted + PLAYOUT).max(arrived)
+    }
 }
 
 fn decode(msg: &[u8]) -> Result<Msg, &'static str> {
@@ -48,8 +84,9 @@ fn decode(msg: &[u8]) -> Result<Msg, &'static str> {
             if f.points.len() > MAX_POINTS {
                 return Err("more points than slots");
             }
-            Ok(Msg::Frame(
-                f.points
+            Ok(Msg::Frame {
+                points: f
+                    .points
                     .into_iter()
                     .map(|p| TouchPoint {
                         id: p.id,
@@ -57,24 +94,31 @@ fn decode(msg: &[u8]) -> Result<Msg, &'static str> {
                         y: p.y,
                     })
                     .collect(),
-            ))
+                t_us: f.t_us,
+            })
         }
         2 => Ok(Msg::End),
         _ => Err("unknown message kind"),
     }
 }
 
-async fn read_message(stream: &mut TcpStream) -> std::io::Result<Vec<u8>> {
-    let n = stream.read_u32().await?;
+/// Owns the read half so the future can sit in a `select!` across iterations
+/// and hand it back when done.
+async fn read_message(mut rd: OwnedReadHalf) -> (OwnedReadHalf, std::io::Result<Vec<u8>>) {
+    let n = match rd.read_u32().await {
+        Ok(n) => n,
+        Err(e) => return (rd, Err(e)),
+    };
     if n > MAX_MESSAGE {
-        return Err(std::io::Error::new(
+        let e = std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!("message of {n} bytes exceeds the {MAX_MESSAGE} cap"),
-        ));
+        );
+        return (rd, Err(e));
     }
     let mut buf = vec![0u8; n as usize];
-    stream.read_exact(&mut buf).await?;
-    Ok(buf)
+    let read = rd.read_exact(&mut buf).await.map(|_| buf);
+    (rd, read)
 }
 
 trait Pad {
@@ -95,63 +139,100 @@ impl Pad for Device {
 /// Runs until the phone goes away. `heard` is set once the phone has spoken,
 /// since iproxy accepts the connection even when nothing listens on the phone.
 async fn session<P: Pad>(
-    mut stream: TcpStream,
+    stream: TcpStream,
     device_id: &str,
     heard: &mut bool,
     open: impl Fn(u16, u16) -> std::io::Result<P>,
 ) -> std::io::Result<()> {
     stream.set_nodelay(true)?;
+    let (rd, mut wr) = stream.into_split();
     let len = u32::try_from(device_id.len()).map_err(std::io::Error::other)?;
     let mut hello = len.to_be_bytes().to_vec();
     hello.extend_from_slice(device_id.as_bytes());
-    stream.write_all(&hello).await?;
+    wr.write_all(&hello).await?;
 
+    let mut reading = Box::pin(read_message(rd));
+    let mut queue: VecDeque<(Instant, Msg)> = VecDeque::new();
+    let mut pacer = Pacer::default();
+    let mut queued_down = false;
     let mut device: Option<((u16, u16), P)> = None;
     let mut down = false;
+    let mut last_heard = Instant::now();
     loop {
-        let msg = {
-            let read = read_message(&mut stream);
-            tokio::pin!(read);
-            loop {
-                if !down {
-                    break read.as_mut().await?;
-                }
-                tokio::select! {
-                    msg = read.as_mut() => break msg?,
-                    () = tokio::time::sleep(STALL) => {
-                        down = false;
-                        if let Some((_, d)) = device.as_mut() {
-                            d.release_all()?;
-                        }
-                    }
-                }
+        let now = Instant::now();
+        while queue.front().is_some_and(|(due, _)| *due <= now) {
+            if let Some((_, msg)) = queue.pop_front() {
+                apply(msg, &mut device, &mut down, &open)?;
             }
-        };
-        if !*heard {
-            *heard = true;
-            tracing::info!("phone touchpad connected over USB");
         }
-        match decode(&msg).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))? {
-            Msg::Begin { w_mm, h_mm } => {
-                if device
-                    .as_ref()
-                    .is_none_or(|(dims, _)| *dims != (w_mm, h_mm))
-                {
-                    device = Some(((w_mm, h_mm), open(w_mm, h_mm)?));
+        let next_due = queue.front().map(|(due, _)| *due);
+        tokio::select! {
+            biased;
+            () = tokio::time::sleep_until(next_due.unwrap_or(now)), if next_due.is_some() => {}
+            (rd, read) = &mut reading => {
+                let arrived = Instant::now();
+                let msg = decode(&read?)
+                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+                if !*heard {
+                    *heard = true;
+                    tracing::info!("phone touchpad connected over USB");
                 }
+                last_heard = arrived;
+                let due = match &msg {
+                    Msg::Frame { points, t_us } => {
+                        // A new gesture re-anchors, so clock drift never builds up.
+                        if !queued_down {
+                            pacer = Pacer::default();
+                        }
+                        queued_down = !points.is_empty();
+                        t_us.map_or(arrived, |t| pacer.due(t, arrived))
+                    }
+                    Msg::Begin { .. } => arrived,
+                    Msg::End => {
+                        queued_down = false;
+                        arrived
+                    }
+                };
+                queue.push_back((due, msg));
+                reading.set(read_message(rd));
             }
-            Msg::Frame(points) => {
-                down = !points.is_empty();
-                if let Some((_, d)) = device.as_mut() {
-                    d.apply(&points)?;
-                }
-            }
-            Msg::End => {
+            () = tokio::time::sleep_until(last_heard + STALL), if down && queue.is_empty() => {
                 down = false;
-                device = None;
+                if let Some((_, d)) = device.as_mut() {
+                    d.release_all()?;
+                }
             }
         }
     }
+}
+
+fn apply<P: Pad>(
+    msg: Msg,
+    device: &mut Option<((u16, u16), P)>,
+    down: &mut bool,
+    open: impl Fn(u16, u16) -> std::io::Result<P>,
+) -> std::io::Result<()> {
+    match msg {
+        Msg::Begin { w_mm, h_mm } => {
+            if device
+                .as_ref()
+                .is_none_or(|(dims, _)| *dims != (w_mm, h_mm))
+            {
+                *device = Some(((w_mm, h_mm), open(w_mm, h_mm)?));
+            }
+        }
+        Msg::Frame { points, .. } => {
+            *down = !points.is_empty();
+            if let Some((_, d)) = device.as_mut() {
+                d.apply(&points)?;
+            }
+        }
+        Msg::End => {
+            *down = false;
+            *device = None;
+        }
+    }
+    Ok(())
 }
 
 // ponytail: the tunnel is unauthenticated; another local user who binds PORT
@@ -246,9 +327,18 @@ mod tests {
         m
     }
 
-    fn frame(n: u8) -> Vec<u8> {
+    fn timed(n: u8, t_us: Option<u32>) -> Vec<u8> {
         let points = (0..n).map(|id| Point { id, x: 1, y: 2 }).collect();
-        message(1, &minicbor::to_vec(Frame { seq: 1, points }).unwrap())
+        let f = Frame {
+            seq: 1,
+            points,
+            t_us,
+        };
+        message(1, &minicbor::to_vec(f).unwrap())
+    }
+
+    fn frame(n: u8) -> Vec<u8> {
+        timed(n, None)
     }
 
     #[test]
@@ -278,12 +368,47 @@ mod tests {
     #[test]
     fn a_frame_carries_its_points() {
         assert_eq!(
-            decode(&frame(2)),
-            Ok(Msg::Frame(vec![
-                TouchPoint { id: 0, x: 1, y: 2 },
-                TouchPoint { id: 1, x: 1, y: 2 },
-            ]))
+            decode(&timed(2, Some(7))),
+            Ok(Msg::Frame {
+                points: vec![
+                    TouchPoint { id: 0, x: 1, y: 2 },
+                    TouchPoint { id: 1, x: 1, y: 2 },
+                ],
+                t_us: Some(7),
+            })
         );
+    }
+
+    #[test]
+    fn a_batch_leaves_at_the_spacing_it_was_sampled_at() {
+        let mut p = Pacer::default();
+        let at = Instant::now();
+        let ms = Duration::from_millis;
+        // Two 120 Hz samples per 60 Hz delivery; the first batch only anchors.
+        assert_eq!(p.due(0, at), at + PLAYOUT);
+        assert_eq!(p.due(8_000, at), at + PLAYOUT);
+        let next = at + ms(16);
+        assert_eq!(p.due(16_000, next), at + ms(8) + PLAYOUT);
+        assert_eq!(p.due(24_000, next), at + ms(16) + PLAYOUT);
+    }
+
+    #[test]
+    fn a_late_sample_goes_out_at_once_and_an_early_one_reanchors() {
+        let mut p = Pacer::default();
+        let at = Instant::now();
+        let ms = Duration::from_millis;
+        p.due(0, at);
+        assert_eq!(p.due(10_000, at + ms(100)), at + ms(100));
+        assert_eq!(p.due(20_000, at + ms(5)), at + ms(5) + PLAYOUT);
+    }
+
+    #[test]
+    fn sample_time_wraps() {
+        let mut p = Pacer::default();
+        let at = Instant::now();
+        p.due(u32::MAX - 999, at);
+        let later = at + Duration::from_millis(5);
+        assert_eq!(p.due(1_000, later), at + Duration::from_millis(2) + PLAYOUT);
     }
 
     #[test]
@@ -300,7 +425,19 @@ mod tests {
         assert!(decode(&[0, 0xff]).is_err());
     }
 
-    type Log = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
+    type Log = std::sync::Arc<std::sync::Mutex<Vec<(String, Instant)>>>;
+
+    fn note(log: &Log, line: String) {
+        log.lock().unwrap().push((line, Instant::now()));
+    }
+
+    fn when(log: &Log, line: &str) -> Option<Instant> {
+        log.lock()
+            .unwrap()
+            .iter()
+            .find(|(l, _)| l == line)
+            .map(|(_, at)| *at)
+    }
 
     struct Fake {
         log: Log,
@@ -309,7 +446,7 @@ mod tests {
 
     impl Fake {
         fn note(&self, line: String) {
-            self.log.lock().unwrap().push(line);
+            note(&self.log, line);
         }
     }
 
@@ -347,7 +484,7 @@ mod tests {
         let task = tokio::spawn(async move {
             let mut heard = false;
             let r = session(desktop, "dev", &mut heard, |w, h| {
-                opened.lock().unwrap().push(format!("open {w}x{h}"));
+                note(&opened, format!("open {w}x{h}"));
                 Ok(Fake {
                     log: opened.clone(),
                     dims: (w, h),
@@ -379,8 +516,26 @@ mod tests {
     ) -> (std::io::ErrorKind, bool, Vec<String>) {
         drop(phone);
         let (r, heard) = task.await.unwrap();
-        let lines = log.lock().unwrap().clone();
+        let lines = log.lock().unwrap().iter().map(|(l, _)| l.clone()).collect();
         (r.unwrap_err().kind(), heard, lines)
+    }
+
+    #[tokio::test]
+    async fn a_timed_frame_waits_out_the_playout_and_an_untimed_one_does_not() {
+        let (mut phone, log, task) = start().await;
+        say(&mut phone, &begin(70, 150)).await;
+        let sent = Instant::now();
+        say(&mut phone, &timed(1, Some(0))).await;
+        tokio::time::sleep(PLAYOUT * 3).await;
+        let applied = when(&log, "apply 1").expect("the timed frame was applied");
+        assert!(applied >= sent + PLAYOUT);
+
+        let sent = Instant::now();
+        say(&mut phone, &frame(2)).await;
+        tokio::time::sleep(PLAYOUT * 3).await;
+        let applied = when(&log, "apply 2").expect("the untimed frame was applied");
+        assert!(applied < sent + PLAYOUT);
+        finish(phone, log, task).await;
     }
 
     #[tokio::test]

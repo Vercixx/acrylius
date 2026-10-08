@@ -310,10 +310,11 @@ final class AppModel {
         await touchpad(peer, kind: 0, ty: "begin", body: encodeTouchpadBegin(wMm: wMm, hMm: hMm))
     }
 
-    /// The hottest call in the app: driven off a display link, never off a
-    /// touch callback directly. See `TouchpadView`.
-    func touchpadFrame(_ peer: FfiPeer, seq: UInt32, ids: Data, xs: [UInt16], ys: [UInt16]) async {
-        let body = encodeTouchpadFrame(seq: seq, ids: ids, xs: xs, ys: ys)
+    /// The hottest call in the app: once per touch sample. See `TouchpadView`.
+    func touchpadFrame(
+        _ peer: FfiPeer, seq: UInt32, ids: Data, xs: [UInt16], ys: [UInt16], tUs: UInt32
+    ) async {
+        let body = encodeTouchpadFrame(seq: seq, ids: ids, xs: xs, ys: ys, tUs: tUs)
         await touchpad(peer, kind: 1, ty: "frame", body: body)
     }
 

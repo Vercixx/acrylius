@@ -87,7 +87,7 @@ private struct TouchSurface: UIViewRepresentable {
     func makeUIView(context: Context) -> TouchpadUIView {
         let view = TouchpadUIView()
         view.onBegin = context.coordinator.begin
-        view.onFrame = context.coordinator.frame
+        view.onFrames = context.coordinator.frames
         view.onEnd = context.coordinator.end
         return view
     }
@@ -100,13 +100,19 @@ private struct TouchSurface: UIViewRepresentable {
 
     @MainActor
     final class Coordinator {
+        private enum Out {
+            case begin(wMm: UInt16, hMm: UInt16)
+            case frame(TouchpadUIView.Frame)
+            case end
+        }
+
         private let peer: FfiPeer
         private let model: AppModel
 
-        /// A tick that lands mid-send overwrites this, so a stall drops stale
-        /// frames rather than replaying a backlog late.
-        private var pendingFrame: (seq: UInt32, ids: [UInt8], xs: [UInt16], ys: [UInt16])?
+        /// Sent strictly in order, so a `begin` never trails the frames after it.
+        private var queue: [Out] = []
         private var sending = false
+        private static let maxQueued = 120
 
         init(peer: FfiPeer, model: AppModel) {
             self.peer = peer
@@ -115,57 +121,85 @@ private struct TouchSurface: UIViewRepresentable {
 
         func begin(size: CGSize) {
             let (wMm, hMm) = ScreenDensity.millimeters(for: size)
-            Task { await model.touchpadBegin(peer, wMm: wMm, hMm: hMm) }
+            queue.append(.begin(wMm: wMm, hMm: hMm))
+            pump()
         }
 
-        func frame(seq: UInt32, ids: [UInt8], xs: [UInt16], ys: [UInt16]) {
-            pendingFrame = (seq, ids, xs, ys)
-            guard !sending else { return }
-            drain()
-        }
-
-        private func drain() {
-            guard let next = pendingFrame else {
-                sending = false
-                return
+        /// Every sample over USB, where the desktop paces them. Elsewhere only
+        /// the newest, replacing a stale one still queued.
+        func frames(_ batch: [TouchpadUIView.Frame]) {
+            if model.usbHost == peer.deviceId {
+                queue += batch.map(Out.frame)
+                if queue.count > Self.maxQueued {
+                    queue.removeFirst(queue.count - Self.maxQueued)
+                }
+            } else if let newest = batch.last {
+                if case .frame = queue.last { queue.removeLast() }
+                queue.append(.frame(newest))
             }
-            pendingFrame = nil
-            sending = true
-            Task {
-                await model.touchpadFrame(peer, seq: next.seq, ids: Data(next.ids), xs: next.xs, ys: next.ys)
-                drain()
-            }
+            pump()
         }
 
         func end() {
-            pendingFrame = nil
-            Task { await model.touchpadEnd(peer) }
+            queue.removeAll {
+                switch $0 {
+                case .frame: true
+                default: false
+                }
+            }
+            queue.append(.end)
+            pump()
+        }
+
+        private func pump() {
+            guard !sending, !queue.isEmpty else { return }
+            sending = true
+            let next = queue.removeFirst()
+            Task {
+                switch next {
+                case let .begin(wMm, hMm):
+                    await model.touchpadBegin(peer, wMm: wMm, hMm: hMm)
+                case let .frame(f):
+                    await model.touchpadFrame(
+                        peer, seq: f.seq, ids: Data(f.ids), xs: f.xs, ys: f.ys, tUs: f.tUs
+                    )
+                case .end:
+                    await model.touchpadEnd(peer)
+                }
+                sending = false
+                pump()
+            }
         }
     }
 }
 
-/// A bare, multitouch `UIView`, sampled once per display refresh rather
-/// than from `touchesMoved`, so a network stall banks at most one frame.
+/// A bare, multitouch `UIView` that reports every digitizer sample iOS
+/// coalesces into a touch event, stamped with when it was taken.
 final class TouchpadUIView: UIView {
+    struct Frame {
+        let seq: UInt32
+        let ids: [UInt8]
+        let xs: [UInt16]
+        let ys: [UInt16]
+        let tUs: UInt32
+    }
+
     var onBegin: ((CGSize) -> Void)?
-    var onFrame: ((UInt32, [UInt8], [UInt16], [UInt16]) -> Void)?
+    var onFrames: (([Frame]) -> Void)?
     var onEnd: (() -> Void)?
 
     /// Kernel-style slots: which touch (by identity) owns each small id.
     private var slots: [ObjectIdentifier?] = Array(repeating: nil, count: 10)
     private var points: [ObjectIdentifier: CGPoint] = [:]
-    private var displayLink: CADisplayLink?
     private var seq: UInt32 = 0
-    /// Re-sent periodically, not just once: a silent reconnect never touches
-    /// this view's window, so a one-shot `begin` would need a reopen to heal.
+    /// Resent at a gesture's start once this stale, so a silent reconnect heals.
     private var lastBeginAt: Date?
     private static let beginInterval: TimeInterval = 3
-    /// Set once an empty frame has gone out, so idling with no fingers down
-    /// does not spam the wire every refresh.
-    private var sentEmptyFrame = true
-    /// Held until the next tick reports it down once: a tap shorter than one
-    /// refresh must not let libinput see a lift with no press before it.
-    private var pendingRelease: Set<ObjectIdentifier> = []
+    /// A finger held still raises no events, so its frame is repeated to keep
+    /// the desktop's 300 ms stall guard from lifting it.
+    private var heartbeat: Timer?
+    private var lastSentAt: TimeInterval = 0
+    private static let heartbeatInterval: TimeInterval = 0.1
     private var laidOutSize: CGSize = .zero
 
     override init(frame: CGRect) {
@@ -181,38 +215,45 @@ final class TouchpadUIView: UIView {
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
+        UIApplication.shared.isIdleTimerDisabled = window != nil
+        heartbeat?.invalidate()
+        heartbeat = nil
         if window != nil {
-            let link = CADisplayLink(target: self, selector: #selector(tick))
-            // Above 60 needs CADisableMinimumFrameDurationOnPhone in Info.plist.
-            link.preferredFrameRateRange = CAFrameRateRange(minimum: 80, maximum: 120, preferred: 120)
-            link.add(to: .main, forMode: .common)
-            displayLink = link
-            UIApplication.shared.isIdleTimerDisabled = true
+            let timer = Timer(
+                timeInterval: Self.heartbeatInterval / 2, target: self,
+                selector: #selector(beat), userInfo: nil, repeats: true
+            )
+            RunLoop.main.add(timer, forMode: .common)
+            heartbeat = timer
         } else {
-            displayLink?.invalidate()
-            displayLink = nil
-            UIApplication.shared.isIdleTimerDisabled = false
             if lastBeginAt != nil { onEnd?() }
             reset()
         }
     }
 
-    /// A rotation changes the surface size, so the next idle tick resends `begin`.
+    /// Opening and rotating both change the size; with no finger down the new
+    /// one goes out at once, otherwise at the next gesture.
     override func layoutSubviews() {
         super.layoutSubviews()
-        if bounds.size != laidOutSize, lastBeginAt != nil {
-            lastBeginAt = .distantPast
-        }
+        guard bounds.size != laidOutSize else { return }
         laidOutSize = bounds.size
+        if lastBeginAt != nil { lastBeginAt = .distantPast }
+        if points.isEmpty { beginIfStale() }
     }
 
     private func reset() {
         lastBeginAt = nil
-        sentEmptyFrame = true
         seq = 0
         points.removeAll()
         slots = Array(repeating: nil, count: slots.count)
-        pendingRelease.removeAll()
+    }
+
+    private func beginIfStale() {
+        guard bounds.width > 0, bounds.height > 0 else { return }
+        let now = Date()
+        if let last = lastBeginAt, now.timeIntervalSince(last) < Self.beginInterval { return }
+        lastBeginAt = now
+        onBegin?(bounds.size)
     }
 
     private func slot(for touch: UITouch) -> UInt8? {
@@ -226,56 +267,68 @@ final class TouchpadUIView: UIView {
     }
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
-        for touch in touches {
-            guard slot(for: touch) != nil else { continue }
-            points[ObjectIdentifier(touch)] = touch.location(in: self)
-        }
+        if points.isEmpty { beginIfStale() }
+        for touch in touches { _ = slot(for: touch) }
+        report(event)
     }
 
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
-        for touch in touches {
-            points[ObjectIdentifier(touch)] = touch.location(in: self)
-        }
+        report(event)
     }
 
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
-        release(touches)
+        lift(touches, event)
     }
 
-    // A cancel (an incoming call, a system gesture taking over) is treated
-    // the same as a lift: the next tick's empty frame clears the slot.
+    // A cancel (an incoming call, a system gesture taking over) is a lift.
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
-        release(touches)
+        lift(touches, event)
     }
 
-    private func release(_ touches: Set<UITouch>) {
+    private func lift(_ touches: Set<UITouch>, _ event: UIEvent?) {
+        report(event)
         for touch in touches {
-            pendingRelease.insert(ObjectIdentifier(touch))
+            let id = ObjectIdentifier(touch)
+            points[id] = nil
+            if let owned = slots.firstIndex(of: id) { slots[owned] = nil }
         }
+        send([frame(at: event?.timestamp ?? CACurrentMediaTime())])
     }
 
-    @objc private func tick() {
-        guard bounds.width > 0, bounds.height > 0 else { return }
-        if points.isEmpty {
-            // Healed only while idle: resending mid-drag would tear the
-            // device down under a live touch.
-            let now = Date()
-            if lastBeginAt == nil || now.timeIntervalSince(lastBeginAt!) > Self.beginInterval {
-                lastBeginAt = now
-                onBegin?(bounds.size)
+    /// One frame per sample, oldest first. Fingers sampled together share a
+    /// timestamp, so they share a frame.
+    private func report(_ event: UIEvent?) {
+        guard let event, bounds.width > 0, bounds.height > 0 else { return }
+        var byTime: [TimeInterval: [(ObjectIdentifier, CGPoint)]] = [:]
+        for touch in event.allTouches ?? [] {
+            let id = ObjectIdentifier(touch)
+            guard slots.contains(id) else { continue }
+            for sample in event.coalescedTouches(for: touch) ?? [touch] {
+                byTime[sample.timestamp, default: []].append((id, sample.location(in: self)))
             }
-            guard !sentEmptyFrame else { return }
-            sentEmptyFrame = true
-            seq += 1
-            onFrame?(seq, [], [], [])
-            return
         }
-        if lastBeginAt == nil {
-            lastBeginAt = Date()
-            onBegin?(bounds.size)
+        let frames = byTime.sorted { $0.key < $1.key }.map { time, samples in
+            for (id, point) in samples { points[id] = point }
+            return frame(at: time)
         }
-        sentEmptyFrame = false
+        send(frames)
+    }
 
+    @objc private func beat() {
+        let now = CACurrentMediaTime()
+        guard !points.isEmpty, now - lastSentAt >= Self.heartbeatInterval else { return }
+        send([frame(at: now)])
+    }
+
+    private func send(_ frames: [Frame]) {
+        guard !frames.isEmpty else { return }
+        lastSentAt = CACurrentMediaTime()
+        onFrames?(frames)
+    }
+
+    /// `time` is seconds since boot, as `UITouch.timestamp` and
+    /// `CACurrentMediaTime` both count it.
+    private func frame(at time: TimeInterval) -> Frame {
         var ids: [UInt8] = []
         var xs: [UInt16] = []
         var ys: [UInt16] = []
@@ -285,14 +338,9 @@ final class TouchpadUIView: UIView {
             xs.append(Self.normalize(point.x, extent: bounds.width))
             ys.append(Self.normalize(point.y, extent: bounds.height))
         }
-        seq += 1
-        onFrame?(seq, ids, xs, ys)
-
-        for id in pendingRelease {
-            points[id] = nil
-            if let owned = slots.firstIndex(of: id) { slots[owned] = nil }
-        }
-        pendingRelease.removeAll()
+        seq &+= 1
+        let tUs = UInt32(truncatingIfNeeded: Int64(time * 1_000_000))
+        return Frame(seq: seq, ids: ids, xs: xs, ys: ys, tUs: tUs)
     }
 
     private static func normalize(_ value: CGFloat, extent: CGFloat) -> UInt16 {

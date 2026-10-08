@@ -303,7 +303,7 @@ pub struct TouchpadEffector {
 
 #[derive(Default)]
 struct State {
-    open: Option<Device>,
+    open: Option<((u16, u16), Device)>,
     last_applied: u32,
 }
 
@@ -315,13 +315,22 @@ impl TouchpadEffector {
         }
         state.last_applied = order;
         match op {
+            // The phone repeats `begin` to heal reconnects; a same-size repeat
+            // keeps the device, so libinput is not handed a new one mid-use.
             TouchpadOp::Begin { w_mm, h_mm } => {
-                state.open = Some(Device::create(w_mm, h_mm).map_err(|e| e.to_string())?);
+                if state
+                    .open
+                    .as_ref()
+                    .is_none_or(|(dims, _)| *dims != (w_mm, h_mm))
+                {
+                    let device = Device::create(w_mm, h_mm).map_err(|e| e.to_string())?;
+                    state.open = Some(((w_mm, h_mm), device));
+                }
             }
             TouchpadOp::Frame { points } => {
                 // A frame that beat its own `begin` here, or one after `end`:
                 // the next frame carries the whole set again.
-                if let Some(device) = state.open.as_mut() {
+                if let Some((_, device)) = state.open.as_mut() {
                     device.apply(&points).map_err(|e| e.to_string())?;
                 }
             }

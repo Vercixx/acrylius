@@ -57,9 +57,6 @@
         <string>UIInterfaceOrientationLandscapeLeft</string>
         <string>UIInterfaceOrientationLandscapeRight</string>
     </array>
-    <!-- Lets the touchpad sample at 120 Hz on ProMotion; iPhone caps at 60 without it. -->
-    <key>CADisableMinimumFrameDurationOnPhone</key>
-    <true/>
     <key>UISupportedInterfaceOrientations~ipad</key>
     <array>
         <string>UIInterfaceOrientationPortrait</string>

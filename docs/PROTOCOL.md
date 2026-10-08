@@ -598,7 +598,7 @@ default, with `truncated` set when the cap was reached.
 
 ```
 ->  begin    body: [0 w_mm:u16, 1 h_mm:u16]
-->  frame    body: [0 seq:u32, 1 points:[[0 id:u8, 1 x:u16, 2 y:u16]]]
+->  frame    body: [0 seq:u32, 1 points:[[0 id:u8, 1 x:u16, 2 y:u16]], 2 t_us:u32?]
 ->  end      body: []
 <-  avail    body: []
 ```
@@ -618,6 +618,11 @@ resolution, which is what libinput measures scroll and pinch thresholds against.
 reordered `frame` costs one sample and never desyncs the device, since the next
 one restates the whole set. `seq` orders frames against each other on the wire;
 a receiver applies whatever it judges newest and may discard the rest.
+
+`t_us` is when the phone took the sample, in microseconds on the phone's own
+clock, and it wraps. iOS can hand over two or more samples at once. When
+`t_us` is present, a receiver can play them back at the spacing they were taken
+at.
 
 `end` closes the stream and lifts every finger. A session ending or a link
 dropping does the same without waiting for one.
@@ -644,7 +649,14 @@ Each phone message is one kind byte followed by its body. The phone sends
 touches over USB only to the computer whose device id came in `hello`;
 otherwise they go through the session. Nothing on this channel is
 authenticated. If fingers are down and no message arrives for 300 ms, the
-desktop lifts them.
+desktop lifts them. While a finger is held still, the phone repeats its frame
+about every 100 ms, because a still finger raises no touch events.
+
+Over USB the phone sends every sample, not only the newest. The desktop uses
+the sample that arrived quickest as a reference point and plays each sample
+10 ms after the moment that reference predicts for it. Two samples that arrive
+together then leave at the spacing they were taken at.
+Over the session, the phone sends only the newest sample of each batch.
 
 ### org.acrylius.share/1
 
