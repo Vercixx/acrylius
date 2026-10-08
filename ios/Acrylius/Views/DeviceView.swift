@@ -74,7 +74,7 @@ struct DeviceView: View {
 
             MediaSection(peer: peer)
 
-            if features.canTouchpad, peer.reachable {
+            if (features.canTouchpad && peer.reachable) || model.usbHost == peer.deviceId {
                 Section {
                     NavigationLink("Use as touchpad") {
                         TouchpadView(peer: peer)

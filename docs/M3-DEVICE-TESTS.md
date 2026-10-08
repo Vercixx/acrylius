@@ -291,9 +291,12 @@ through the daemon and the phone.
       device behind.
 - [ ] A user not in the `input` group sees the touchpad simply unavailable,
       with the reason findable, and nothing else breaks.
-- [ ] Wi-Fi jitter is visible or it is not — read the latency figure during
-      ordinary use and write down what it does. Decides whether the USB
-      transport is ever worth building.
+- [ ] With the cable plugged in, the touchpad screen shows "USB", and the
+      journal shows "phone touchpad connected over USB".
+- [ ] Pulling the cable mid-drag lifts every finger within 300 ms, and
+      plugging it back in reconnects without a daemon restart.
+- [ ] Backgrounding the app and returning reconnects over USB.
+- [ ] With the cable out, the touchpad still works over Wi-Fi.
 
 ---
 

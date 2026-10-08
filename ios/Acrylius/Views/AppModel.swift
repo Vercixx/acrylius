@@ -99,9 +99,19 @@ final class AppModel {
         private var bluetooth: BLETransport?
     #endif
 
+    /// The device id of the computer reading touches over USB, if one is.
+    var usbHost: String?
+
+    #if canImport(Network)
+        private var touchpadServer: TouchpadServer?
+    #endif
+
     /// A suspended app notices nothing: retire dead links, restart discovery,
     /// then have the core re-check the routes it already knows.
     func cameToForeground() async {
+        #if canImport(Network)
+            touchpadServer?.start()
+        #endif
         await runtime?.revalidateLinks()
         await runtime?.rediscover()
         await runtime?.submit(.reconsiderRoutes)
@@ -120,6 +130,15 @@ final class AppModel {
 
     func start() async {
         guard runtime == nil else { return }
+        #if canImport(Network)
+            if touchpadServer == nil {
+                let server = TouchpadServer { [weak self] host in
+                    Task { @MainActor in self?.usbHost = host }
+                }
+                server.start()
+                touchpadServer = server
+            }
+        #endif
         do {
             let store = try KeychainStore()
             let rt = try CoreRuntime.bootstrap(
@@ -137,11 +156,6 @@ final class AppModel {
                 serviceType: serviceType(),
                 port: defaultPort()
             ))
-            #if canImport(Network)
-                // Transport 0, matching the daemon: lower than Wi-Fi, so a
-                // cable plugged in while already connected still takes over.
-                await rt.add(transport: USBTransport())
-            #endif
             #if canImport(CoreBluetooth)
                 // Transport 2, matching the daemon; routes are tried in
                 // ascending transport order, so Wi-Fi wins. Must be added
@@ -177,8 +191,7 @@ final class AppModel {
 
     /// When a ping went out, per peer, so the matching pong can be timed.
     private var pingSentAt: [String: Date] = [:]
-    /// The last ping round trip, in milliseconds. `TouchpadView` reads this to
-    /// show whether Wi-Fi jitter is worth chasing with a USB transport.
+    /// The last ping round trip over the session, in milliseconds.
     var lastPingRTTms: Double?
 
     /// Start pairing; six digits come back and each end confirms they match.
@@ -294,19 +307,28 @@ final class AppModel {
     }
 
     func touchpadBegin(_ peer: FfiPeer, wMm: UInt16, hMm: UInt16) async {
-        let body = encodeTouchpadBegin(wMm: wMm, hMm: hMm)
-        await send(peer, cap: capTouchpad(), ty: "begin", body: body)
+        await touchpad(peer, kind: 0, ty: "begin", body: encodeTouchpadBegin(wMm: wMm, hMm: hMm))
     }
 
     /// The hottest call in the app: driven off a display link, never off a
     /// touch callback directly. See `TouchpadView`.
     func touchpadFrame(_ peer: FfiPeer, seq: UInt32, ids: Data, xs: [UInt16], ys: [UInt16]) async {
         let body = encodeTouchpadFrame(seq: seq, ids: ids, xs: xs, ys: ys)
-        await send(peer, cap: capTouchpad(), ty: "frame", body: body)
+        await touchpad(peer, kind: 1, ty: "frame", body: body)
     }
 
     func touchpadEnd(_ peer: FfiPeer) async {
-        await send(peer, cap: capTouchpad(), ty: "end", body: Data())
+        await touchpad(peer, kind: 2, ty: "end", body: Data())
+    }
+
+    /// Over USB when this peer is the one plugged in, else through the session.
+    private func touchpad(_ peer: FfiPeer, kind: UInt8, ty: String, body: Data) async {
+        #if canImport(Network)
+            if usbHost == peer.deviceId, await touchpadServer?.send(kind, body) == true {
+                return
+            }
+        #endif
+        await send(peer, cap: capTouchpad(), ty: ty, body: body)
     }
 
     /// Re-query a peer that has just come back: `PeerCatalog.ingest` clears

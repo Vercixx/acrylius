@@ -52,7 +52,7 @@ impl Default for BleConfig {
     }
 }
 
-/// Whether to dial a phone over `iproxy` when one is plugged in and paired.
+/// Whether to drive the touchpad from a phone plugged in over USB, via `iproxy`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UsbConfig {

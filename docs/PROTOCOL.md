@@ -627,6 +627,25 @@ capability — the same pattern as the command catalogue and the wake config: wh
 a device announces at connect time is what a remote may act on, regardless of
 what `caps_in`/`caps_out` merely say is understood.
 
+#### Over USB
+
+With a cable plugged in, touches skip the session. The phone listens on
+loopback port `1972`. The desktop runs `iproxy 1972:1972` and connects to it.
+Every message is a `u32` big-endian length, then that many bytes, up to 4 KiB.
+
+```
+<-  hello    the desktop's device id, UTF-8 (sent once, on connect)
+->  0        begin, same body as above
+->  1        frame, same body as above
+->  2        end
+```
+
+Each phone message is one kind byte followed by its body. The phone sends
+touches over USB only to the computer whose device id came in `hello`;
+otherwise they go through the session. Nothing on this channel is
+authenticated. If fingers are down and no message arrives for 300 ms, the
+desktop lifts them.
+
 ### org.acrylius.share/1
 
 Send a file. The envelope is the wrong place for one — a session frame is capped

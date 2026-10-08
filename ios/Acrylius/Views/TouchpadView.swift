@@ -20,6 +20,8 @@ struct TouchpadView: View {
         model.peers.first { $0.deviceId == peer.deviceId }?.transport
     }
 
+    private var overUSB: Bool { model.usbHost == peer.deviceId }
+
     var body: some View {
         TouchSurface(peer: peer, model: model)
             .background(.black)
@@ -38,13 +40,17 @@ struct TouchpadView: View {
                 .padding()
             }
             .overlay(alignment: .topTrailing) {
-                if model.lastPingRTTms != nil || liveTransport != nil {
+                if overUSB || model.lastPingRTTms != nil || liveTransport != nil {
                     HStack(spacing: 6) {
-                        if let over = carrying(liveTransport) {
-                            Text(over)
-                        }
-                        if let ms = model.lastPingRTTms {
-                            Text("\(Int(ms)) ms")
+                        if overUSB {
+                            Text("USB")
+                        } else {
+                            if let over = carrying(liveTransport) {
+                                Text(over)
+                            }
+                            if let ms = model.lastPingRTTms {
+                                Text("\(Int(ms)) ms")
+                            }
                         }
                     }
                     .font(.caption.monospacedDigit())
@@ -57,7 +63,7 @@ struct TouchpadView: View {
             }
             .task {
                 while !Task.isCancelled {
-                    await model.ping(peer)
+                    if !overUSB { await model.ping(peer) }
                     try? await Task.sleep(for: .seconds(2))
                 }
             }

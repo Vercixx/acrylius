@@ -872,8 +872,8 @@ fn a_better_transport_is_taken_even_while_a_worse_one_is_working() {
 
 #[test]
 fn reconsider_routes_dials_a_strictly_better_route_set_locally() {
-    // The shape a USB-attach watcher uses: no discovery event, just
-    // `SetPeerAddress` then `ReconsiderRoutes`, both sent locally.
+    // No discovery event, just `SetPeerAddress` then `ReconsiderRoutes`, both
+    // sent locally.
     let (a, b) = (core("phone"), core("pc"));
     let b_id = b.device_id();
     let mut net = Net::new(a, b);
@@ -976,50 +976,6 @@ fn a_plain_connect_does_not_dial_a_better_route_while_already_reachable() {
         net.dialed.is_empty(),
         "a plain Connect must not try a better route on its own"
     );
-}
-
-#[test]
-fn forgetting_a_route_removes_it_from_the_fallback_chain() {
-    let (mut net, _a_id, b_id) = paired();
-    lose_link(&mut net, TRANSPORT);
-    assert_eq!(net.a.peer_state(&b_id), PeerState::Unreachable);
-
-    // The route pairing left on file is broken, and a fallback is added, then
-    // withdrawn before anything dials it.
-    net.local(
-        Side::A,
-        LocalCommand::SetPeerAddress {
-            peer: b_id.clone(),
-            transport: TRANSPORT,
-            addr: "not-listening".to_string(),
-        },
-    );
-    net.local(
-        Side::A,
-        LocalCommand::SetPeerAddress {
-            peer: b_id.clone(),
-            transport: SLOWER,
-            addr: "B".to_string(),
-        },
-    );
-    net.local(
-        Side::A,
-        LocalCommand::ForgetPeerAddress {
-            peer: b_id.clone(),
-            transport: SLOWER,
-            addr: "B".to_string(),
-        },
-    );
-
-    net.dialed.clear();
-    net.local(Side::A, LocalCommand::Connect { peer: b_id.clone() });
-
-    assert_eq!(
-        net.dialed,
-        vec![(TRANSPORT, "not-listening".to_string())],
-        "the forgotten route must not be tried as a fallback"
-    );
-    assert_eq!(net.a.peer_state(&b_id), PeerState::Unreachable);
 }
 
 #[test]
@@ -3027,12 +2983,12 @@ fn a_file_sends_again_once_wi_fi_takes_over_from_bluetooth() {
 
 #[test]
 fn a_bulk_transfer_is_offered_even_when_the_freshest_link_cannot_carry_it() {
-    // A link with no side channel (BLE, or USB) can still be the freshest;
-    // an older link that has one must still be found for a bulk transfer.
+    // A link with no side channel (BLE) can still be the freshest; an older
+    // link that has one must still be found for a bulk transfer.
     let (a, b) = (sharing_core("phone"), sharing_core("pc"));
     let b_id = b.device_id();
     let mut net = Net::new(a, b);
-    // Stands in for USB: preferred (lower id) but no side channel of its own.
+    // Preferred (lower id) but no side channel of its own.
     net.ble_transport = Some(TRANSPORT);
     net.local(
         Side::A,

@@ -1591,15 +1591,6 @@ impl Core {
                     });
                 }
             }
-            LocalCommand::ForgetPeerAddress {
-                peer,
-                transport,
-                addr,
-            } => {
-                if let Some(routes) = self.addrs.get_mut(&peer) {
-                    routes.forget(transport, &addr);
-                }
-            }
             LocalCommand::Connect { peer } => self.connect_peer(now_ms, peer, out, true),
             LocalCommand::ReconsiderRoutes => {
                 // Not `by_hand`: nobody pressed anything, and only the
