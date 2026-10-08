@@ -55,10 +55,7 @@ public final class TouchpadServer: @unchecked Sendable {
 
     /// `false` when no desktop is connected, so the caller can go another way.
     public func send(_ kind: UInt8, _ body: Data) async -> Bool {
-        lock.lock()
-        let c = connection
-        lock.unlock()
-        guard let c else { return false }
+        guard let c = lock.withLock({ connection }) else { return false }
         var header = UInt32(body.count + 1).bigEndian
         var frame = Data(bytes: &header, count: 4)
         frame.append(kind)
