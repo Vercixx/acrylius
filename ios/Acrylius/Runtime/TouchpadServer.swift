@@ -30,9 +30,11 @@ public final class TouchpadServer: @unchecked Sendable {
         guard listener == nil else { lock.unlock(); return }
         // No `requiredInterfaceType`: it can fail the bind silently. Loopback
         // is checked per connection instead.
+        let params = NWParameters.tcp
+        (params.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options)?.noDelay = true
         let l: NWListener
         do {
-            l = try NWListener(using: .tcp, on: port)
+            l = try NWListener(using: params, on: port)
         } catch {
             lock.unlock()
             NSLog("acrylius touchpad: could not listen on \(port): \(error)")

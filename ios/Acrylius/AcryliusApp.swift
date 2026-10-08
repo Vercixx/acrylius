@@ -2,6 +2,7 @@ import SwiftUI
 
 @main
 struct AcryliusApp: App {
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var model = AppModel()
     @Environment(\.scenePhase) private var scenePhase
 
@@ -16,5 +17,14 @@ struct AcryliusApp: App {
                     Task { await model.cameToForeground() }
                 }
         }
+    }
+}
+
+final class AppDelegate: NSObject, UIApplicationDelegate {
+    func application(
+        _ application: UIApplication,
+        supportedInterfaceOrientationsFor window: UIWindow?
+    ) -> UIInterfaceOrientationMask {
+        UIDevice.current.userInterfaceIdiom == .pad ? .all : AppOrientation.allowed
     }
 }

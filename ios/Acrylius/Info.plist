@@ -42,9 +42,8 @@
     <!-- Orientation is set per device family, using the ~ipad suffix iOS
          resolves at launch.
 
-         The phone is portrait only. It is a companion you pick up to lock a
-         machine or send a clipboard, and there is nothing here that reads
-         better wide.
+         The phone lists landscape only for the touchpad; AppDelegate keeps
+         every other screen portrait through AppOrientation.
 
          The iPad has to offer all four. An iPad app that does not opt out of
          multitasking must support every orientation, because it can be resized
@@ -55,7 +54,12 @@
     <key>UISupportedInterfaceOrientations</key>
     <array>
         <string>UIInterfaceOrientationPortrait</string>
+        <string>UIInterfaceOrientationLandscapeLeft</string>
+        <string>UIInterfaceOrientationLandscapeRight</string>
     </array>
+    <!-- Lets the touchpad sample at 120 Hz on ProMotion; iPhone caps at 60 without it. -->
+    <key>CADisableMinimumFrameDurationOnPhone</key>
+    <true/>
     <key>UISupportedInterfaceOrientations~ipad</key>
     <array>
         <string>UIInterfaceOrientationPortrait</string>

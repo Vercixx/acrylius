@@ -25,6 +25,7 @@ struct DeviceView: View {
 
     @State private var pasted = ""
     @State private var confirmingForget = false
+    @State private var touchpadOpen = false
 
     private var features: PeerFeatures { model.catalog[peer.deviceId] }
 
@@ -76,9 +77,7 @@ struct DeviceView: View {
 
             if (features.canTouchpad && peer.reachable) || model.usbHost == peer.deviceId {
                 Section {
-                    NavigationLink("Use as touchpad") {
-                        TouchpadView(peer: peer)
-                    }
+                    Button("Use as touchpad") { touchpadOpen = true }
                 }
             }
 
@@ -148,6 +147,7 @@ struct DeviceView: View {
             }
         }
         .navigationTitle(peer.name)
+        .fullScreenCover(isPresented: $touchpadOpen) { TouchpadView(peer: peer) }
         .task {
             guard peer.reachable else { return }
             await model.refreshSession(peer)

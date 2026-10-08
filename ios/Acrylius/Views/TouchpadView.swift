@@ -22,23 +22,33 @@ struct TouchpadView: View {
 
     private var overUSB: Bool { model.usbHost == peer.deviceId }
 
+    @State private var holdingClose = false
+    private static let holdToClose = 0.6
+
     var body: some View {
         TouchSurface(peer: peer, model: model)
             .background(.black)
             .ignoresSafeArea()
             .statusBarHidden()
             .persistentSystemOverlays(.hidden)
-            .toolbar(.hidden, for: .navigationBar)
             .overlay(alignment: .topLeading) {
-                Button {
-                    dismiss()
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .font(.title2)
-                        .foregroundStyle(.white.opacity(0.6))
-                }
-                .padding()
+                Image(systemName: "xmark.circle.fill")
+                    .font(.title2)
+                    .foregroundStyle(.white.opacity(holdingClose ? 1 : 0.6))
+                    .scaleEffect(holdingClose ? 1.5 : 1)
+                    .animation(.easeIn(duration: Self.holdToClose), value: holdingClose)
+                    .padding()
+                    .contentShape(Rectangle())
+                    .onLongPressGesture(minimumDuration: Self.holdToClose) {
+                        dismiss()
+                    } onPressingChanged: { holdingClose = $0 }
+                    .accessibilityLabel("Close touchpad")
+                    .accessibilityHint("Touch and hold to close.")
+                    .accessibilityAddTraits(.isButton)
+                    .accessibilityAction { dismiss() }
             }
+            .onAppear { AppOrientation.allow(.allButUpsideDown) }
+            .onDisappear { AppOrientation.allow(.portrait) }
             .overlay(alignment: .topTrailing) {
                 if overUSB || model.lastPingRTTms != nil || liveTransport != nil {
                     HStack(spacing: 6) {
@@ -156,6 +166,7 @@ final class TouchpadUIView: UIView {
     /// Held until the next tick reports it down once: a tap shorter than one
     /// refresh must not let libinput see a lift with no press before it.
     private var pendingRelease: Set<ObjectIdentifier> = []
+    private var laidOutSize: CGSize = .zero
 
     override init(frame: CGRect) {
         super.init(frame: frame)
@@ -172,6 +183,8 @@ final class TouchpadUIView: UIView {
         super.didMoveToWindow()
         if window != nil {
             let link = CADisplayLink(target: self, selector: #selector(tick))
+            // Above 60 needs CADisableMinimumFrameDurationOnPhone in Info.plist.
+            link.preferredFrameRateRange = CAFrameRateRange(minimum: 80, maximum: 120, preferred: 120)
             link.add(to: .main, forMode: .common)
             displayLink = link
             UIApplication.shared.isIdleTimerDisabled = true
@@ -182,6 +195,15 @@ final class TouchpadUIView: UIView {
             if lastBeginAt != nil { onEnd?() }
             reset()
         }
+    }
+
+    /// A rotation changes the surface size, so the next idle tick resends `begin`.
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        if bounds.size != laidOutSize, lastBeginAt != nil {
+            lastBeginAt = .distantPast
+        }
+        laidOutSize = bounds.size
     }
 
     private func reset() {
@@ -288,11 +310,29 @@ private enum ScreenDensity {
     ]
 
     static func millimeters(for size: CGSize) -> (w: UInt16, h: UInt16) {
-        let ppi = ppiByPointWidth[Int(UIScreen.main.bounds.width.rounded())] ?? 160
+        let screen = UIScreen.main.bounds.size
+        let ppi = ppiByPointWidth[Int(min(screen.width, screen.height).rounded())] ?? 160
         let mmPerPoint = UIScreen.main.scale * 25.4 / ppi
         let w = UInt16(clamping: Int((size.width * mmPerPoint).rounded()))
         let h = UInt16(clamping: Int((size.height * mmPerPoint).rounded()))
         return (max(w, 1), max(h, 1))
+    }
+}
+
+/// What `AppDelegate` reports on a phone: portrait, except on the touchpad.
+@MainActor
+enum AppOrientation {
+    static var allowed: UIInterfaceOrientationMask = .portrait
+
+    static func allow(_ mask: UIInterfaceOrientationMask) {
+        allowed = mask
+        guard UIDevice.current.userInterfaceIdiom == .phone,
+              let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene
+        else { return }
+        var top = scene.keyWindow?.rootViewController
+        while let next = top?.presentedViewController { top = next }
+        top?.setNeedsUpdateOfSupportedInterfaceOrientations()
+        scene.requestGeometryUpdate(.iOS(interfaceOrientations: mask))
     }
 }
 
