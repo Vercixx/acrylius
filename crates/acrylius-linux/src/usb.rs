@@ -1,21 +1,32 @@
-//! Touchpad over USB: the phone listens on loopback, `iproxy` forwards a local
-//! port to it, and this end connects, says hello, then replays touches.
+//! Touchpad over USB: the phone listens on loopback, this end reaches it through
+//! usbmuxd's socket, says hello, then replays touches.
 
 use std::collections::VecDeque;
-use std::process::Stdio;
+use std::path::Path;
 use std::time::Duration;
 
 use acrylius_core::plugins::touchpad::{Begin, Frame, MAX_POINTS};
 use acrylius_core::vocab::TouchPoint;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
-use tokio::net::tcp::OwnedReadHalf;
+use tokio::net::UnixStream;
+use tokio::net::unix::OwnedReadHalf;
+use tokio::sync::watch;
 use tokio::time::Instant;
 
 use crate::touchpad::Device;
 
-/// The port `iproxy` forwards, both sides of the tunnel.
+/// The port the phone listens on.
 pub const PORT: u16 = 1972;
+
+const USBMUXD: &str = "/run/usbmuxd";
+
+/// usbmuxd's binary protocol (version 0), which needs no plist parser.
+const MUX_HEADER: u32 = 16;
+const MUX_RESULT: u32 = 1;
+const MUX_CONNECT: u32 = 2;
+const MUX_LISTEN: u32 = 3;
+const MUX_ATTACHED: u32 = 4;
+const MUX_DETACHED: u32 = 5;
 
 const MAX_MESSAGE: u32 = 4096;
 
@@ -137,14 +148,13 @@ impl Pad for Device {
 }
 
 /// Runs until the phone goes away. `heard` is set once the phone has spoken,
-/// since iproxy accepts the connection even when nothing listens on the phone.
+/// so a connection that never got going is not logged.
 async fn session<P: Pad>(
-    stream: TcpStream,
+    stream: UnixStream,
     device_id: &str,
     heard: &mut bool,
     open: impl Fn(u16, u16) -> std::io::Result<P>,
 ) -> std::io::Result<()> {
-    stream.set_nodelay(true)?;
     let (rd, mut wr) = stream.into_split();
     let len = u32::try_from(device_id.len()).map_err(std::io::Error::other)?;
     let mut hello = len.to_be_bytes().to_vec();
@@ -235,16 +245,17 @@ fn apply<P: Pad>(
     Ok(())
 }
 
-// ponytail: the tunnel is unauthenticated; another local user who binds PORT
-// before iproxy can feed touches. Talk to /run/usbmuxd directly if that matters.
+// ponytail: any local user can also reach the phone's port through usbmuxd, and
+// the phone serves the last hello. Sign the hello with the pairing keys if that matters.
 pub async fn drive_touchpad(device_id: String) {
+    let mux = Path::new(USBMUXD);
+    let (tx, mut rx) = watch::channel(None);
+    tokio::spawn(watch_devices(mux, tx));
     loop {
-        let Some(udid) = udid().await else {
-            tokio::time::sleep(NO_DEVICE).await;
-            continue;
+        let Ok(Some(dev)) = rx.wait_for(Option::is_some).await.map(|d| *d) else {
+            return;
         };
-        ensure_iproxy(&udid).await;
-        if let Ok(stream) = TcpStream::connect(("127.0.0.1", PORT)).await {
+        if let Ok(stream) = mux_open(mux, MUX_CONNECT, &connect_body(dev, PORT)).await {
             let mut heard = false;
             if let Err(e) = session(stream, &device_id, &mut heard, Device::create).await
                 && heard
@@ -256,64 +267,66 @@ pub async fn drive_touchpad(device_id: String) {
     }
 }
 
-/// First UDID `idevice_id -l` reports, if any device is attached over USB.
-async fn udid() -> Option<String> {
-    let out = match tokio::process::Command::new("idevice_id")
-        .arg("-l")
-        .output()
-        .await
-    {
-        Ok(out) => out,
-        Err(e) => {
-            tracing::debug!(error = %e, "could not run idevice_id; is libimobiledevice installed?");
-            return None;
-        }
-    };
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .find(|l| !l.trim().is_empty())
-        .map(|l| l.trim().to_string())
-}
-
-/// The UDID `iproxy` runs for, and its supervisor: only replaced when the
-/// UDID changes, since a dropped connection says nothing about iproxy itself.
-static IPROXY: tokio::sync::Mutex<Option<(String, tokio::task::JoinHandle<()>)>> =
-    tokio::sync::Mutex::const_new(None);
-
-async fn ensure_iproxy(udid: &str) {
-    let mut guard = IPROXY.lock().await;
-    if guard.as_ref().is_some_and(|(u, _)| u == udid) {
-        return;
-    }
-    if let Some((_, old)) = guard.take() {
-        old.abort();
-    }
-    *guard = Some((udid.to_string(), tokio::spawn(run_iproxy(udid.to_string()))));
-}
-
-/// Keeps `iproxy` running, so a cable reseat or a usbmuxd hiccup heals
-/// without a daemon restart. Its output is dropped: it logs every refused connect.
-async fn run_iproxy(udid: String) {
-    tracing::info!(%udid, port = PORT, "starting iproxy");
+/// Publishes the usbmuxd id of the first attached device, `None` while there is none.
+async fn watch_devices(mux: &Path, tx: watch::Sender<Option<u32>>) {
     loop {
-        match tokio::process::Command::new("iproxy")
-            .arg(format!("{PORT}:{PORT}"))
-            .arg("-u")
-            .arg(&udid)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .status()
-            .await
-        {
-            Ok(status) => tracing::info!(%status, "iproxy exited; restarting"),
-            Err(e) => {
-                tracing::warn!(error = %e, "could not spawn iproxy; is libimobiledevice installed?");
-                tokio::time::sleep(RETRY * 4).await;
+        if let Ok(mut s) = mux_open(mux, MUX_LISTEN, &[]).await {
+            let mut attached = Vec::new();
+            while let Ok((kind, body)) = mux_read(&mut s).await {
+                let Some(id) = body.first_chunk().map(|b| u32::from_le_bytes(*b)) else {
+                    continue;
+                };
+                match kind {
+                    MUX_ATTACHED => attached.push(id),
+                    MUX_DETACHED => attached.retain(|d| *d != id),
+                    _ => continue,
+                }
+                tx.send_replace(attached.first().copied());
             }
         }
-        tokio::time::sleep(RETRY).await;
+        tx.send_replace(None);
+        tokio::time::sleep(NO_DEVICE).await;
     }
+}
+
+fn connect_body(device: u32, port: u16) -> [u8; 8] {
+    let mut body = [0; 8];
+    body[..4].copy_from_slice(&device.to_le_bytes());
+    body[4..6].copy_from_slice(&port.to_be_bytes());
+    body
+}
+
+/// Sends one request and returns the stream once usbmuxd answers 0. After
+/// `MUX_CONNECT` the same stream carries the phone's bytes.
+async fn mux_open(mux: &Path, kind: u32, body: &[u8]) -> std::io::Result<UnixStream> {
+    let mut s = UnixStream::connect(mux).await?;
+    let len = u32::try_from(body.len()).map_err(std::io::Error::other)? + MUX_HEADER;
+    let mut msg = Vec::new();
+    for word in [len, 0, kind, 1] {
+        msg.extend_from_slice(&word.to_le_bytes());
+    }
+    msg.extend_from_slice(body);
+    s.write_all(&msg).await?;
+    match mux_read(&mut s).await? {
+        (MUX_RESULT, code) if code == [0; 4] => Ok(s),
+        (kind, body) => Err(std::io::Error::other(format!(
+            "usbmuxd answered {kind} {body:?}"
+        ))),
+    }
+}
+
+async fn mux_read(s: &mut UnixStream) -> std::io::Result<(u32, Vec<u8>)> {
+    let len = s.read_u32_le().await?;
+    let _version = s.read_u32_le().await?;
+    let kind = s.read_u32_le().await?;
+    let _tag = s.read_u32_le().await?;
+    let n = len
+        .checked_sub(MUX_HEADER)
+        .filter(|n| *n <= MAX_MESSAGE)
+        .ok_or_else(|| std::io::Error::other(format!("usbmuxd message of {len} bytes")))?;
+    let mut body = vec![0; n as usize];
+    s.read_exact(&mut body).await?;
+    Ok((kind, body))
 }
 
 #[cfg(test)]
@@ -470,15 +483,11 @@ mod tests {
 
     /// The phone's end of a session against a fake pad, after hello was checked.
     async fn start() -> (
-        TcpStream,
+        UnixStream,
         Log,
         tokio::task::JoinHandle<(std::io::Result<()>, bool)>,
     ) {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let desktop = TcpStream::connect(listener.local_addr().unwrap())
-            .await
-            .unwrap();
-        let (mut phone, _) = listener.accept().await.unwrap();
+        let (desktop, mut phone) = UnixStream::pair().unwrap();
         let log = Log::default();
         let opened = log.clone();
         let task = tokio::spawn(async move {
@@ -500,7 +509,7 @@ mod tests {
         (phone, log, task)
     }
 
-    async fn say(phone: &mut TcpStream, msg: &[u8]) {
+    async fn say(phone: &mut UnixStream, msg: &[u8]) {
         phone.write_u32(msg.len() as u32).await.unwrap();
         phone.write_all(msg).await.unwrap();
     }
@@ -510,7 +519,7 @@ mod tests {
     }
 
     async fn finish(
-        phone: TcpStream,
+        phone: UnixStream,
         log: Log,
         task: tokio::task::JoinHandle<(std::io::Result<()>, bool)>,
     ) -> (std::io::ErrorKind, bool, Vec<String>) {
@@ -593,6 +602,122 @@ mod tests {
         let (kind, _, lines) = finish(phone, log, task).await;
         assert_eq!(kind, std::io::ErrorKind::InvalidData);
         assert_eq!(lines, ["open 70x150", "drop 70x150"]);
+    }
+
+    fn mux_message(kind: u32, body: &[u8]) -> Vec<u8> {
+        let mut m = Vec::new();
+        for word in [MUX_HEADER + body.len() as u32, 0, kind, 0] {
+            m.extend_from_slice(&word.to_le_bytes());
+        }
+        m.extend_from_slice(body);
+        m
+    }
+
+    fn fake_mux(name: &str) -> (std::path::PathBuf, tokio::net::UnixListener) {
+        let path = std::env::temp_dir().join(format!("acrylius-mux-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        (path, listener)
+    }
+
+    async fn answer_connect(mux: tokio::net::UnixListener, code: u32) -> (UnixStream, [u8; 24]) {
+        let (mut s, _) = mux.accept().await.unwrap();
+        let mut req = [0; 24];
+        s.read_exact(&mut req).await.unwrap();
+        s.write_all(&mux_message(MUX_RESULT, &code.to_le_bytes()))
+            .await
+            .unwrap();
+        (s, req)
+    }
+
+    #[tokio::test]
+    async fn connect_names_the_device_and_port_then_hands_over_the_stream() {
+        let (path, mux) = fake_mux("connect");
+        let server = tokio::spawn(async move {
+            let (mut s, req) = answer_connect(mux, 0).await;
+            s.write_all(b"phone").await.unwrap();
+            req
+        });
+        let mut s = mux_open(&path, MUX_CONNECT, &connect_body(3, PORT))
+            .await
+            .unwrap();
+        let mut rest = [0; 5];
+        s.read_exact(&mut rest).await.unwrap();
+        assert_eq!(&rest, b"phone");
+        assert_eq!(
+            server.await.unwrap(),
+            [
+                24, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 1, 0, 0, 0, 3, 0, 0, 0, 0x07, 0xb4, 0, 0
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_refused_connect_is_an_error() {
+        let (path, mux) = fake_mux("refused");
+        tokio::spawn(answer_connect(mux, 3));
+        assert!(
+            mux_open(&path, MUX_CONNECT, &connect_body(3, PORT))
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_mux_length_outside_header_to_cap_is_refused() {
+        for (len, ok) in [
+            (MUX_HEADER - 1, false),
+            (MUX_HEADER + MAX_MESSAGE, true),
+            (MUX_HEADER + MAX_MESSAGE + 1, false),
+        ] {
+            let (mut a, mut b) = UnixStream::pair().unwrap();
+            let mut m = mux_message(MUX_RESULT, &vec![0; MAX_MESSAGE as usize]);
+            m[..4].copy_from_slice(&len.to_le_bytes());
+            a.write_all(&m).await.unwrap();
+            drop(a);
+            match mux_read(&mut b).await {
+                Ok(_) => assert!(ok),
+                Err(e) => assert!(!ok && e.kind() == std::io::ErrorKind::Other),
+            }
+        }
+    }
+
+    async fn next(rx: &mut watch::Receiver<Option<u32>>) -> Option<u32> {
+        tokio::time::timeout(Duration::from_secs(1), rx.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        *rx.borrow_and_update()
+    }
+
+    #[tokio::test]
+    async fn the_first_attached_device_is_published_until_usbmuxd_goes_away() {
+        let (path, mux) = fake_mux("listen");
+        let (tx, mut rx) = watch::channel(None);
+        tokio::spawn(async move { watch_devices(&path, tx).await });
+        let (mut s, _) = mux.accept().await.unwrap();
+        let mut req = [0; 16];
+        s.read_exact(&mut req).await.unwrap();
+        assert_eq!(req[8..12], MUX_LISTEN.to_le_bytes());
+        s.write_all(&mux_message(MUX_RESULT, &[0; 4]))
+            .await
+            .unwrap();
+
+        let record = |id: u32| {
+            let mut r = vec![0; 268];
+            r[..4].copy_from_slice(&id.to_le_bytes());
+            r
+        };
+        for (kind, body, want) in [
+            (MUX_ATTACHED, record(5), Some(5)),
+            (MUX_ATTACHED, record(7), Some(5)),
+            (MUX_DETACHED, 5u32.to_le_bytes().to_vec(), Some(7)),
+        ] {
+            s.write_all(&mux_message(kind, &body)).await.unwrap();
+            assert_eq!(next(&mut rx).await, want);
+        }
+        drop(s);
+        assert_eq!(next(&mut rx).await, None);
     }
 
     #[tokio::test]

@@ -52,7 +52,7 @@ impl Default for BleConfig {
     }
 }
 
-/// Whether to drive the touchpad from a phone plugged in over USB, via `iproxy`.
+/// Whether to drive the touchpad from a phone plugged in over USB, via usbmuxd.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct UsbConfig {
