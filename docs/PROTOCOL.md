@@ -635,7 +635,8 @@ what `caps_in`/`caps_out` merely say is understood.
 #### Over USB
 
 With a cable plugged in, touches skip the session. The phone listens on
-loopback port `1972`. The desktop runs `iproxy 1972:1972` and connects to it.
+loopback port `1972`. The desktop connects to it through usbmuxd's socket
+(`/run/usbmuxd`), so the desktop has no TCP listener for anyone to reach.
 Every message is a `u32` big-endian length, then that many bytes, up to 4 KiB.
 
 ```
@@ -648,9 +649,15 @@ Every message is a `u32` big-endian length, then that many bytes, up to 4 KiB.
 Each phone message is one kind byte followed by its body. The phone sends
 touches over USB only to the computer whose device id came in `hello`;
 otherwise they go through the session. Nothing on this channel is
-authenticated. If fingers are down and no message arrives for 300 ms, the
-desktop lifts them. While a finger is held still, the phone repeats its frame
-about every 100 ms, because a still finger raises no touch events.
+authenticated: any local user on the desktop can reach the phone's port through
+usbmuxd, and the phone serves the last `hello` it got. If fingers are down and
+no message arrives for 300 ms, the desktop lifts them. While a finger is held
+still, the phone repeats its frame about every 100 ms, because a still finger
+raises no touch events.
+
+When touches move from the session to USB, the phone sends `end` over the
+session. When either route takes over, the phone sends it the last `begin`
+before the first frame.
 
 Over USB the phone sends every sample, not only the newest. The desktop uses
 the sample that arrived quickest as a reference point and plays each sample

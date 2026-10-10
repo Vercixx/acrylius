@@ -297,6 +297,12 @@ through the daemon and the phone.
       plugging it back in reconnects without a daemon restart.
 - [ ] Backgrounding the app and returning reconnects over USB.
 - [ ] With the cable out, the touchpad still works over Wi-Fi.
+- [ ] With the touchpad open over Wi-Fi, plugging the cable in moves it to USB
+      and the next gesture works. `grep -c "Acrylius Touchpad"
+      /proc/bus/input/devices` then prints 1, not 2.
+- [ ] Pulling the cable while the touchpad is open over USB moves it to Wi-Fi,
+      and the next gesture works at once.
+- [ ] `ss -ltn | grep 1972` on the desktop prints nothing.
 
 ---
 

@@ -1,6 +1,6 @@
 //
-//  Touchpad over USB: the desktop connects through an `iproxy` tunnel, says
-//  hello with its device id, then reads touches. Wire in PROTOCOL.md.
+//  Touchpad over USB: the desktop connects through usbmuxd, says hello with
+//  its device id, then reads touches. Wire in PROTOCOL.md.
 //
 
 #if canImport(Network)
@@ -16,6 +16,8 @@ public final class TouchpadServer: @unchecked Sendable {
     private var listener: NWListener?
     /// Only a connection that has said hello; anything earlier cannot be sent to.
     private var connection: NWConnection?
+    /// Whether `connection` has had a `begin`; without one the desktop has no device.
+    private var begun = false
 
     private let queue = DispatchQueue(label: "org.acrylius.touchpad")
 
@@ -56,17 +58,29 @@ public final class TouchpadServer: @unchecked Sendable {
     }
 
     /// `false` when no desktop is connected, so the caller can go another way.
-    public func send(_ kind: UInt8, _ body: Data) async -> Bool {
-        guard let c = lock.withLock({ connection }) else { return false }
-        var header = UInt32(body.count + 1).bigEndian
-        var frame = Data(bytes: &header, count: 4)
-        frame.append(kind)
-        frame.append(body)
+    /// `begin` goes first when this connection has not had one yet.
+    public func send(_ kind: UInt8, _ body: Data, begin: Data?) async -> Bool {
+        let (conn, replay) = lock.withLock { () -> (NWConnection?, Data?) in
+            let replay = kind == 1 && !begun ? begin : nil
+            if kind == 0 || replay != nil { begun = true }
+            return (connection, replay)
+        }
+        guard let c = conn else { return false }
+        var frame = replay.map { Self.message(0, $0) } ?? Data()
+        frame.append(Self.message(kind, body))
         return await withCheckedContinuation { done in
             c.send(content: frame, completion: .contentProcessed { error in
                 done.resume(returning: error == nil)
             })
         }
+    }
+
+    private static func message(_ kind: UInt8, _ body: Data) -> Data {
+        var header = UInt32(body.count + 1).bigEndian
+        var out = Data(bytes: &header, count: 4)
+        out.append(kind)
+        out.append(body)
+        return out
     }
 
     private static func isLoopback(_ conn: NWConnection) -> Bool {
@@ -117,6 +131,7 @@ public final class TouchpadServer: @unchecked Sendable {
         lock.lock()
         let old = connection
         connection = conn
+        begun = false
         lock.unlock()
         old?.cancel()
         NSLog("acrylius touchpad: serving \(host)")

@@ -322,13 +322,33 @@ final class AppModel {
         await touchpad(peer, kind: 2, ty: "end", body: Data())
     }
 
+    /// The open stream's last `begin` per peer, replayed to a route that has not had it.
+    private var touchpadBegins: [String: Data] = [:]
+    /// Peers with a touchpad device open through the session.
+    private var touchpadOverSession: Set<String> = []
+
     /// Over USB when this peer is the one plugged in, else through the session.
     private func touchpad(_ peer: FfiPeer, kind: UInt8, ty: String, body: Data) async {
+        let id = peer.deviceId
+        if ty == "begin" { touchpadBegins[id] = body }
+        if ty == "end" { touchpadBegins[id] = nil }
         #if canImport(Network)
-            if usbHost == peer.deviceId, await touchpadServer?.send(kind, body) == true {
+            if usbHost == id,
+               await touchpadServer?.send(kind, body, begin: touchpadBegins[id]) == true
+            {
+                if touchpadOverSession.remove(id) != nil {
+                    await send(peer, cap: capTouchpad(), ty: "end", body: Data())
+                }
                 return
             }
         #endif
+        if ty == "end" {
+            touchpadOverSession.remove(id)
+        } else if touchpadOverSession.insert(id).inserted, ty == "frame",
+                  let begin = touchpadBegins[id]
+        {
+            await send(peer, cap: capTouchpad(), ty: "begin", body: begin)
+        }
         await send(peer, cap: capTouchpad(), ty: ty, body: body)
     }
 
