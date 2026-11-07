@@ -25,8 +25,6 @@
         } } }
       }
     },
-    "%lld dBm" : { "extractionState" : "manual", "localizations" : { "ru" : { "stringUnit" : { "state" : "translated", "value" : "%lld дБм" } } } },
-    "%lld ms" : { "extractionState" : "manual", "localizations" : { "ru" : { "stringUnit" : { "state" : "translated", "value" : "%lld мс" } } } },
     "192.168.1.10:1971" : { "extractionState" : "manual", "localizations" : { "ru" : { "stringUnit" : { "state" : "translated", "value" : "192.168.1.10:1971" } } } },
     "A device" : { "extractionState" : "manual", "localizations" : { "ru" : { "stringUnit" : { "state" : "translated", "value" : "Устройство" } } } },
     "Accept" : { "extractionState" : "manual", "localizations" : { "ru" : { "stringUnit" : { "state" : "translated", "value" : "Принять" } } } },

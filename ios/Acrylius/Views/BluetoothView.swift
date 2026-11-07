@@ -49,7 +49,7 @@ struct BluetoothView: View {
                             HStack {
                                 Text(s.name)
                                 Spacer()
-                                Text("\(s.rssi) dBm").font(.caption.monospaced())
+                                Text(verbatim: "\(s.rssi) dBm").font(.caption.monospaced())
                                     .foregroundStyle(.secondary)
                             }
                             // A service in the GATT database but not the

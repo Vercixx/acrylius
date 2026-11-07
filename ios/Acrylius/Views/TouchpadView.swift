@@ -59,7 +59,8 @@ struct TouchpadView: View {
                                 Text(over)
                             }
                             if let ms = model.lastPingRTTms {
-                                Text("\(Int(ms)) ms")
+                                Text(Duration.milliseconds(Int(ms))
+                                    .formatted(.units(allowed: [.milliseconds], width: .abbreviated)))
                             }
                         }
                     }
