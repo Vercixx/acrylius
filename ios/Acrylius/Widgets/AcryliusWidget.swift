@@ -161,7 +161,7 @@ private struct Seen: View {
     var body: some View {
         Group {
             if let at {
-                Text("Seen ") + Text(at, style: .relative) + Text(" ago")
+                Text("Seen \(at, style: .relative) ago")
             } else {
                 Text("Open the app to connect")
             }
@@ -246,14 +246,14 @@ private struct EmptyStateView: View {
     }
 
     private var title: String {
-        missing == .noSharedContainer ? "Not shared" : "No PC yet"
+        missing == .noSharedContainer ? String(localized: "Not shared") : String(localized: "No PC yet")
     }
 
     private var detail: String {
         // Different actions per case: opening the app won't fix a missing container.
         missing == .noSharedContainer
-            ? "This build cannot share data with the app."
-            : "Pair a computer in Acrylius."
+            ? String(localized: "This build cannot share data with the app.")
+            : String(localized: "Pair a computer in Acrylius.")
     }
 }
 
@@ -297,7 +297,7 @@ struct WakeControl: ControlWidget {
                     pc: PCEntity(id: peer?.deviceId ?? "", name: peer?.name ?? "PC")
                 )
             ) {
-                Label(peer?.name ?? "Wake PC", systemImage: "power")
+                Label(peer?.name ?? String(localized: "Wake PC"), systemImage: "power")
             }
         }
         .displayName("Wake PC")

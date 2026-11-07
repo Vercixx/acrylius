@@ -105,7 +105,7 @@ struct MediaSection: View {
                 ProgressView(value: Double(shownMs), total: Double(max(player.lengthMs, 1)))
                     .tint(.secondary)
             }
-            Text("\(clock(scrubbing.map { UInt64($0) } ?? shownMs)) / \(clock(player.lengthMs))")
+            Text(verbatim: "\(clock(scrubbing.map { UInt64($0) } ?? shownMs)) / \(clock(player.lengthMs))")
                 .font(.caption2.monospacedDigit())
                 .foregroundStyle(.tertiary)
         }
@@ -173,7 +173,7 @@ struct MediaSection: View {
             Image(systemName: "speaker.wave.3.fill").foregroundStyle(.secondary)
             // Whole percents come straight off the wire. Fixed width so digits
             // don't twitch under a dragging thumb.
-            Text("\(Int(dragging.rounded()))%")
+            Text(verbatim: "\(Int(dragging.rounded()))%")
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(.secondary)
                 .frame(width: 40, alignment: .trailing)

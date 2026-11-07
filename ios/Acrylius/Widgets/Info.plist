@@ -14,6 +14,11 @@
     <string>6.0</string>
     <key>CFBundleDevelopmentRegion</key>
     <string>en</string>
+    <key>CFBundleLocalizations</key>
+    <array>
+        <string>en</string>
+        <string>ru</string>
+    </array>
     <key>CFBundleDisplayName</key>
     <string>PC</string>
     <!-- These two must match the app's exactly. A mismatched build number in an

@@ -124,7 +124,7 @@ struct ConfirmPairingView: View {
 
     var body: some View {
         VStack(spacing: 24) {
-            Text(model.pairingPeerName ?? "A device")
+            Text(model.pairingPeerName ?? String(localized: "A device"))
                 .font(.title2)
             Text("wants to pair")
                 .foregroundStyle(.secondary)

@@ -92,7 +92,7 @@ struct SendFileSection: View {
                     ? (try? await item.loadTransferable(type: PickedMovie.self))?.file
                     : (try? await item.loadTransferable(type: PickedStill.self))?.file
                 guard let file else {
-                    model.lastError = "That photo could not be read."
+                    model.lastError = String(localized: "That photo could not be read.")
                     photo = nil
                     return
                 }
@@ -116,7 +116,7 @@ struct SendFileSection: View {
                 let file = try resolve()
                 await model.sendFile(file, to: peer)
             } catch {
-                model.lastError = "That file could not be read: \(error.localizedDescription)"
+                model.lastError = String(localized: "That file could not be read: \(error.localizedDescription)")
             }
         }
     }

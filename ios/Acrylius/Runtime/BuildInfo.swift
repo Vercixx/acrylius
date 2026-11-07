@@ -46,7 +46,7 @@ public struct BuildInfo: Equatable, Sendable {
 
     /// "Development build" rather than blank: a blank row invites a reinstall.
     public var summary: String {
-        guard let commit else { return "Development build" }
+        guard let commit else { return NSLocalizedString("Development build", comment: "") }
         guard let builtAt else { return commit }
         return "\(commit) · \(BuildInfo.when(builtAt))"
     }

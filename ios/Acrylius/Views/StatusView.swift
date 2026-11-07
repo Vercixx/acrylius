@@ -79,7 +79,8 @@ struct StatusView: View {
             Capability(
                 name: name,
                 title: Self.pretty(name),
-                direction: served.contains(name) ? "Send and receive" : "Send only"
+                direction: served.contains(name)
+                    ? String(localized: "Send and receive") : String(localized: "Send only")
             )
         }
     }

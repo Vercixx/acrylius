@@ -98,6 +98,7 @@ targets:
           # the app's phrases.
           - "Shortcuts.swift"
       - path: Acrylius/Widgets
+      - path: Acrylius/Localizable.xcstrings
       # The same generated binding and, through OTHER_LDFLAGS below, the same
       # static library. This is the whole point of the Rust core: two targets
       # that each compile on their own, sharing one compiled protocol rather

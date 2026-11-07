@@ -300,3 +300,31 @@ jobs:
         with:
           name: acrylius-unsigned-ipa
           path: acrylius-unsigned.ipa
+
+      # After the upload, so a missing translation still leaves an IPA to install.
+      # The catalogs are written by hand; this is what finds keys they lack.
+      - name: Every string has a Russian translation
+        run: |
+          set -euo pipefail
+          xcodebuild -exportLocalizations -project ios/Acrylius.xcodeproj \
+            -localizationPath build/loc -exportLanguage ru \
+            -sdk iphoneos -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            > build/loc.log 2>&1 || { tail -60 build/loc.log; exit 1; }
+          python3 - build/loc <<'EOF'
+          import pathlib, sys, xml.etree.ElementTree as ET
+          ns = {"x": "urn:oasis:names:tc:xliff:document:1.2"}
+          missing = []
+          for xliff in pathlib.Path(sys.argv[1]).rglob("*.xliff"):
+              for f in ET.parse(xliff).getroot().iterfind("x:file", ns):
+                  for unit in f.iterfind(".//x:trans-unit", ns):
+                      target = unit.find("x:target", ns)
+                      if target is None or target.get("state") != "translated":
+                          missing.append(f'{f.get("original")}: {unit.get("id")}')
+          for m in missing:
+              print(m)
+          if missing:
+              print(f"::error::{len(missing)} strings have no Russian translation")
+              sys.exit(1)
+          print("all strings translated")
+          EOF

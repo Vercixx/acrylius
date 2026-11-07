@@ -23,10 +23,12 @@ struct BluetoothView: View {
             Section {
                 LabeledContent("State", value: model.ble.managerState)
                 LabeledContent("Permission", value: model.ble.authorization)
-                LabeledContent("Scanning", value: model.ble.scanning ? "yes" : "no")
+                LabeledContent(
+                    "Scanning",
+                    value: model.ble.scanning ? String(localized: "yes") : String(localized: "no"))
                 LabeledContent("Link", value: model.ble.link)
                 if let f = model.ble.fragmentBytes {
-                    LabeledContent("Fragment", value: "\(f) bytes")
+                    LabeledContent("Fragment", value: String(localized: "\(f) bytes"))
                 }
             } header: {
                 Text("Radio")
@@ -38,8 +40,7 @@ struct BluetoothView: View {
                         "No services detected",
                         systemImage: "dot.radiowaves.left.and.right",
                         description: Text(
-                            "The computer advertises only while acryliusd is running "
-                                + "and \"ble.enabled\" is on."
+                            "The computer advertises only while acryliusd is running and \"ble.enabled\" is on."
                         )
                     )
                 } else {

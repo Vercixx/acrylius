@@ -74,7 +74,7 @@ struct DeviceListView: View {
             // An alert on the List, not a `confirmationDialog` on the row: the
             // dialog wants an anchor and the swiped row is sliding away.
             .alert(
-                forgetting.map { "Forget \($0.name)?" } ?? "",
+                forgetting.map { String(localized: "Forget \($0.name)?") } ?? "",
                 isPresented: Binding(
                     get: { forgetting != nil },
                     set: { if !$0 { forgetting = nil } }
@@ -120,14 +120,18 @@ private struct PeerRow: View {
         let features = model.catalog[peer.deviceId]
         switch peer.state {
         case .connecting:
-            return "Connecting…"
+            return String(localized: "Connecting…")
         case .unreachable:
-            if features.canWake { return "Asleep or away, can be woken" }
-            return "Not connected"
+            if features.canWake { return String(localized: "Asleep or away, can be woken") }
+            return String(localized: "Not connected")
         case .reachable:
             var parts: [String] = []
-            if let session = features.session { parts.append(session.locked ? "Locked" : "Unlocked") }
-            if features.canRunCommands { parts.append("\(features.commands.count) commands") }
+            if let session = features.session {
+                parts.append(session.locked ? String(localized: "Locked") : String(localized: "Unlocked"))
+            }
+            if features.canRunCommands {
+                parts.append(String(localized: "\(features.commands.count) commands"))
+            }
             return parts.isEmpty ? peer.platform : parts.joined(separator: " · ")
         }
     }

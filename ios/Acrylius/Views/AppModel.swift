@@ -51,10 +51,10 @@ final class AppModel {
 
         var text: String {
             switch self {
-            case .starting: "Starting…"
-            case .failedToStart: "Could not start"
-            case .noDevices: "No devices paired"
-            case .ready: "Ready"
+            case .starting: String(localized: "Starting…")
+            case .failedToStart: String(localized: "Could not start")
+            case .noDevices: String(localized: "No devices paired")
+            case .ready: String(localized: "Ready")
             }
         }
     }
@@ -236,12 +236,12 @@ final class AppModel {
     /// Locking deliberately does not; keep the asymmetry.
     @discardableResult
     func unlock(_ peer: FfiPeer) async -> Bool {
-        guard await confirmIdentity(reason: "Unlock \(peer.name)") else { return false }
+        guard await confirmIdentity(reason: String(localized: "Unlock \(peer.name)")) else { return false }
         await send(peer, cap: capSession(), ty: "unlock", body: Data())
         let ok = await awaitScreen(peer, locked: false)
         if !ok {
             // logind only emits a signal; some lockers ignore it.
-            lastError = "\(peer.name) did not unlock. Possible reason is that the locker does not support unlocking."
+            lastError = String(localized: "\(peer.name) did not unlock. Possible reason is that the locker does not support unlocking.")
         }
         return ok
     }
@@ -389,7 +389,7 @@ final class AppModel {
         // "push", not "changed": the latter is gated on a switch this phone
         // keeps off, and silently discarded a person pressing Paste.
         await send(peer, cap: capClipboard(), ty: "push", body: Data(text.utf8))
-        activity = "Sent to \(peer.name)"
+        activity = String(localized: "Sent to \(peer.name)")
         return true
     }
 
@@ -425,7 +425,7 @@ final class AppModel {
         sending[offer.transfer] = offer.name
         await send(peer, cap: capShare(), ty: "offer",
                    body: encodeShareOffer(offer: offer))
-        activity = "Offered \(offer.name)"
+        activity = String(localized: "Offered \(offer.name)")
     }
 
     /// Transfers this phone has agreed to and not yet seen the end of.
@@ -434,14 +434,14 @@ final class AppModel {
     func accept(_ offer: IncomingOffer) async {
         accepting.insert(offer.transfer)
         await answer(offer, ty: "accept")
-        activity = "Receiving \(offer.name)"
+        activity = String(localized: "Receiving \(offer.name)")
     }
 
     func decline(_ offer: IncomingOffer) async {
         incoming.removeAll { $0.transfer == offer.transfer }
         accepting.remove(offer.transfer)
         await answer(offer, ty: "reject")
-        activity = "Declined \(offer.name)"
+        activity = String(localized: "Declined \(offer.name)")
     }
 
     private func answer(_ offer: IncomingOffer, ty: String) async {
@@ -461,7 +461,7 @@ final class AppModel {
         var error: NSError?
         guard context.canEvaluatePolicy(.deviceOwnerAuthentication, error: &error) else {
             // No passcode set: proceed and say so rather than refuse outright.
-            lastError = "You cannot use session controls if your device has no passcode."
+            lastError = String(localized: "You cannot use session controls if your device has no passcode.")
             return true
         }
         return (try? await context.evaluatePolicy(.deviceOwnerAuthentication,
@@ -534,7 +534,7 @@ final class AppModel {
         case let .pairingComplete(_, name):
             pairingSas = nil
             status = .ready
-            activity = "Paired with \(name)"
+            activity = String(localized: "Paired with \(name)")
             Task { await refresh() }
         case let .revoked(peer):
             // Dropped here rather than re-read; a round trip would race.
@@ -542,9 +542,9 @@ final class AppModel {
             publishSnapshot()
         case let .pairingFailed(reason):
             pairingSas = nil
-            lastError = reason
+            lastError = fromCore(reason)
         case let .peerReachable(peer, name):
-            activity = "Connected to \(name)"
+            activity = String(localized: "Connected to \(name)")
             Task {
                 await refresh()
                 await reacquaint(with: peer)
@@ -572,7 +572,7 @@ final class AppModel {
                 incoming.append(IncomingOffer(
                     transfer: offer.transfer, peer: peer,
                     name: bulkSafeName(offered: offer.name), size: offer.size))
-                activity = "\(offer.name) offered"
+                activity = String(localized: "\(offer.name) offered")
             }
             if cap == capShare(), ty == "finished" || ty == "reject",
                let end = try? decodeShareFinished(body: body) {
@@ -582,14 +582,15 @@ final class AppModel {
                 incoming.removeAll { $0.transfer == end.transfer }
                 accepting.remove(end.transfer)
                 let sent = sending.removeValue(forKey: end.transfer)
-                let name = sent ?? offered ?? "the file"
+                let name = sent ?? offered ?? String(localized: "the file")
                 if ty == "reject" {
-                    activity = "\(name) was refused"
+                    activity = String(localized: "\(name) was refused")
                 } else if end.ok {
-                    activity = sent == nil ? "Saved \(name)" : "Sent \(name)"
+                    activity = sent == nil
+                        ? String(localized: "Saved \(name)") : String(localized: "Sent \(name)")
                 } else {
-                    activity = "\(name) failed"
-                    lastError = end.detail.isEmpty ? nil : end.detail
+                    activity = String(localized: "\(name) failed")
+                    lastError = end.detail.isEmpty ? nil : fromCore(end.detail)
                 }
             }
             // A fetched clipboard value goes onto the pasteboard: writing is
@@ -599,13 +600,13 @@ final class AppModel {
                 #if canImport(UIKit)
                 UIPasteboard.general.string = value.text
                 #endif
-                activity = "Copied to this phone"
+                activity = String(localized: "Copied to this phone")
             }
         case let .error(peer, code, detail):
             // Local Network denial is silent — iOS offers no API to query it.
             lastError = detail.contains("local network")
-                ? "Allow local network access in Settings → Privacy → Local Network."
-                : "\(code): \(detail)"
+                ? String(localized: "Allow local network access in Settings → Privacy → Local Network.")
+                : "\(errorText(code: code)): \(fromCore(detail))"
             // `nil` peer means the failure belongs to this phone.
             if let peer {
                 catalog.note(error: detail, for: peer)
@@ -619,6 +620,26 @@ final class AppModel {
         #else
         return "iPhone"
         #endif
+    }
+}
+
+/// Translates fixed English text from the Rust core; unknown text comes back unchanged.
+func fromCore(_ text: String) -> String {
+    NSLocalizedString(text, comment: "")
+}
+
+private func errorText(code: String) -> String {
+    switch code {
+    case "cap_not_negotiated": String(localized: "Not supported by the other device")
+    case "unknown_type": String(localized: "Unknown request")
+    case "bad_body": String(localized: "Malformed message")
+    case "not_allowed": String(localized: "Not allowed")
+    case "effect_failed": String(localized: "Could not do that")
+    case "not_paired": String(localized: "Not paired")
+    case "too_large": String(localized: "Too large")
+    case "timeout": String(localized: "Timed out")
+    case "internal": String(localized: "Internal error")
+    default: code
     }
 }
 

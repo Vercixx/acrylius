@@ -104,7 +104,11 @@ struct TaskButton<Label: View>: View {
 }
 
 extension TaskButton where Label == Text {
-    init(_ title: String, role: ButtonRole? = nil, action: @escaping () async -> Bool) {
+    init(_ title: LocalizedStringKey, role: ButtonRole? = nil, action: @escaping () async -> Bool) {
+        self.init(role: role, action: action) { Text(title) }
+    }
+
+    init<S: StringProtocol>(_ title: S, role: ButtonRole? = nil, action: @escaping () async -> Bool) {
         self.init(role: role, action: action) { Text(title) }
     }
 }

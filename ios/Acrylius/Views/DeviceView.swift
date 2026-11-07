@@ -10,7 +10,7 @@ func carrying(_ kind: FfiTransportKind?) -> String? {
     switch kind {
     case .tcpLan: "Wi-Fi"
     case .bleGatt: "Bluetooth"
-    case .unixLoopback: "This device"
+    case .unixLoopback: String(localized: "This device")
     case let .custom(name): name
     case nil: nil
     }
@@ -35,7 +35,7 @@ struct DeviceView: View {
             Section {
                 switch peer.state {
                 case .reachable:
-                    LabeledContent("Status", value: "Connected")
+                    LabeledContent("Status", value: String(localized: "Connected"))
                 case .connecting:
                     LabeledContent("Status") {
                         HStack(spacing: 6) {
@@ -44,7 +44,7 @@ struct DeviceView: View {
                         }
                     }
                 case .unreachable:
-                    LabeledContent("Status", value: "Not connected")
+                    LabeledContent("Status", value: String(localized: "Not connected"))
                     TaskButton("Try again") { await model.retry(peer) }
                 }
                 if let over = carrying(peer.transport) {
@@ -54,7 +54,7 @@ struct DeviceView: View {
                 if peer.state == .unreachable {
                     VStack(alignment: .leading, spacing: 4) {
                         if let trouble = peer.trouble {
-                            Text(trouble)
+                            Text(fromCore(trouble))
                         }
                         Text("Still trying every few seconds.")
                     }
@@ -63,7 +63,9 @@ struct DeviceView: View {
 
             if let session = features.session {
                 Section {
-                    LabeledContent("Screen", value: session.locked ? "Locked" : "Unlocked")
+                    LabeledContent(
+                        "Screen",
+                        value: session.locked ? String(localized: "Locked") : String(localized: "Unlocked"))
                     TaskButton("Lock") { await model.lock(peer) }
                         .disabled(session.locked)
                     TaskButton("Unlock") { await model.unlock(peer) }
@@ -88,7 +90,7 @@ struct DeviceView: View {
                     TaskButton("Wake up") {
                         let sent = await model.wake(peer)
                         if !sent {
-                            model.lastError = "Could not send a wake packet."
+                            model.lastError = String(localized: "Could not send a wake packet.")
                         }
                         return sent
                     }
@@ -132,7 +134,7 @@ struct DeviceView: View {
                 Text("Pushes local clipboard to \(peer.name)")
             }
 
-            if let error = features.lastError ?? model.lastError {
+            if let error = features.lastError.map(fromCore) ?? model.lastError {
                 Section {
                     Text(error).font(.footnote).foregroundStyle(.secondary)
                 }

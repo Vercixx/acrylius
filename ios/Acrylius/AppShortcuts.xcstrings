@@ -1,0 +1,30 @@
+{
+  "sourceLanguage" : "en",
+  "strings" : {
+    "Lock my PC with ${applicationName}" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ru" : { "stringUnit" : { "state" : "translated", "value" : "Заблокируй мой ПК в ${applicationName}" } }
+      }
+    },
+    "Unlock my PC with ${applicationName}" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ru" : { "stringUnit" : { "state" : "translated", "value" : "Разблокируй мой ПК в ${applicationName}" } }
+      }
+    },
+    "Wake my PC with ${applicationName}" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ru" : { "stringUnit" : { "state" : "translated", "value" : "Разбуди мой ПК в ${applicationName}" } }
+      }
+    },
+    "Wake up my computer with ${applicationName}" : {
+      "extractionState" : "manual",
+      "localizations" : {
+        "ru" : { "stringUnit" : { "state" : "translated", "value" : "Включи мой компьютер в ${applicationName}" } }
+      }
+    }
+  },
+  "version" : "1.0"
+}
