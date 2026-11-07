@@ -4,18 +4,14 @@
     "CFBundleDisplayName" : {
       "extractionState" : "manual",
       "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "PC" } },
         "ru" : { "stringUnit" : { "state" : "translated", "value" : "ПК" } }
-      }
-    },
-    "CFBundleName" : {
-      "extractionState" : "manual",
-      "localizations" : {
-        "ru" : { "stringUnit" : { "state" : "translated", "value" : "AcryliusWidgets" } }
       }
     },
     "NSLocalNetworkUsageDescription" : {
       "extractionState" : "manual",
       "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Acrylius wakes your PC on this network. It never leaves your network." } },
         "ru" : { "stringUnit" : { "state" : "translated", "value" : "Acrylius будит ваш ПК в этой сети. Данные не покидают вашу сеть." } }
       }
     }

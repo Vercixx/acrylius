@@ -4,30 +4,28 @@
     "CFBundleDisplayName" : {
       "extractionState" : "manual",
       "localizations" : {
-        "ru" : { "stringUnit" : { "state" : "translated", "value" : "Acrylius" } }
-      }
-    },
-    "CFBundleName" : {
-      "extractionState" : "manual",
-      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Acrylius" } },
         "ru" : { "stringUnit" : { "state" : "translated", "value" : "Acrylius" } }
       }
     },
     "NSBluetoothAlwaysUsageDescription" : {
       "extractionState" : "manual",
       "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Acrylius reaches your computer over Bluetooth when you are not on the same Wi-Fi." } },
         "ru" : { "stringUnit" : { "state" : "translated", "value" : "Acrylius связывается с компьютером по Bluetooth, когда вы не в одной сети Wi-Fi." } }
       }
     },
     "NSFaceIDUsageDescription" : {
       "extractionState" : "manual",
       "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Face ID confirms it is you before unlocking your PC." } },
         "ru" : { "stringUnit" : { "state" : "translated", "value" : "Face ID подтверждает, что это вы, перед разблокировкой ПК." } }
       }
     },
     "NSLocalNetworkUsageDescription" : {
       "extractionState" : "manual",
       "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Acrylius finds your PC on this network. It never leaves your network." } },
         "ru" : { "stringUnit" : { "state" : "translated", "value" : "Acrylius находит ваш ПК в этой сети. Данные не покидают вашу сеть." } }
       }
     }

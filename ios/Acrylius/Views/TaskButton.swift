@@ -108,6 +108,8 @@ extension TaskButton where Label == Text {
         self.init(role: role, action: action) { Text(title) }
     }
 
+    /// Disfavored so a literal title picks the `LocalizedStringKey` init, as with `Text`.
+    @_disfavoredOverload
     init<S: StringProtocol>(_ title: S, role: ButtonRole? = nil, action: @escaping () async -> Bool) {
         self.init(role: role, action: action) { Text(title) }
     }
