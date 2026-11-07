@@ -94,7 +94,7 @@ echo "built  $(basename "$NAMED")  $SIZE"
 # A device line is unindented, with an indented fingerprint below it; names
 # may contain spaces, so the id is the first field and state is the last.
 ios_devices() {
-    acryliusctl device list 2>/dev/null | awk '!/^[[:space:]]/ && /\(ios\)/ { print $1, $NF }'
+    LC_ALL=C.UTF-8 acryliusctl device list 2>/dev/null | awk '!/^[[:space:]]/ && /\(ios\)/ { print $1, $NF }'
 }
 
 if [ -z "$DEVICE" ]; then
