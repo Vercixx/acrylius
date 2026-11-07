@@ -1,5 +1,8 @@
 use std::sync::OnceLock;
 
+use clap::Command;
+use clap::builder::StyledStr;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Lang {
     En,
@@ -43,6 +46,117 @@ pub fn ru_plural<'a>(n: u64, one: &'a str, few: &'a str, many: &'a str) -> &'a s
     }
 }
 
+pub type HelpTable = &'static [(&'static str, &'static str)];
+
+const CLAP_BUILTIN: HelpTable = &[
+    ("Print help", "Показать справку"),
+    (
+        "Print help (see more with '--help')",
+        "Показать справку (подробнее: --help)",
+    ),
+    (
+        "Print help (see a summary with '-h')",
+        "Показать справку (кратко: -h)",
+    ),
+    ("Print version", "Показать версию"),
+    (
+        "Print this message or the help of the given subcommand(s)",
+        "Показать эту справку или справку по командам",
+    ),
+    (
+        "Print help for the subcommand(s)",
+        "Показать справку по командам",
+    ),
+];
+
+fn lookup(table: HelpTable, text: &StyledStr) -> Option<&'static str> {
+    let text = text.to_string();
+    table
+        .iter()
+        .chain(CLAP_BUILTIN)
+        .find(|(en, _)| *en == text)
+        .map(|(_, ru)| *ru)
+}
+
+/// Swaps clap's English help for `table`'s Russian under a Russian locale.
+/// Text missing from `table` stays English; `untranslated_help` finds it.
+#[must_use]
+pub fn localize_help(cmd: Command, table: HelpTable) -> Command {
+    localize_help_in(lang(), cmd, table)
+}
+
+fn localize_help_in(lang: Lang, mut cmd: Command, table: HelpTable) -> Command {
+    if lang != Lang::Ru {
+        return cmd;
+    }
+    cmd.build();
+    russian_help(cmd, table)
+}
+
+fn russian_help(cmd: Command, table: HelpTable) -> Command {
+    let about = cmd.get_about().and_then(|s| lookup(table, s));
+    let long_about = cmd.get_long_about().and_then(|s| lookup(table, s));
+    let mut cmd = cmd
+        .help_template(
+            "{before-help}{about-with-newline}\nИспользование: {usage}\n\n{all-args}{after-help}",
+        )
+        .subcommand_help_heading("Команды")
+        .mut_args(|arg| {
+            let help = arg.get_help().and_then(|s| lookup(table, s));
+            let long_help = arg.get_long_help().and_then(|s| lookup(table, s));
+            let heading = if arg.is_positional() {
+                "Аргументы"
+            } else {
+                "Параметры"
+            };
+            let mut arg = arg.help_heading(heading);
+            if let Some(help) = help {
+                arg = arg.help(help);
+            }
+            if let Some(long_help) = long_help {
+                arg = arg.long_help(long_help);
+            }
+            arg
+        })
+        .mut_subcommands(|sub| russian_help(sub, table));
+    if let Some(about) = about {
+        cmd = cmd.about(about);
+    }
+    if let Some(long_about) = long_about {
+        cmd = cmd.long_about(long_about);
+    }
+    cmd
+}
+
+/// Every help text in `cmd`'s tree that `table` has no Russian for.
+#[must_use]
+pub fn untranslated_help(mut cmd: Command, table: HelpTable) -> Vec<String> {
+    cmd.build();
+    let mut missing = Vec::new();
+    collect_untranslated(&cmd, table, &mut missing);
+    missing.sort();
+    missing.dedup();
+    missing
+}
+
+fn collect_untranslated(cmd: &Command, table: HelpTable, missing: &mut Vec<String>) {
+    let texts = [cmd.get_about(), cmd.get_long_about()]
+        .into_iter()
+        .chain(
+            cmd.get_arguments()
+                .flat_map(|a| [a.get_help(), a.get_long_help()]),
+        )
+        .flatten();
+    for text in texts {
+        if lookup(table, text).is_none() {
+            missing.push(text.to_string());
+        }
+    }
+    for sub in cmd.get_subcommands() {
+        collect_untranslated(sub, table, missing);
+    }
+}
+
 /// `cfg!(test)` expands in the calling crate, so every crate's unit tests see English.
 #[macro_export]
 macro_rules! tr {
@@ -58,6 +172,69 @@ macro_rules! tr {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::Arg;
+
+    const TABLE: HelpTable = &[
+        ("Talk to it", "Поговорить"),
+        ("Be loud", "Громко"),
+        ("Leave", "Уйти"),
+    ];
+
+    fn sample() -> Command {
+        Command::new("demo")
+            .about("Talk to it")
+            .arg(Arg::new("loud").long("loud").help("Be loud").num_args(0))
+            .arg(Arg::new("quiet").long("quiet").help("Be quiet").num_args(0))
+            .subcommand(Command::new("go").about("Leave"))
+    }
+
+    fn rendered(lang: Lang, args: &[&str]) -> String {
+        let err = localize_help_in(lang, sample(), TABLE)
+            .try_get_matches_from(args)
+            .unwrap_err();
+        err.render().to_string()
+    }
+
+    #[test]
+    fn russian_help_replaces_known_text_and_keeps_the_rest() {
+        let help = rendered(Lang::Ru, &["demo", "--help"]);
+        for want in [
+            "Поговорить",
+            "Громко",
+            "Уйти",
+            "Be quiet",
+            "Показать справку",
+            "Использование:",
+            "Команды:",
+            "Параметры:",
+        ] {
+            assert!(help.contains(want), "{want:?} missing from:\n{help}");
+        }
+        assert!(
+            !help.contains("Be loud") && !help.contains("Usage:"),
+            "{help}"
+        );
+        let sub = rendered(Lang::Ru, &["demo", "go", "--help"]);
+        assert!(
+            sub.contains("Уйти") && sub.contains("Использование:"),
+            "{sub}"
+        );
+    }
+
+    #[test]
+    fn english_help_is_left_alone() {
+        let help = rendered(Lang::En, &["demo", "--help"]);
+        assert!(
+            help.contains("Be loud") && help.contains("Usage:"),
+            "{help}"
+        );
+        assert!(!help.contains("Громко"), "{help}");
+    }
+
+    #[test]
+    fn untranslated_help_names_only_what_is_missing() {
+        assert_eq!(untranslated_help(sample(), TABLE), ["Be quiet"]);
+    }
 
     #[test]
     fn the_first_set_variable_decides() {

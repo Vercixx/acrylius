@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 
 use anyhow::Context;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use std::io::{IsTerminal, Write};
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -294,6 +294,122 @@ enum FileCmd {
 use acryliusd::ipc::{Request, Response};
 use acryliusd::tr;
 
+const HELP_RU: acryliusd::lang::HelpTable = &[
+    (
+        "Talk to the local acrylius daemon",
+        "Управление локальным демоном acrylius",
+    ),
+    (
+        "Print what came back as JSON instead of a table",
+        "Выводить ответ в JSON, а не таблицей",
+    ),
+    (
+        "Daemon identity, port and negotiated capabilities",
+        "Идентификатор демона, порт и согласованные возможности",
+    ),
+    (
+        "Open a pairing window, or answer one",
+        "Начать сопряжение или ответить на запрос",
+    ),
+    (
+        "The computers this machine knows",
+        "Устройства, известные этому компьютеру",
+    ),
+    (
+        "A peer's desktop session",
+        "Сеанс рабочего стола устройства",
+    ),
+    ("A peer's clipboard", "Буфер обмена устройства"),
+    ("What is playing on a peer", "Что играет на устройстве"),
+    (
+        "The commands a peer offers",
+        "Команды, которые предлагает устройство",
+    ),
+    ("Files, in either direction", "Файлы в обе стороны"),
+    (
+        "Ask a peer to wake a third machine by MAC",
+        "Попросить устройство разбудить другой компьютер по MAC",
+    ),
+    (
+        "Accept without asking. For scripts; a human should compare the codes",
+        "Принять без вопроса. Для скриптов; человеку стоит сверить коды",
+    ),
+    (
+        "Accept the device currently waiting, after checking the codes match",
+        "Принять ожидающее устройство, сверив коды",
+    ),
+    ("Refuse it", "Отклонить его"),
+    (
+        "Dial a device and try to pair with it",
+        "Подключиться к устройству и выполнить сопряжение",
+    ),
+    ("`host:port`", "`хост:порт`"),
+    (
+        "Accept without asking. For scripts",
+        "Принять без вопроса. Для скриптов",
+    ),
+    ("Paired devices", "Сопряжённые устройства"),
+    (
+        "Machines on this network that are not paired with",
+        "Несопряжённые компьютеры в этой сети",
+    ),
+    (
+        "Forget one. Its next connection is a stranger's",
+        "Забыть устройство. Следующее подключение будет как от чужого",
+    ),
+    (
+        "Open a session, and say why if it will not open",
+        "Открыть соединение и объяснить, если оно не открывается",
+    ),
+    (
+        "Skip discovery and dial this `host:port` directly, for a network that filters mDNS",
+        "Не искать, а подключиться прямо к `хост:порт`, для сети, где режется mDNS",
+    ),
+    ("Round-trip a ping", "Отправить ping и дождаться ответа"),
+    ("Is it locked?", "Заблокирован ли экран?"),
+    (
+        "Read a peer's clipboard",
+        "Прочитать буфер обмена устройства",
+    ),
+    ("Send it text", "Отправить в него текст"),
+    (
+        "Which player, by the id shown in `play status`",
+        "Плеер по id из `play status`",
+    ),
+    ("What is playing, and on what", "Что играет и где"),
+    (
+        "Whichever of the two it is not doing",
+        "Переключить воспроизведение и паузу",
+    ),
+    (
+        "Move by a number of milliseconds, which may be negative",
+        "Сдвинуть на число миллисекунд, можно отрицательное",
+    ),
+    ("Jump to a millisecond", "Перейти к миллисекунде"),
+    (
+        "Set the volume, 0 to 100. With no `--player` this moves the machine's own output, not a player's",
+        "Задать громкость от 0 до 100. Без `--player` меняет громкость системы, а не плеера",
+    ),
+    (
+        "What a peer is willing to run",
+        "Что устройство готово запустить",
+    ),
+    (
+        "Run one of them, by the id `cmd list` shows",
+        "Запустить команду по id из `cmd list`",
+    ),
+    (
+        "Offer a file to a peer. It decides whether to take it",
+        "Предложить файл устройству. Оно решает, принять ли его",
+    ),
+    (
+        "Files offered to this machine that nobody has answered yet",
+        "Файлы, предложенные этому компьютеру и ещё без ответа",
+    ),
+    ("Take one", "Принять"),
+    ("Refuse one", "Отклонить"),
+];
+
 /// `println!` panics when its pipe closes (Rust ignores SIGPIPE); dropping the
 /// write error ends output quietly instead.
 macro_rules! outln {
@@ -315,7 +431,8 @@ fn socket_path(state: Option<PathBuf>) -> PathBuf {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let args = Args::parse();
+    let matches = acryliusd::lang::localize_help(Args::command(), HELP_RU).get_matches();
+    let args = Args::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
     let path = socket_path(args.state);
     let stream = UnixStream::connect(&path).await.with_context(|| {
         tr!(
@@ -652,6 +769,12 @@ mod tests {
             std::ffi::OsStr::new("/home/someone"),
             std::path::Path::new("/home/someone/photos"),
         )
+    }
+
+    #[test]
+    fn every_help_text_has_a_russian_one() {
+        let missing = acryliusd::lang::untranslated_help(Args::command(), HELP_RU);
+        assert!(missing.is_empty(), "no Russian for: {missing:#?}");
     }
 
     #[test]

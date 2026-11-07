@@ -28,15 +28,57 @@ use acrylius_rt::store::{FileStore, Store};
 use acrylius_rt::tcp::TcpTransport;
 use acrylius_rt::{Runtime, transport::Transport};
 use acryliusd::tr;
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches};
 use tokio::sync::{Mutex, broadcast};
+
+const HELP_RU: acryliusd::lang::HelpTable = &[
+    ("The acrylius daemon", "Демон acrylius"),
+    (
+        "TCP port to listen on. Override to run a second instance on one machine",
+        "TCP-порт для приёма. Смените, чтобы запустить второй экземпляр на одном компьютере",
+    ),
+    (
+        "Where identity, peers and the control socket live",
+        "Где хранятся ключи, устройства и управляющий сокет",
+    ),
+    (
+        "The name peers see. Advisory only; never used for a policy decision",
+        "Имя, которое видят устройства. Только для показа, на права не влияет",
+    ),
+    ("Where the config lives", "Где лежит конфиг"),
+    ("Config file maintenance", "Обслуживание файла конфигурации"),
+    (
+        "Print where the config file lives",
+        "Показать путь к файлу конфигурации",
+    ),
+    (
+        "Print every directory the daemon must be able to write to, one per line",
+        "Показать все папки, куда демон должен иметь право писать, по одной в строке",
+    ),
+    (
+        "Print every directory the daemon must be able to write to, one per line.\n\nFor the systemd unit's `ReadWritePaths=`: the download directory is a runtime setting, so no shipped unit can name it in advance.",
+        "Показать все папки, куда демон должен иметь право писать, по одной в строке.\n\nДля `ReadWritePaths=` в юните systemd: папка загрузок задаётся при работе, поэтому готовый юнит не может знать её заранее.",
+    ),
+    (
+        "Write a commented config, if there is none. Never overwrites",
+        "Записать конфиг с комментариями, если его нет. Никогда не перезаписывает",
+    ),
+    (
+        "Add settings a newer version introduced, leaving everything else alone",
+        "Добавить настройки из новой версии, не трогая остальное",
+    ),
+    (
+        "Parse it and report anything wrong, without starting",
+        "Разобрать конфиг и сообщить об ошибках, не запуская демон",
+    ),
+];
 
 const TCP: TransportId = TransportId(1);
 /// Higher than TCP on purpose: the core tries routes in ascending order, so
 /// Wi-Fi is preferred and BLE is the fallback.
 const BLE: TransportId = TransportId(2);
 
-#[derive(Parser, Debug)]
+#[derive(clap::Parser, Debug)]
 #[command(name = "acryliusd", version, about = "The acrylius daemon")]
 struct Args {
     /// TCP port to listen on. Override to run a second instance on one machine.
@@ -368,7 +410,8 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
-    let args = Args::parse();
+    let matches = acryliusd::lang::localize_help(Args::command(), HELP_RU).get_matches();
+    let args = Args::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
     let config_path = args
         .config
         .clone()
@@ -758,4 +801,15 @@ async fn main() -> anyhow::Result<()> {
         _ = term.recv() => tracing::info!("shutting down"),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_help_text_has_a_russian_one() {
+        let missing = acryliusd::lang::untranslated_help(Args::command(), HELP_RU);
+        assert!(missing.is_empty(), "no Russian for: {missing:#?}");
+    }
 }
