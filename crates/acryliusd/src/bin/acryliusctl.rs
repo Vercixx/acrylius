@@ -292,6 +292,7 @@ enum FileCmd {
 }
 
 use acryliusd::ipc::{Request, Response};
+use acryliusd::tr;
 
 /// `println!` panics when its pipe closes (Rust ignores SIGPIPE); dropping the
 /// write error ends output quietly instead.
@@ -316,9 +317,13 @@ fn socket_path(state: Option<PathBuf>) -> PathBuf {
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     let path = socket_path(args.state);
-    let stream = UnixStream::connect(&path)
-        .await
-        .with_context(|| format!("no daemon at {}; is acryliusd running?", path.display()))?;
+    let stream = UnixStream::connect(&path).await.with_context(|| {
+        tr!(
+            "no daemon at {}; is acryliusd running?",
+            "демон не найден по адресу {}; acryliusd запущен?",
+            path.display()
+        )
+    })?;
     let (rd, mut wr) = stream.into_split();
     let mut lines = BufReader::new(rd).lines();
 
@@ -426,50 +431,72 @@ async fn main() -> anyhow::Result<()> {
             break;
         }
         match response {
-            Response::Ok => outln!("ok"),
+            Response::Ok => outln!("{}", tr!("ok", "готово")),
             Response::Report { report } => outln!("{}", report.render()),
             Response::Status(s) => {
                 outln!("{}  {}", s.name, s.device_id);
-                outln!("  fingerprint  {}", s.fingerprint);
-                outln!("  port         {}", s.port);
-                outln!("  peers        {}", s.peers);
-                outln!("  accepts      {}", join(&s.caps_in));
-                outln!("  sends        {}", join(&s.caps_out));
+                outln!(
+                    "{}",
+                    tr!("  fingerprint  {}", "  отпечаток    {}", s.fingerprint)
+                );
+                outln!("{}", tr!("  port         {}", "  порт         {}", s.port));
+                outln!("{}", tr!("  peers        {}", "  устройства   {}", s.peers));
+                outln!(
+                    "{}",
+                    tr!("  accepts      {}", "  принимает    {}", join(&s.caps_in))
+                );
+                outln!(
+                    "{}",
+                    tr!("  sends        {}", "  отправляет   {}", join(&s.caps_out))
+                );
             }
             Response::Devices { devices } if devices.is_empty() => {
-                outln!("no paired devices");
+                outln!("{}", tr!("no paired devices", "нет сопряжённых устройств"));
             }
             Response::Devices { devices } => {
                 for x in devices {
+                    let reach = if x.reachable {
+                        tr!("reachable", "доступно")
+                    } else {
+                        tr!("unreachable", "недоступно")
+                    };
+                    outln!("{}  {} ({})  {reach}", x.device_id, x.name, x.platform);
                     outln!(
-                        "{}  {} ({})  {}",
-                        x.device_id,
-                        x.name,
-                        x.platform,
-                        if x.reachable {
-                            "reachable"
-                        } else {
-                            "unreachable"
-                        }
+                        "{}",
+                        tr!("  fingerprint {}", "  отпечаток {}", x.fingerprint)
                     );
-                    outln!("  fingerprint {}", x.fingerprint);
                 }
             }
             Response::Nearby { nearby } if nearby.is_empty() => {
-                outln!("nothing nearby that is not already paired");
+                outln!(
+                    "{}",
+                    tr!(
+                        "nothing nearby that is not already paired",
+                        "рядом нет несопряжённых устройств"
+                    )
+                );
             }
             Response::Nearby { nearby } => {
                 for x in nearby {
+                    let busy = if x.pairing {
+                        tr!("  (busy pairing)", "  (занято сопряжением)")
+                    } else {
+                        String::new()
+                    };
+                    outln!("{}  {}{busy}", x.addr, x.name);
                     outln!(
-                        "{}  {}{}",
-                        x.addr,
-                        x.name,
-                        if x.pairing { "  (busy pairing)" } else { "" }
+                        "{}",
+                        tr!("  fingerprint {}", "  отпечаток {}", x.fingerprint)
                     );
-                    outln!("  fingerprint {}", x.fingerprint);
                 }
                 outln!();
-                outln!("Pair with one: acryliusctl pair with <address>");
+                outln!(
+                    "{}",
+                    tr!(
+                        "Pair with one: acryliusctl pair with <address>",
+                        "Сопряжение: acryliusctl pair with <адрес>"
+                    )
+                );
             }
             Response::Event { text } => outln!("{text}"),
             Response::Confirm {
@@ -478,21 +505,52 @@ async fn main() -> anyhow::Result<()> {
                 sas,
             } => {
                 outln!();
-                outln!("{name} wants to pair.");
-                outln!("  fingerprint  {fingerprint}");
+                outln!(
+                    "{}",
+                    tr!(
+                        "{name} wants to pair.",
+                        "{name} хочет выполнить сопряжение."
+                    )
+                );
+                outln!(
+                    "{}",
+                    tr!("  fingerprint  {fingerprint}", "  отпечаток  {fingerprint}")
+                );
                 outln!();
-                outln!("  It should be showing:  {sas}");
+                outln!(
+                    "{}",
+                    tr!(
+                        "  It should be showing:  {sas}",
+                        "  На экране должно быть:  {sas}"
+                    )
+                );
                 outln!();
                 let accept = if assume_yes {
-                    outln!("  accepting (--yes)");
+                    outln!("{}", tr!("  accepting (--yes)", "  принимаю (--yes)"));
                     true
                 } else if std::io::stdin().is_terminal() {
-                    prompt("  Do the codes match? [Y/n] ").await?
+                    prompt(&tr!(
+                        "  Do the codes match? [Y/n] ",
+                        "  Коды совпадают? [Y/n] "
+                    ))
+                    .await?
                 } else {
                     // Piped or backgrounded: nobody to ask, so say what to run
                     // instead of blocking on a read that will never return.
-                    outln!("  Not a terminal, so nothing to ask.");
-                    outln!("  Run `acryliusctl pair approve` (or `pair deny`) to answer.");
+                    outln!(
+                        "{}",
+                        tr!(
+                            "  Not a terminal, so nothing to ask.",
+                            "  Это не терминал, спросить некого."
+                        )
+                    );
+                    outln!(
+                        "{}",
+                        tr!(
+                            "  Run `acryliusctl pair approve` (or `pair deny`) to answer.",
+                            "  Ответьте командой `acryliusctl pair approve` (или `pair deny`)."
+                        )
+                    );
                     continue;
                 };
                 // A fresh connection: this one is busy streaming the pairing.
@@ -502,7 +560,7 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
             Response::Error { message } => {
-                eprintln!("error: {message}");
+                eprintln!("{}", tr!("error: {message}", "ошибка: {message}"));
                 failed = true;
             }
         }
@@ -525,8 +583,16 @@ async fn prompt(question: &str) -> anyhow::Result<bool> {
     let mut line = String::new();
     let mut reader = tokio::io::BufReader::new(tokio::io::stdin());
     reader.read_line(&mut line).await?;
-    let answer = line.trim().to_ascii_lowercase();
-    Ok(!(answer.starts_with('n')))
+    Ok(!is_no(&line))
+}
+
+/// "н" starts "нет"; "т" is the N key on a Russian layout. Either refuses the pairing.
+fn is_no(answer: &str) -> bool {
+    answer
+        .trim()
+        .chars()
+        .next()
+        .is_some_and(|c| matches!(c.to_lowercase().next(), Some('n' | 'н' | 'т')))
 }
 
 async fn answer(path: &std::path::Path, accept: bool) -> anyhow::Result<()> {
@@ -569,7 +635,7 @@ fn resolve(path: &str, home: &std::ffi::OsStr, cwd: &std::path::Path) -> PathBuf
 
 fn join(v: &[String]) -> String {
     if v.is_empty() {
-        "(none)".to_string()
+        tr!("(none)", "(нет)")
     } else {
         v.join(", ")
     }
@@ -586,6 +652,16 @@ mod tests {
             std::ffi::OsStr::new("/home/someone"),
             std::path::Path::new("/home/someone/photos"),
         )
+    }
+
+    #[test]
+    fn only_an_explicit_no_refuses() {
+        for no in ["n", "No\n", " нет", "Н", "т"] {
+            assert!(is_no(no), "{no:?}");
+        }
+        for yes in ["", "\n", "y", "yes", "да", "д"] {
+            assert!(!is_no(yes), "{yes:?}");
+        }
     }
 
     #[test]

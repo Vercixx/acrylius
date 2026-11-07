@@ -4,6 +4,7 @@
 # restart. Run from the repo root after `cargo build`.
 # State lives under /tmp: a Unix socket path has a hard ~108-byte limit.
 set -u
+export LC_ALL=C.UTF-8
 D=/tmp/acr; BIN="$PWD/target/debug"
 
 # Not the default port: an installed daemon holds 1971.

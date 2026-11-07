@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use acrylius_core::proto::ids::DeviceId;
 use acrylius_core::vocab::{Event, LocalCommand, UiEvent};
+use acryliusd::tr;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, mpsc};
@@ -118,28 +119,55 @@ fn render(e: &UiEvent) -> String {
             name,
             fingerprint,
             sas,
-        } => format!(
-            "{name} wants to pair\n  fingerprint {fingerprint}\n  code on both screens: {sas}\n  run `acryliusctl pair approve` if they match"
+        } => tr!(
+            "{name} wants to pair\n  fingerprint {fingerprint}\n  code on both screens: {sas}\n  run `acryliusctl pair approve` if they match",
+            "{name} хочет выполнить сопряжение\n  отпечаток {fingerprint}\n  код на обоих экранах: {sas}\n  если совпадает, выполните `acryliusctl pair approve`"
         ),
         UiEvent::Discovered {
             name,
             addr,
             pairing,
             ..
-        } => format!(
-            "found {name} at {addr}{}",
-            if *pairing { ", waiting to pair" } else { "" }
-        ),
-        UiEvent::Undiscovered { fingerprint } => format!("{fingerprint} has left the network"),
-        UiEvent::PairingComplete { peer, name } => format!("paired with {name} ({peer})"),
-        UiEvent::Revoked { peer } => format!("forgot {peer}"),
-        UiEvent::PairingFailed { reason } => format!("pairing failed: {reason}"),
-        UiEvent::PeerReachable { peer, name } => format!("{name} ({peer}) is reachable"),
-        UiEvent::PeerUnreachable { peer } => format!("{peer} is unreachable"),
-        UiEvent::Plugin { cap, ty, body, .. } => {
-            format!("{cap} {ty} ({} bytes)", body.len())
+        } => {
+            if *pairing {
+                tr!(
+                    "found {name} at {addr}, waiting to pair",
+                    "найдено {name} по адресу {addr}, ждёт сопряжения"
+                )
+            } else {
+                tr!("found {name} at {addr}", "найдено {name} по адресу {addr}")
+            }
         }
-        UiEvent::Error { code, detail, .. } => format!("error [{}]: {detail}", code.as_str()),
+        UiEvent::Undiscovered { fingerprint } => {
+            tr!(
+                "{fingerprint} has left the network",
+                "{fingerprint} покинуло сеть"
+            )
+        }
+        UiEvent::PairingComplete { peer, name } => {
+            tr!("paired with {name} ({peer})", "сопряжено с {name} ({peer})")
+        }
+        UiEvent::Revoked { peer } => tr!("forgot {peer}", "{peer} забыто"),
+        UiEvent::PairingFailed { reason } => {
+            tr!(
+                "pairing failed: {reason}",
+                "сопряжение не удалось: {reason}"
+            )
+        }
+        UiEvent::PeerReachable { peer, name } => {
+            tr!("{name} ({peer}) is reachable", "{name} ({peer}) доступно")
+        }
+        UiEvent::PeerUnreachable { peer } => tr!("{peer} is unreachable", "{peer} недоступно"),
+        UiEvent::Plugin { cap, ty, body, .. } => {
+            tr!("{cap} {ty} ({} bytes)", "{cap} {ty} ({} байт)", body.len())
+        }
+        UiEvent::Error { code, detail, .. } => {
+            tr!(
+                "error [{}]: {detail}",
+                "ошибка [{}]: {detail}",
+                code.as_str()
+            )
+        }
     }
 }
 
@@ -251,7 +279,7 @@ async fn handle_conn(stream: UnixStream, h: Handles) -> anyhow::Result<()> {
                         write(
                             &mut wr,
                             &Response::Error {
-                                message: "starting".into(),
+                                message: tr!("starting", "запускается"),
                             },
                         )
                         .await?;
@@ -348,7 +376,7 @@ async fn handle_conn(stream: UnixStream, h: Handles) -> anyhow::Result<()> {
                         write(
                             &mut wr,
                             &Response::Error {
-                                message: "timed out".into(),
+                                message: tr!("timed out", "время ожидания истекло"),
                             },
                         )
                         .await?;
@@ -369,7 +397,10 @@ async fn handle_conn(stream: UnixStream, h: Handles) -> anyhow::Result<()> {
                     write(
                         &mut wr,
                         &Response::Error {
-                            message: format!("{action:?} is not query, lock or unlock"),
+                            message: tr!(
+                                "{action:?} is not query, lock or unlock",
+                                "{action:?} — не query, lock или unlock"
+                            ),
                         },
                     )
                     .await?;
@@ -439,8 +470,10 @@ async fn handle_conn(stream: UnixStream, h: Handles) -> anyhow::Result<()> {
                     write(
                         &mut wr,
                         &Response::Error {
-                            message: "this machine has no download directory, so it sends nothing"
-                                .into(),
+                            message: tr!(
+                                "this machine has no download directory, so it sends nothing",
+                                "у этого компьютера нет папки загрузок, поэтому он ничего не отправляет"
+                            ),
                         },
                     )
                     .await?;
@@ -453,8 +486,9 @@ async fn handle_conn(stream: UnixStream, h: Handles) -> anyhow::Result<()> {
                     write(
                         &mut wr,
                         &Response::Error {
-                            message: format!(
+                            message: tr!(
                                 "{} is a relative path, and this daemon's directory is not yours",
+                                "{} — относительный путь, а рабочая папка демона не ваша",
                                 path.display()
                             ),
                         },
@@ -468,7 +502,7 @@ async fn handle_conn(stream: UnixStream, h: Handles) -> anyhow::Result<()> {
                         write(
                             &mut wr,
                             &Response::Error {
-                                message: format!("{} is not a file", path.display()),
+                                message: tr!("{} is not a file", "{} — не файл", path.display()),
                             },
                         )
                         .await?;
@@ -525,7 +559,7 @@ async fn handle_conn(stream: UnixStream, h: Handles) -> anyhow::Result<()> {
                     None => Vec::new(),
                 };
                 let text = if lines.is_empty() {
-                    "nothing offered".to_string()
+                    tr!("nothing offered", "предложений нет")
                 } else {
                     lines.join("\n")
                 };
@@ -537,7 +571,10 @@ async fn handle_conn(stream: UnixStream, h: Handles) -> anyhow::Result<()> {
                     write(
                         &mut wr,
                         &Response::Error {
-                            message: "this machine receives no files".into(),
+                            message: tr!(
+                                "this machine receives no files",
+                                "этот компьютер не принимает файлы"
+                            ),
                         },
                     )
                     .await?;
@@ -551,7 +588,10 @@ async fn handle_conn(stream: UnixStream, h: Handles) -> anyhow::Result<()> {
                     write(
                         &mut wr,
                         &Response::Error {
-                            message: format!("no offer numbered {transfer}"),
+                            message: tr!(
+                                "no offer numbered {transfer}",
+                                "нет предложения с номером {transfer}"
+                            ),
                         },
                     )
                     .await?;
@@ -676,7 +716,7 @@ async fn handle_conn(stream: UnixStream, h: Handles) -> anyhow::Result<()> {
                             write(
                                 &mut wr,
                                 &Response::Error {
-                                    message: "no pong".into(),
+                                    message: tr!("no pong", "ответа нет"),
                                 },
                             )
                             .await?;
@@ -786,7 +826,7 @@ async fn plugin_request(
             write(
                 wr,
                 &Response::Error {
-                    message: "peer unreachable".into(),
+                    message: tr!("peer unreachable", "устройство недоступно"),
                 },
             )
             .await
@@ -795,7 +835,7 @@ async fn plugin_request(
             write(
                 wr,
                 &Response::Error {
-                    message: "timed out".into(),
+                    message: tr!("timed out", "время ожидания истекло"),
                 },
             )
             .await
@@ -817,7 +857,7 @@ fn report(cap: &str, ty: &str, body: &[u8]) -> Report {
             },
             Err(_) => Report::Refused {
                 code: "unknown".to_string(),
-                message: "refused".to_string(),
+                message: tr!("refused", "отказано"),
             },
         };
     }

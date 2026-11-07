@@ -88,7 +88,7 @@ else
     "$BIN_DIR/acryliusd" config init | sed 's/^/  /'
 fi
 if CHECK="$("$BIN_DIR/acryliusd" config check 2>&1)"; then
-    echo "$CHECK" | grep -E '^  (files|NOTE)' | sed 's/^  /  /'
+    echo "$CHECK" | grep -E '^  (files|NOTE|файлы|ВНИМАНИЕ)' | sed 's/^  /  /'
 else
     warn "the config does not parse; the service will refuse to start. Run: acryliusd config check"
 fi

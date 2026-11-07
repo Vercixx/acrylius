@@ -3,6 +3,7 @@
 # M3 acceptance: tap-to-pair with six-digit confirmation; mostly checks the admission rules in PROTOCOL.md § 8.
 # Self-skipping (the phone half is a checklist). State under /tmp: Unix socket paths cap at ~108 bytes.
 set -u
+export LC_ALL=C.UTF-8
 D=/tmp/acr-m3; BIN="$PWD/target/debug"
 
 # Not the default port: an installed daemon holds 1971.

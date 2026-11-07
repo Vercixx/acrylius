@@ -238,26 +238,37 @@ impl Report {
     #[must_use]
     pub fn render(&self) -> String {
         match self {
-            Self::Refused { code, message } => format!("refused: {message} ({code})"),
+            Self::Refused { code, message } => {
+                crate::tr!(
+                    "refused: {message} ({code})",
+                    "отказано: {message} ({code})"
+                )
+            }
             Self::Session {
                 session_id,
                 kind,
                 locked,
-            } => format!(
+            } => crate::tr!(
                 "session {session_id} ({kind}) is {}",
-                if *locked { "locked" } else { "unlocked" }
+                "сеанс {session_id} ({kind}) {}",
+                lock_word(*locked)
             ),
             Self::SessionChanged {
                 session_id,
                 was_locked,
                 locked,
-            } => format!(
+            } => crate::tr!(
                 "session {session_id} was {} and is now {}",
-                if *was_locked { "locked" } else { "unlocked" },
-                if *locked { "locked" } else { "unlocked" }
+                "сеанс {session_id} был {}, теперь {}",
+                lock_word(*was_locked),
+                lock_word(*locked)
             ),
             Self::Clipboard { text } => text.clone(),
-            Self::Offer { ty, name, size } => format!("{ty} offers {name} ({})", human(*size)),
+            Self::Offer { ty, name, size } => crate::tr!(
+                "{ty} offers {name} ({})",
+                "{ty} предлагает {name} ({})",
+                human(*size)
+            ),
             Self::Transfer {
                 transfer,
                 ok,
@@ -265,11 +276,14 @@ impl Report {
             } => {
                 let n = short_transfer(*transfer);
                 if *ok {
-                    format!("transfer {n} finished")
+                    crate::tr!("transfer {n} finished", "передача {n} завершена")
                 } else if detail.is_empty() {
-                    format!("transfer {n} was refused")
+                    crate::tr!("transfer {n} was refused", "передача {n} отклонена")
                 } else {
-                    format!("transfer {n} failed: {detail}")
+                    crate::tr!(
+                        "transfer {n} failed: {detail}",
+                        "передача {n} не удалась: {detail}"
+                    )
                 }
             }
             Self::Media {
@@ -280,8 +294,11 @@ impl Report {
                 if players.is_empty() {
                     // Still worth reporting: it's a machine property, independent of playback.
                     return match system_volume {
-                        Some(v) => format!("nothing is playing (output volume {v}%)"),
-                        None => "nothing is playing".to_string(),
+                        Some(v) => crate::tr!(
+                            "nothing is playing (output volume {v}%)",
+                            "ничего не играет (громкость системы {v}%)"
+                        ),
+                        None => crate::tr!("nothing is playing", "ничего не играет"),
                     };
                 }
                 players
@@ -301,24 +318,30 @@ impl Report {
                             ));
                         }
                         if let Some(v) = p.volume_percent {
-                            line.push_str(&format!("  vol {v}%"));
+                            line.push_str(&crate::tr!("  vol {v}%", "  громк. {v}%"));
                         }
                         if !p.can_control {
-                            line.push_str("  (reports only)");
+                            line.push_str(&crate::tr!("  (reports only)", "  (только статус)"));
                         }
                         line
                     })
                     .chain(
                         // Separate from players: this is the machine's own volume.
-                        system_volume
-                            .map(|v| format!("  {:<12} {:<8} output volume {v}%", "system", "")),
+                        system_volume.map(|v| {
+                            crate::tr!(
+                                "  {:<12} {:<8} output volume {v}%",
+                                "  {:<12} {:<8} громкость системы {v}%",
+                                "system",
+                                ""
+                            )
+                        }),
                     )
                     .collect::<Vec<_>>()
                     .join("\n")
             }
             Self::Commands { commands } => {
                 if commands.is_empty() {
-                    return "no commands offered".to_string();
+                    return crate::tr!("no commands offered", "команд нет");
                 }
                 commands
                     .iter()
@@ -326,16 +349,24 @@ impl Report {
                     .collect::<Vec<_>>()
                     .join("\n")
             }
-            Self::Exited { code, truncated } => format!(
-                "exit {code}{}",
-                if *truncated {
-                    " (output truncated)"
+            Self::Exited { code, truncated } => {
+                let cut = if *truncated {
+                    crate::tr!(" (output truncated)", " (вывод обрезан)")
                 } else {
-                    ""
-                }
-            ),
-            Self::Opaque { ty, bytes } => format!("{ty} ({bytes} bytes)"),
+                    String::new()
+                };
+                crate::tr!("exit {code}{cut}", "код выхода {code}{cut}")
+            }
+            Self::Opaque { ty, bytes } => crate::tr!("{ty} ({bytes} bytes)", "{ty} ({bytes} байт)"),
         }
+    }
+}
+
+fn lock_word(locked: bool) -> String {
+    if locked {
+        crate::tr!("locked", "заблокирован")
+    } else {
+        crate::tr!("unlocked", "разблокирован")
     }
 }
 

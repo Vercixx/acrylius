@@ -2,3 +2,4 @@
 //! The daemon's other modules stay private to its binary.
 
 pub mod ipc;
+pub mod lang;

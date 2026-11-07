@@ -27,6 +27,7 @@ use acrylius_rt::effector::Effector;
 use acrylius_rt::store::{FileStore, Store};
 use acrylius_rt::tcp::TcpTransport;
 use acrylius_rt::{Runtime, transport::Transport};
+use acryliusd::tr;
 use clap::Parser;
 use tokio::sync::{Mutex, broadcast};
 
@@ -247,29 +248,43 @@ fn run_config_action(action: &ConfigAction, path: &std::path::Path) -> anyhow::R
 
         ConfigAction::Init => {
             if path.exists() {
-                println!("{} exists; left alone", path.display());
+                println!(
+                    "{}",
+                    tr!(
+                        "{} exists; left alone",
+                        "{} уже есть, не изменён",
+                        path.display()
+                    )
+                );
                 return Ok(());
             }
             if let Some(dir) = path.parent() {
                 std::fs::create_dir_all(dir)?;
             }
             std::fs::write(path, reconcile::commented_default(&reference))?;
-            println!("wrote {}", path.display());
+            println!("{}", tr!("wrote {}", "записан {}", path.display()));
         }
 
         ConfigAction::Update => {
             if !path.exists() {
-                println!("no config at {}; nothing to update", path.display());
+                println!(
+                    "{}",
+                    tr!(
+                        "no config at {}; nothing to update",
+                        "конфига {} нет, обновлять нечего",
+                        path.display()
+                    )
+                );
                 return Ok(());
             }
             let added = reconcile::update_file(path, &reference)?;
             if added.is_empty() {
-                println!("{} is up to date", path.display());
+                println!("{}", tr!("{} is up to date", "{} актуален", path.display()));
             } else {
-                println!("added to {}:", path.display());
+                println!("{}", tr!("added to {}:", "добавлено в {}:", path.display()));
                 for (table, keys) in reconcile::describe(&added) {
                     let where_ = if table.is_empty() {
-                        "(top level)".to_string()
+                        tr!("(top level)", "(верхний уровень)")
                     } else {
                         format!("[{table}]")
                     };
@@ -280,7 +295,13 @@ fn run_config_action(action: &ConfigAction, path: &std::path::Path) -> anyhow::R
             let text = std::fs::read_to_string(path)?;
             let unknown = reconcile::unknown_keys(&text, &reference);
             if !unknown.is_empty() {
-                println!("settings this version does not know about, left in place:");
+                println!(
+                    "{}",
+                    tr!(
+                        "settings this version does not know about, left in place:",
+                        "настройки, неизвестные этой версии, оставлены как есть:"
+                    )
+                );
                 for key in unknown {
                     println!("  {key}");
                 }
@@ -289,26 +310,45 @@ fn run_config_action(action: &ConfigAction, path: &std::path::Path) -> anyhow::R
 
         ConfigAction::Check => {
             let cfg = config::Config::load(path)?;
-            println!("{} parses", path.display());
-            println!("  port       {}", cfg.port);
-            println!("  commands   {}", cfg.commands.len());
             println!(
-                "  clipboard  send {}, receive {}",
-                cfg.clipboard.send, cfg.clipboard.receive
+                "{}",
+                tr!("{} parses", "{} разобран без ошибок", path.display())
+            );
+            println!("{}", tr!("  port       {}", "  порт       {}", cfg.port));
+            println!(
+                "{}",
+                tr!("  commands   {}", "  команды    {}", cfg.commands.len())
+            );
+            println!(
+                "{}",
+                tr!(
+                    "  clipboard  send {}, receive {}",
+                    "  буфер      отправка {}, приём {}",
+                    cfg.clipboard.send,
+                    cfg.clipboard.receive
+                )
             );
             let session_override =
                 !cfg.session.lock_command.is_empty() || !cfg.session.unlock_command.is_empty();
+            let session = if session_override {
+                tr!(
+                    "  session    using configured commands",
+                    "  сеанс      заданные команды"
+                )
+            } else {
+                tr!("  session    using logind", "  сеанс      через logind")
+            };
+            println!("{session}");
             println!(
-                "  session    {}",
-                if session_override {
-                    "using configured commands"
-                } else {
-                    "using logind"
-                }
+                "{}",
+                tr!(
+                    "  files      land in {}",
+                    "  файлы      сохраняются в {}",
+                    cfg.share.directory
+                )
             );
-            println!("  files      land in {}", cfg.share.directory);
             if let Some(note) = config::stale_download_dir(&cfg.share.directory) {
-                println!("  NOTE       {note}");
+                println!("{}", tr!("  NOTE       {note}", "  ВНИМАНИЕ   {note}"));
             }
         }
     }

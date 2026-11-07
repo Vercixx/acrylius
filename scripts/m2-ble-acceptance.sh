@@ -4,6 +4,7 @@
 # registration, and advertised UUIDs; the half needing a phone is a checklist.
 # Self-skipping: a machine with no Bluetooth reports what it lacks, not a failure.
 set -u
+export LC_ALL=C.UTF-8
 D=/tmp/acr-m2; BIN="$PWD/target/debug"
 PORT=19731
 ADAPTER=/org/bluez/hci0

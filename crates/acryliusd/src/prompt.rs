@@ -9,6 +9,7 @@ use std::sync::Arc;
 use acrylius_core::plugins::share;
 use acrylius_core::vocab::{Event, LocalCommand, TransferId};
 use acrylius_linux::notify::{Button, Notifier, Pressed};
+use acryliusd::tr;
 use tokio::sync::{Mutex, mpsc};
 
 use crate::files::FileBulk;
@@ -76,22 +77,34 @@ impl Prompter {
             format!("{sas}\n{fingerprint}")
         } else {
             // No buttons on this desktop; say what to type instead.
-            format!("{sas}\n{fingerprint}\nRun: acryliusctl pair approve")
+            tr!(
+                "{sas}\n{fingerprint}\nRun: acryliusctl pair approve",
+                "{sas}\n{fingerprint}\nВыполните: acryliusctl pair approve"
+            )
         };
+        let (matching, differing) = (
+            tr!("They match", "Совпадают"),
+            tr!("They don't", "Не совпадают"),
+        );
         let buttons = [
             Button {
                 key: MATCH,
-                label: "They match",
+                label: &matching,
             },
             Button {
                 key: DIFFER,
-                label: "They don't",
+                label: &differing,
             },
         ];
         // Timeout zero: stays until answered, so reading the digits off a phone doesn't race a timeout.
         if let Some(id) = self
             .notifier
-            .show(&format!("{name} wants to pair"), &body, &buttons, 0)
+            .show(
+                &tr!("{name} wants to pair", "{name} хочет выполнить сопряжение"),
+                &body,
+                &buttons,
+                0,
+            )
             .await
         {
             *self.pairing.lock().await = Some(id);
@@ -111,27 +124,34 @@ impl Prompter {
             format!("{} · {}", offer.name, human(offer.size))
         } else {
             // No buttons here; say what to type instead.
-            format!(
+            tr!(
                 "{} · {}\nRun: acryliusctl file accept {}",
+                "{} · {}\nВыполните: acryliusctl file accept {}",
                 offer.name,
                 human(offer.size),
                 offer.transfer
             )
         };
+        let (accept, deny) = (tr!("Accept", "Принять"), tr!("Deny", "Отклонить"));
         let buttons = [
             Button {
                 key: ACCEPT,
-                label: "Accept",
+                label: &accept,
             },
             Button {
                 key: REJECT,
-                label: "Deny",
+                label: &deny,
             },
         ];
         // Timeout zero: stays until answered, since the sender is still waiting either way.
         let Some(id) = self
             .notifier
-            .show(&format!("{from} wants to send a file"), &body, &buttons, 0)
+            .show(
+                &tr!("{from} wants to send a file", "{from} хочет отправить файл"),
+                &body,
+                &buttons,
+                0,
+            )
             .await
         else {
             return;
@@ -166,7 +186,12 @@ impl Prompter {
             if !ok {
                 let reason = if detail.is_empty() { "" } else { detail };
                 self.notifier
-                    .show("A file did not arrive", reason, &[], 8000)
+                    .show(
+                        &tr!("A file did not arrive", "Файл не получен"),
+                        reason,
+                        &[],
+                        8000,
+                    )
                     .await;
             }
             return;
@@ -176,15 +201,16 @@ impl Prompter {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
+        let show = tr!("Show", "Показать");
         let buttons = [Button {
             key: SHOW,
-            label: "Show",
+            label: &show,
         }];
         // Full path in the body: the point is helping someone find the file; the button is just a shortcut.
         if let Some(id) = self
             .notifier
             .show(
-                &format!("Received {name}"),
+                &tr!("Received {name}", "Получен {name}"),
                 &path.to_string_lossy(),
                 &buttons,
                 12_000,
